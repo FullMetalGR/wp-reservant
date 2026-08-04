@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<ruleset name="Reservant">
+  <file>src</file>
+  <arg name="extensions" value="php"/>
+  <arg value="sp"/>
+  <rule ref="WordPress-Extra">
+    <exclude name="WordPress.Files.FileName"/>
+    <exclude name="WordPress.NamingConventions.ValidVariableName"/>
+    <!-- PSR-4 codebase: camelCase method names are the project-wide convention (see AGENTS.md code style); WPCS snake_case method sniff intentionally disabled. -->
+    <exclude name="WordPress.NamingConventions.ValidFunctionName.MethodNameInvalid"/>
+    <exclude name="Universal.Files.SeparateFunctionsFromOO"/>
+    <exclude name="Squiz.Commenting"/>
+    <exclude name="Generic.Commenting"/>
+    <exclude name="PEAR.NamingConventions"/>
+  </rule>
+  <!-- AGENTS.md section 7 mandates slash-namespaced hooks (reservant/booking/held). Keep the sniff, teach it the delimiter. -->
+  <rule ref="WordPress.NamingConventions.ValidHookName">
+    <properties>
+      <property name="additionalWordDelimiters" value="/"/>
+    </properties>
+  </rule>
+</ruleset>

@@ -1,0 +1,11 @@
+{
+  "name": "reservant",
+  "private": true,
+  "devDependencies": {
+    "@wordpress/env": "^10.0",
+    "fallow": "^3.14.0"
+  },
+  "scripts": {
+    "wp-env": "wp-env"
+  }
+}

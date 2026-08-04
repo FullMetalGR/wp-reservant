@@ -1,0 +1,48 @@
+name: CI
+on:
+  push: { branches: [ main ] }
+  pull_request:
+
+jobs:
+  static-and-unit:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix: { php: [ '8.1', '8.3' ] }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with: { php-version: '${{ matrix.php }}', coverage: none }
+      - run: composer install --no-progress
+      - run: composer lint
+      - run: composer stan
+      - run: composer test:unit
+
+  fallow:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+      - run: npm ci
+      - run: npx fallow --ci
+
+  integration-and-concurrency:
+    runs-on: ubuntu-latest
+    # wp-env names the plugin mount after the host directory basename, and the
+    # test scripts address wp-content/plugins/reservant. Check out to a fixed
+    # "reservant" path so CI matches local development regardless of repo name.
+    defaults:
+      run: { working-directory: reservant }
+    steps:
+      - uses: actions/checkout@v4
+        with: { path: reservant }
+      - uses: shivammathur/setup-php@v2
+        with: { php-version: '8.1', coverage: none }
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+      - run: composer install --no-progress
+      - run: npm ci
+      - run: npx wp-env start
+      - run: composer test:integration
+      - run: sudo apt-get install -y jq && chmod +x bin/run-concurrency.sh && ./bin/run-concurrency.sh

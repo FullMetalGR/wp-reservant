@@ -1,0 +1,15 @@
+includes:
+    - vendor/szepeviktor/phpstan-wordpress/extension.neon
+parameters:
+    level: 6
+    paths:
+        - src
+    scanFiles:
+        - vendor/php-stubs/wordpress-stubs/wordpress-stubs.php
+        # WP-CLI is the runtime that loads WordPress, not a dependency of this plugin, so no
+        # published stub set covers it. See the file header.
+        - tests/stubs/wp-cli.php
+    # The stub must define WP_CLI for the class to resolve; whether it is really defined is a
+    # runtime question, so the `defined() && WP_CLI` guard must stay analysable in both directions.
+    dynamicConstantNames:
+        - WP_CLI
