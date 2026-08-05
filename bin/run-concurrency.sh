@@ -86,7 +86,7 @@ START=$(date -u -d '+21 days' +%Y-%m-%d)' 10:00:00'
 
 echo "fixture: cut=$CUT colour=$COLOUR staff_a=$STAFF_A staff_b=$STAFF_B grid_occ=$GRID_OCC seat=$SEAT start=$START" >&2
 
-php bin/concurrency-holds.php  "$BASE" "$CUT" "$STAFF_A" "$START"
+php bin/concurrency-holds.php  "$BASE" "$CUT" "$STAFF_A" "$START" "$CLI"
 php bin/concurrency-chains.php "$BASE" "$CUT" "$COLOUR" "$STAFF_A" "$STAFF_B" "$START"
 php bin/concurrency-seats.php  "$BASE" "$GRID_OCC" "$SEAT"
 

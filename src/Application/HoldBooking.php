@@ -35,6 +35,12 @@ use Reservant\Settings;
  * the advisory availability endpoint must be refused just the same. Off-grid starts, spans outside
  * the chosen resource's working hours, inactive services or staff, starts inside the lead window or
  * beyond the horizon, and seat ids that name aisles or foreign maps all land as `SlotConflict`.
+ *
+ * `HoldRequest::$admin` (AGENTS.md Task 6) is the owner booking a slot by hand: it skips the
+ * lead-time and horizon refusals only and lands the container straight on `confirmed` with no
+ * hold at all. Every other refusal above, and the entire locking/reap/re-validate/insert/bumpRev
+ * sequence, is unchanged - the flag decides what is checked and what status is written, never how
+ * the write is serialised.
  */
 final class HoldBooking {
 
@@ -86,7 +92,7 @@ final class HoldBooking {
 		if ( null !== $request->appointment ) {
 			// Pure-input refusals, cheapest first: they read nothing contended, so they need no
 			// lock and should not pay for one. Everything that reads state runs in the transaction.
-			$this->validateChainWindow( $request->appointment, $plan, $nowUtc );
+			$this->validateChainWindow( $request->appointment, $plan, $nowUtc, $request->admin );
 		}
 
 		/** @var list<array<string, mixed>> $items */
@@ -97,22 +103,29 @@ final class HoldBooking {
 		$planKeys = $plan['keys'];
 		$keys     = LockKey::sorted( $planKeys );
 
-		$status                = true === $plan['requires_approval'] ? BookingStatus::AwaitingApproval : BookingStatus::Pending;
-		$holdClass             = HoldClass::forStatus( $status );
+		// Admin-mode manual booking (AGENTS.md Task 6): the owner is the approval, so the container
+		// lands straight on `confirmed` with no hold at all, whatever the service would otherwise
+		// have demanded. Every other refusal below (overlap, capacity, seats, opening hours) is
+		// still enforced unchanged - only the window check above and this status/hold selection
+		// change shape for it.
+		$status                = $request->admin
+			? BookingStatus::Confirmed
+			: ( true === $plan['requires_approval'] ? BookingStatus::AwaitingApproval : BookingStatus::Pending );
+		$holdClass             = $request->admin ? null : HoldClass::forStatus( $status );
 		list( $secret, $hash ) = ManageToken::issue();
 
 		$booking = array(
 			'uuid'              => wp_generate_uuid4(),
 			'status'            => $status->value,
 			'hold_class'        => null === $holdClass ? null : $holdClass->value,
-			'hold_expires_at'   => $this->holdExpiresAt( $status, $nowUtc, (int) $plan['approval_hold_hours'] ),
+			'hold_expires_at'   => $request->admin ? null : $this->holdExpiresAt( $status, $nowUtc, (int) $plan['approval_hold_hours'] ),
 			'customer_name'     => $request->customer->name,
 			'customer_email'    => $request->customer->email,
 			'customer_phone'    => $request->customer->phone,
 			'total_minor'       => (int) $plan['total_minor'],
 			'currency'          => (string) $plan['currency'],
 			'payment_mode'      => (string) $plan['payment_mode'],
-			'requires_approval' => true === $plan['requires_approval'] ? 1 : 0,
+			'requires_approval' => ( ! $request->admin && true === $plan['requires_approval'] ) ? 1 : 0,
 			'manage_token_hash' => $hash,
 		);
 
@@ -127,7 +140,7 @@ final class HoldBooking {
 				$reaped = $this->reap( $keys );
 
 				if ( null === $request->appointment ) {
-					$this->validateEvent( $request->event, $nowUtc );
+					$this->validateEvent( $request->event, $nowUtc, $request->admin );
 				} else {
 					$items = $this->assignResources(
 						$items,
@@ -147,7 +160,9 @@ final class HoldBooking {
 				}
 
 				$this->resourceDays->bumpRev( $keys );
-				$this->audit->record( $bookingId, 'customer', 'held' );
+				// Admin-mode manual booking gets its own audit action - it never went through the
+				// ordinary customer hold path, and the audit trail should say so.
+				$this->audit->record( $bookingId, $request->admin ? 'admin' : 'customer', $request->admin ? 'admin_create' : 'held' );
 
 				/** @var array<string, mixed> $stored */
 				$stored = $this->bookings->findByUuid( (string) $booking['uuid'] );
@@ -161,8 +176,15 @@ final class HoldBooking {
 		foreach ( $result['reaped'] as $expired ) {
 			do_action( 'reservant/hold/expired', BookingSnapshot::fromArray( $expired ) );
 		}
-		$snapshot = $result['booking'];
-		do_action( 'reservant/booking/held', BookingSnapshot::fromArray( $snapshot ) );
+		$snapshot        = $result['booking'];
+		$bookingSnapshot = BookingSnapshot::fromArray( $snapshot );
+		do_action( 'reservant/booking/held', $bookingSnapshot );
+		if ( $request->admin ) {
+			// Admin-mode manual booking lands `confirmed` with no hold in between: listeners that
+			// only know the ordinary held -> (approve|confirm) lifecycle still see both events, in
+			// order, rather than a `confirmed` snapshot they never saw held.
+			do_action( 'reservant/booking/confirmed', $bookingSnapshot );
+		}
 		$snapshot['manage_token'] = $secret;
 		return $snapshot;
 	}
@@ -394,8 +416,11 @@ final class HoldBooking {
 	 * calendar. Lead time and horizon do: they answer "when may this be registered for", which is
 	 * as much an event question as an appointment one. Because lead time is never negative, this
 	 * is also what stops a seminar that has already started from being bookable.
+	 *
+	 * `$admin` (AGENTS.md Task 6) skips that window check only - capacity and seat re-validation
+	 * below still run unconditionally, exactly as for a customer request.
 	 */
-	private function validateEvent( EventRequest $event, \DateTimeImmutable $nowUtc ): void {
+	private function validateEvent( EventRequest $event, \DateTimeImmutable $nowUtc, bool $admin ): void {
 		$occurrence = $this->occurrences->find( $event->occurrenceId );
 		if ( null === $occurrence || 'active' !== $occurrence['status'] ) {
 			throw new SlotConflict( 'not_found' );
@@ -408,7 +433,8 @@ final class HoldBooking {
 			new \DateTimeImmutable( (string) $occurrence['start_utc'], new \DateTimeZone( 'UTC' ) ),
 			self::anchor( $nowUtc ),
 			(int) $service['lead_time_min'],
-			(int) $service['horizon_days']
+			(int) $service['horizon_days'],
+			$admin
 		);
 		$this->validateSeatSelection( $event, $service );
 
@@ -456,9 +482,12 @@ final class HoldBooking {
 	/**
 	 * Grid, lead time and horizon - the checks that need no state at all.
 	 *
+	 * `$admin` (AGENTS.md Task 6) skips the lead-time/horizon arm only; an off-grid start is still
+	 * `bad_time` for an admin-mode request exactly as for a customer one.
+	 *
 	 * @param array<string, mixed> $plan
 	 */
-	private function validateChainWindow( AppointmentRequest $appointment, array $plan, \DateTimeImmutable $nowUtc ): void {
+	private function validateChainWindow( AppointmentRequest $appointment, array $plan, \DateTimeImmutable $nowUtc, bool $admin ): void {
 		$start = $appointment->startUtc->setTimezone( new \DateTimeZone( 'UTC' ) );
 
 		$secondsIntoDay = $start->getTimestamp() - $start->setTime( 0, 0 )->getTimestamp();
@@ -466,15 +495,22 @@ final class HoldBooking {
 			throw new SlotConflict( 'bad_time' );
 		}
 
-		self::assertWithinWindow( $start, self::anchor( $nowUtc ), (int) $plan['lead_time_min'], (int) $plan['horizon_days'] );
+		self::assertWithinWindow( $start, self::anchor( $nowUtc ), (int) $plan['lead_time_min'], (int) $plan['horizon_days'], $admin );
 	}
 
 	/**
 	 * The booking window: late enough to respect the notice period, near enough to be on sale.
 	 *
+	 * @param bool $admin Admin-mode manual booking (AGENTS.md Task 6): the owner is the approval,
+	 *                    so this whole check is skipped - never negative time travel, just no
+	 *                    notice-period or horizon refusal for a booking the owner is entering by
+	 *                    hand.
 	 * @throws SlotConflict `lead_time` or `horizon`.
 	 */
-	private static function assertWithinWindow( \DateTimeImmutable $start, \DateTimeImmutable $anchor, int $leadTimeMin, int $horizonDays ): void {
+	private static function assertWithinWindow( \DateTimeImmutable $start, \DateTimeImmutable $anchor, int $leadTimeMin, int $horizonDays, bool $admin = false ): void {
+		if ( $admin ) {
+			return;
+		}
 		if ( $start < $anchor->add( new \DateInterval( 'PT' . max( 0, $leadTimeMin ) . 'M' ) ) ) {
 			throw new SlotConflict( 'lead_time' );
 		}
