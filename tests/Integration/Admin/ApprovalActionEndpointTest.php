@@ -52,8 +52,8 @@ final class ApprovalActionEndpointTest extends ReservantTestCase {
 	}
 
 	public function tear_down(): void {
-		unset( $_GET['uuid'], $_GET['decision'], $_GET['exp'], $_GET['sig'] );
-		unset( $_POST['uuid'], $_POST['decision'], $_POST['exp'], $_POST['sig'], $_POST['reason'] );
+		$_GET  = array();
+		$_POST = array();
 		unset( $_SERVER['REQUEST_METHOD'] );
 		parent::tear_down();
 	}
@@ -92,6 +92,55 @@ final class ApprovalActionEndpointTest extends ReservantTestCase {
 			$_GET  = $fields;
 			$_POST = array();
 		}
+	}
+
+	public function testRegisterWiresBothAdminPostHooks(): void {
+		( new ApprovalActionEndpoint() )->register();
+
+		self::assertNotFalse(
+			has_action( 'admin_post_' . ApprovalActionEndpoint::ACTION ),
+			'a logged-in admin who clicks the link must still be routed to handle()'
+		);
+		self::assertNotFalse(
+			has_action( 'admin_post_nopriv_' . ApprovalActionEndpoint::ACTION ),
+			'the common case - no WordPress session at all - must be routed to handle()'
+		);
+	}
+
+	/**
+	 * Proves `url()` and `handle()` agree end to end on every query param name (`uuid`, `decision`,
+	 * `exp`, `sig`) - not just that each half unit-tests in isolation.
+	 */
+	public function testUrlRoundTripsIntoAWorkingConfirmLink(): void {
+		global $wpdb;
+		$booking   = $this->holdAwaitingApproval();
+		$updatedAt = (string) ( new BookingRepository( $wpdb ) )->findByUuid( $booking['uuid'] )['updated_at'];
+		$exp       = $this->farFutureExp();
+
+		$url = ApprovalActionEndpoint::url( $booking['uuid'], 'approve', $updatedAt, $exp );
+
+		$query = array();
+		$parts = wp_parse_url( $url );
+		parse_str( (string) ( $parts['query'] ?? '' ), $query );
+
+		self::assertSame( ApprovalActionEndpoint::ACTION, $query['action'] ?? null );
+		self::assertSame( $booking['uuid'], $query['uuid'] ?? null );
+		self::assertSame( 'approve', $query['decision'] ?? null );
+
+		$_SERVER['REQUEST_METHOD'] = 'GET';
+		$_GET                      = $query;
+		$_POST                     = array();
+
+		ob_start();
+		( new ApprovalActionEndpoint() )->handle();
+		$output = (string) ob_get_clean();
+
+		self::assertStringContainsString( '<form', $output );
+		self::assertStringContainsString( $query['sig'], $output );
+		self::assertStringContainsString( 'Consultation', $output );
+
+		// A GET round trip must never change state.
+		self::assertSame( 'awaiting_approval', ( new BookingRepository( $wpdb ) )->findByUuid( $booking['uuid'] )['status'] );
 	}
 
 	public function testGetRendersConfirmFormWithSigEchoed(): void {
@@ -209,5 +258,54 @@ final class ApprovalActionEndpointTest extends ReservantTestCase {
 
 		// Never touched.
 		self::assertSame( 'awaiting_approval', ( new BookingRepository( $wpdb ) )->findByUuid( $booking['uuid'] )['status'] );
+	}
+
+	/**
+	 * An unexpected `\RuntimeException` (an infrastructure failure, or a future use-case refusal
+	 * reason this endpoint does not yet classify) must not be folded into the benign "no longer
+	 * valid" page - that would tell the owner there is nothing left to do when in fact nothing
+	 * has been retried. Forced here by hooking `reservant/booking/approved`, which `ApproveBooking`
+	 * fires AFTER its own transaction has already committed - throwing from that listener yields a
+	 * genuine, unclassified `\RuntimeException` reaching the endpoint's catch block without
+	 * touching Task 5's code at all.
+	 */
+	public function testUnknownRuntimeExceptionFiresErrorActionAndRendersGenericFailure(): void {
+		global $wpdb;
+		$booking   = $this->holdAwaitingApproval();
+		$updatedAt = (string) ( new BookingRepository( $wpdb ) )->findByUuid( $booking['uuid'] )['updated_at'];
+		$exp       = $this->farFutureExp();
+		$sig       = SignedAction::sign( wp_salt( 'auth' ), $booking['uuid'], 'approve', $exp, $updatedAt );
+
+		$this->setRequest( 'POST', $booking['uuid'], 'approve', $exp, $sig );
+
+		$blowUp = static function (): void {
+			throw new \RuntimeException( 'unexpected_test_failure' );
+		};
+		add_action( 'reservant/booking/approved', $blowUp );
+
+		$errors   = array();
+		$listener = static function ( \Throwable $e ) use ( &$errors ): void {
+			$errors[] = $e;
+		};
+		add_action( 'reservant/error', $listener );
+
+		ob_start();
+		( new ApprovalActionEndpoint() )->handle();
+		$output = (string) ob_get_clean();
+
+		remove_action( 'reservant/booking/approved', $blowUp );
+		remove_action( 'reservant/error', $listener );
+
+		self::assertCount( 1, $errors, 'the unknown RuntimeException must fire reservant/error' );
+		self::assertInstanceOf( \RuntimeException::class, $errors[0] );
+		self::assertSame( 'unexpected_test_failure', $errors[0]->getMessage() );
+
+		self::assertStringNotContainsString( 'no longer valid', $output, 'an unknown failure is not a benign replay' );
+		self::assertStringContainsString( 'Something went wrong', $output );
+		self::assertStringNotContainsString( $sig, $output, 'the signature must never be echoed back on a failure page' );
+
+		// The real approval had already committed before the injected failure fired - proof this
+		// is a genuinely different scenario from a stale replay, where nothing changes at all.
+		self::assertSame( 'confirmed', ( new BookingRepository( $wpdb ) )->findByUuid( $booking['uuid'] )['status'] );
 	}
 }

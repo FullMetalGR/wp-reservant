@@ -32,6 +32,14 @@ final class ApprovalActionEndpoint {
 
 	private const DECISIONS = array( 'approve', 'reject' );
 
+	/**
+	 * The three reasons `ApproveBooking`/`RejectBooking` refuse a still-pending booking
+	 * (AGENTS.md "Approval queue"; see also `Rest\Errors::KNOWN_REASONS`) - a stale replay, a
+	 * rival decision that landed first, or a row that vanished from under the lock. Every other
+	 * `\RuntimeException` message is unexpected and must not be mistaken for one of these.
+	 */
+	private const BENIGN_REFUSAL_REASONS = array( 'not_approvable', 'not_found', 'stale_state' );
+
 	public function register(): void {
 		add_action( 'admin_post_nopriv_' . self::ACTION, array( $this, 'handle' ) );
 		add_action( 'admin_post_' . self::ACTION, array( $this, 'handle' ) );
@@ -108,13 +116,28 @@ final class ApprovalActionEndpoint {
 				$message = __( 'Booking rejected.', 'reservant' );
 			}
 		} catch ( \RuntimeException $e ) {
-			// A rival decision landed between the signature check above and this call (TOCTOU) -
-			// the use case's own re-validation under lock refused it. Same outcome as a replay.
-			$this->renderStale();
+			if ( $this->isBenignRefusal( $e ) ) {
+				// A rival decision landed between the signature check above and this call
+				// (TOCTOU) - the use case's own re-validation under lock refused it for one of
+				// its known, expected reasons. Same outcome as a replay.
+				$this->renderStale();
+				return;
+			}
+			// Anything else is an infrastructure failure (a DB error, or a future use-case
+			// refusal reason this endpoint does not yet know about) - never silently fold into
+			// the benign "already handled" page, where the owner would have no reason to retry.
+			// Logged on the same channel Rest\Errors::failure() uses; never the signature, never
+			// customer details - just enough to find the row again and the failure itself.
+			do_action( 'reservant/error', $e, $uuid );
+			$this->renderFailure();
 			return;
 		}
 
 		$this->renderResult( $message );
+	}
+
+	private function isBenignRefusal( \RuntimeException $e ): bool {
+		return in_array( $e->getMessage(), self::BENIGN_REFUSAL_REASONS, true );
 	}
 
 	/**
@@ -212,6 +235,18 @@ final class ApprovalActionEndpoint {
 		$this->header( __( 'Done', 'reservant' ) );
 		echo '<h1>' . esc_html( get_bloginfo( 'name' ) ) . '</h1>';
 		echo '<p>' . esc_html( $message ) . '</p>';
+		$this->footer();
+	}
+
+	/**
+	 * The generic-failure page for an unexpected `\RuntimeException` - distinct from
+	 * `renderStale()` on purpose: "no longer valid" tells the owner there is nothing left to do,
+	 * this tells them the opposite - the booking was NOT changed and the action is worth retrying.
+	 */
+	private function renderFailure(): void {
+		$this->header( __( 'Something went wrong', 'reservant' ) );
+		echo '<h1>' . esc_html( get_bloginfo( 'name' ) ) . '</h1>';
+		echo '<p>' . esc_html__( 'Something went wrong; the booking was not changed. Please try again or log in.', 'reservant' ) . '</p>';
 		$this->footer();
 	}
 
