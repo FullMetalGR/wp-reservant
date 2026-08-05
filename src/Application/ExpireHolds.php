@@ -3,6 +3,7 @@ declare( strict_types=1 );
 
 namespace Reservant\Application;
 
+use Reservant\Application\Dto\BookingSnapshot;
 use Reservant\Domain\Enum\BookingStatus;
 use Reservant\Infrastructure\Db\AuditLog;
 use Reservant\Infrastructure\Db\BookingRepository;
@@ -54,7 +55,7 @@ final class ExpireHolds {
 				continue;
 			}
 			++$processed;
-			do_action( 'reservant/hold/expired', $snapshot );
+			do_action( 'reservant/hold/expired', BookingSnapshot::fromArray( $snapshot ) );
 		}
 		return $processed;
 	}

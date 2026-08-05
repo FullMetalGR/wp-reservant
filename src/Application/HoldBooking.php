@@ -4,6 +4,7 @@ declare( strict_types=1 );
 namespace Reservant\Application;
 
 use Reservant\Application\Dto\AppointmentRequest;
+use Reservant\Application\Dto\BookingSnapshot;
 use Reservant\Application\Dto\EventRequest;
 use Reservant\Application\Dto\HoldRequest;
 use Reservant\Domain\Availability\RuleExpander;
@@ -158,10 +159,10 @@ final class HoldBooking {
 		);
 
 		foreach ( $result['reaped'] as $expired ) {
-			do_action( 'reservant/hold/expired', $expired );
+			do_action( 'reservant/hold/expired', BookingSnapshot::fromArray( $expired ) );
 		}
 		$snapshot = $result['booking'];
-		do_action( 'reservant/booking/held', $snapshot );
+		do_action( 'reservant/booking/held', BookingSnapshot::fromArray( $snapshot ) );
 		$snapshot['manage_token'] = $secret;
 		return $snapshot;
 	}
