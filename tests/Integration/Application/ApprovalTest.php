@@ -97,20 +97,23 @@ final class ApprovalTest extends ReservantTestCase {
 
 	public function testApproveConfirmsAndAudits(): void {
 		global $wpdb;
-		$booking = $this->holdAwaitingApproval();
+		$booking    = $this->holdAwaitingApproval();
+		$adminUser  = self::factory()->user->create( array( 'role' => 'administrator' ) );
 
 		$notified = array();
 		$listener = static function ( BookingSnapshot $snapshot ) use ( &$notified ): void {
 			$notified[] = $snapshot;
 		};
 		add_action( 'reservant/booking/approved', $listener );
-		$approved = ApproveBooking::make( $wpdb )->execute( $booking['uuid'], $this->utc( 0, '01:00' ), '7' );
+		// `$actor` ('admin') is the free-form audit label; `$adminUser` is the WP user id that
+		// lands in the BIGINT `approved_by` column - the two are deliberately different shapes.
+		$approved = ApproveBooking::make( $wpdb )->execute( $booking['uuid'], $this->utc( 0, '01:00' ), 'admin', $adminUser );
 		remove_action( 'reservant/booking/approved', $listener );
 
 		self::assertSame( 'confirmed', $approved['status'] );
 		self::assertNull( $approved['hold_class'] );
 		self::assertNull( $approved['hold_expires_at'] );
-		self::assertSame( 7, (int) ( new BookingRepository( $wpdb ) )->findByUuid( $booking['uuid'] )['approved_by'] );
+		self::assertSame( $adminUser, (int) ( new BookingRepository( $wpdb ) )->findByUuid( $booking['uuid'] )['approved_by'] );
 
 		self::assertCount( 1, $notified );
 		self::assertSame( $booking['uuid'], $notified[0]->uuid );
@@ -122,7 +125,34 @@ final class ApprovalTest extends ReservantTestCase {
 				$wpdb->prepare(
 					"SELECT COUNT(*) FROM {$wpdb->prefix}reservant_audit_log a
 					 JOIN {$wpdb->prefix}reservant_bookings b ON b.id = a.booking_id
-					 WHERE b.uuid = %s AND a.actor = '7' AND a.action = 'approve'", // phpcs:ignore WordPress.DB.PreparedSQL
+					 WHERE b.uuid = %s AND a.actor = 'admin' AND a.action = 'approve'", // phpcs:ignore WordPress.DB.PreparedSQL
+					$booking['uuid']
+				)
+			)
+		);
+	}
+
+	/**
+	 * A system/signed-link approval has no WP user behind it: `$actorUserId` is omitted, so the
+	 * BIGINT `approved_by` column is left a real SQL NULL rather than coerced from the free-form
+	 * `$actor` label - `approved_by` is a FK, never the audit text.
+	 */
+	public function testApproveWithoutActorUserIdLeavesApprovedByNull(): void {
+		global $wpdb;
+		$booking = $this->holdAwaitingApproval();
+
+		$approved = ApproveBooking::make( $wpdb )->execute( $booking['uuid'], $this->utc( 0, '01:00' ), 'signed-link' );
+
+		self::assertSame( 'confirmed', $approved['status'] );
+		self::assertNull( ( new BookingRepository( $wpdb ) )->findByUuid( $booking['uuid'] )['approved_by'] );
+
+		self::assertSame(
+			'1',
+			$wpdb->get_var(
+				$wpdb->prepare(
+					"SELECT COUNT(*) FROM {$wpdb->prefix}reservant_audit_log a
+					 JOIN {$wpdb->prefix}reservant_bookings b ON b.id = a.booking_id
+					 WHERE b.uuid = %s AND a.actor = 'signed-link' AND a.action = 'approve'", // phpcs:ignore WordPress.DB.PreparedSQL
 					$booking['uuid']
 				)
 			)

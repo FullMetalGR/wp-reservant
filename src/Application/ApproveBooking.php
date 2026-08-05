@@ -26,8 +26,16 @@ final class ApproveBooking {
 		return new self( new TransactionRunner( $db ), new BookingRepository( $db ), new AuditLog( $db ) );
 	}
 
-	/** @return array<string, mixed> */
-	public function execute( string $uuid, \DateTimeImmutable $nowUtc, string $actor ): array {
+	/**
+	 * @param string   $actor       Free-form audit actor label (e.g. 'admin', a signed-link token
+	 *                              name). Recorded on the audit row only.
+	 * @param int|null $actorUserId The approving WP user id, when one exists. `approved_by` is a
+	 *                              BIGINT UNSIGNED FK (Migrations::run()) - it takes this, never
+	 *                              the free-form `$actor` string, and is left a real SQL NULL for
+	 *                              system/signed-link approvals that have no WP user behind them.
+	 * @return array<string, mixed>
+	 */
+	public function execute( string $uuid, \DateTimeImmutable $nowUtc, string $actor, ?int $actorUserId = null ): array {
 		$booking = $this->bookings->findByUuid( $uuid );
 		if ( null === $booking ) {
 			throw new SlotConflict( 'not_found' );
@@ -39,7 +47,7 @@ final class ApproveBooking {
 		}
 
 		$snapshot = $this->txn->run(
-			function () use ( $uuid, $nowUtc, $actor ): array {
+			function () use ( $uuid, $nowUtc, $actor, $actorUserId ): array {
 				// Re-read under FOR UPDATE: a lapsed hold or a rival decision (reject/cancel) may
 				// have landed between the unlocked read above and this transaction opening, and the
 				// row this one acts on is the one read here.
@@ -55,7 +63,7 @@ final class ApproveBooking {
 					'hold_class'      => null,
 					'hold_expires_at' => null,
 					'approved_at'     => $nowUtc->format( 'Y-m-d H:i:s' ),
-					'approved_by'     => $actor,
+					'approved_by'     => $actorUserId,
 				);
 				if ( ! $this->bookings->transition( (int) $fresh['id'], BookingStatus::AwaitingApproval, BookingStatus::Confirmed, $extra ) ) {
 					throw new \RuntimeException( 'not_approvable' );
