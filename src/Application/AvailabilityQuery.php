@@ -42,6 +42,11 @@ final class AvailabilityQuery {
 
 	/**
 	 * @param list<SegmentChoice> $segmentChoices ordered chain
+	 * @param bool $ignoreWindow Admin relaxation (AGENTS.md Task 10): skips the lead-time/horizon
+	 *                           clamps ONLY - `$fromUtc`/`$toUtc` still bound the result. Mirrors
+	 *                           `HoldBooking`'s `admin` flag (including allowing already-past starts,
+	 *                           the backdating ruling), so the admin availability endpoint offers
+	 *                           exactly what an admin hold accepts.
 	 * @return list<\DateTimeImmutable> feasible chain start times, UTC
 	 */
 	public function appointmentStarts(
@@ -49,7 +54,8 @@ final class AvailabilityQuery {
 		\DateTimeImmutable $fromUtc,
 		\DateTimeImmutable $toUtc,
 		\DateTimeImmutable $nowUtc,
-		bool $sameStaff = false
+		bool $sameStaff = false,
+		bool $ignoreWindow = false
 	): array {
 		if ( array() === $segmentChoices ) {
 			throw new \InvalidArgumentException( 'A chain needs at least one segment.' );
@@ -106,7 +112,8 @@ final class AvailabilityQuery {
 			$this->availability->rulesForResources( $resourceIds ),
 			$this->availability->exceptionsForResources( $resourceIds ),
 			$this->busyFor( $resourceIds, $fromUtc, $toUtc ),
-			$sameStaff
+			$sameStaff,
+			$ignoreWindow
 		);
 	}
 

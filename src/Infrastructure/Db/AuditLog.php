@@ -20,4 +20,30 @@ final class AuditLog {
 			)
 		);
 	}
+
+	/**
+	 * The full trail for one booking, oldest first - the admin detail view (AGENTS.md Task 10).
+	 *
+	 * @return list<array<string, mixed>>
+	 */
+	public function forBooking( int $bookingId ): array {
+		$p    = $this->db->prefix;
+		$rows = $this->db->get_results(
+			$this->db->prepare(
+				"SELECT id, actor, action, payload_json, created_at FROM {$p}reservant_audit_log WHERE booking_id = %d ORDER BY id ASC", // phpcs:ignore WordPress.DB.PreparedSQL
+				$bookingId
+			),
+			ARRAY_A
+		);
+		return array_map(
+			static function ( array $row ): array {
+				$row['id']      = (int) $row['id'];
+				$decoded        = null === $row['payload_json'] ? array() : json_decode( (string) $row['payload_json'], true );
+				$row['payload'] = is_array( $decoded ) ? $decoded : array();
+				unset( $row['payload_json'] );
+				return $row;
+			},
+			$rows
+		);
+	}
 }

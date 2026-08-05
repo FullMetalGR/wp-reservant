@@ -67,6 +67,38 @@ final class OccurrenceRepository {
 	}
 
 	/**
+	 * Active occurrences of ANY event service overlapping the window, joined to their service name
+	 * (AGENTS.md Task 10 - the admin calendar's `occurrences` list, always shown regardless of the
+	 * resource scoping applied to `bookings`: an occurrence names no staff member).
+	 *
+	 * @return list<array<string, mixed>>
+	 */
+	public function findInRange( string $fromUtc, string $toUtc ): array {
+		$p    = $this->db->prefix;
+		$rows = $this->db->get_results(
+			$this->db->prepare(
+				"SELECT o.id, o.service_id, s.name AS service_name, o.start_utc, o.end_utc, o.capacity
+				 FROM {$p}reservant_occurrences o
+				 JOIN {$p}reservant_services s ON s.id = o.service_id
+				 WHERE o.status = 'active' AND o.start_utc < %s AND o.end_utc > %s
+				 ORDER BY o.start_utc ASC", // phpcs:ignore WordPress.DB.PreparedSQL
+				$toUtc,
+				$fromUtc
+			),
+			ARRAY_A
+		);
+		return array_map(
+			static function ( array $row ): array {
+				foreach ( array( 'id', 'service_id', 'capacity' ) as $column ) {
+					$row[ $column ] = (int) $row[ $column ];
+				}
+				return $row;
+			},
+			$rows
+		);
+	}
+
+	/**
 	 * The seat ids a customer may actually claim on a map: aisles and blocked cells are grid
 	 * geometry, not seats.
 	 *

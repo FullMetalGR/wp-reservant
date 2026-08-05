@@ -38,6 +38,30 @@ final class ResourceRepository {
 		return $row;
 	}
 
+	/**
+	 * The active staff record for a WordPress user, if any (AGENTS.md Task 10): the "own calendar" /
+	 * "own bookings" scope a staff member is confined to. A deactivated resource is deliberately
+	 * excluded - a former staff member's WP login must not still unlock somebody else's schedule.
+	 *
+	 * @return array<string, mixed>|null
+	 */
+	public function findByWpUser( int $wpUserId ): ?array {
+		$p   = $this->db->prefix;
+		$row = $this->db->get_row(
+			$this->db->prepare(
+				"SELECT * FROM {$p}reservant_resources WHERE wp_user_id = %d AND status = 'active'", // phpcs:ignore WordPress.DB.PreparedSQL
+				$wpUserId
+			),
+			ARRAY_A
+		);
+		if ( null === $row ) {
+			return null;
+		}
+		$row['id']         = (int) $row['id'];
+		$row['wp_user_id'] = null === $row['wp_user_id'] ? null : (int) $row['wp_user_id'];
+		return $row;
+	}
+
 	public function linkService( int $serviceId, int $resourceId ): void {
 		$p = $this->db->prefix;
 		$this->db->query(
