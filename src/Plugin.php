@@ -37,6 +37,7 @@ final class Plugin {
 
 		if ( is_admin() ) {
 			( new Admin\DemoDataPage() )->register();
+			( new Admin\ApprovalActionEndpoint() )->register();
 		}
 
 		if ( defined( 'WP_CLI' ) && WP_CLI ) {
