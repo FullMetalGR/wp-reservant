@@ -21,6 +21,7 @@ use Reservant\Infrastructure\Db\ResourceDayRepository;
 use Reservant\Infrastructure\Db\ResourceRepository;
 use Reservant\Infrastructure\Db\ServiceRepository;
 use Reservant\Infrastructure\Db\TransactionRunner;
+use Reservant\Settings;
 
 /**
  * The locked write protocol of AGENTS.md section 2.2 - the only authority on capacity.
@@ -36,8 +37,7 @@ use Reservant\Infrastructure\Db\TransactionRunner;
  */
 final class HoldBooking {
 
-	private const DEFAULT_HOLD_TTL_MIN = 15;
-	private const DEFAULT_GRANULARITY  = 5;
+	private const DEFAULT_GRANULARITY = 5;
 
 	public function __construct(
 		private readonly TransactionRunner $txn,
@@ -660,7 +660,7 @@ final class HoldBooking {
 			$hours = $approvalHoldHours > 0 ? $approvalHoldHours : 48;
 			return self::sql( $anchor->add( new \DateInterval( 'PT' . $hours . 'H' ) ) );
 		}
-		$minutes = (int) apply_filters( 'reservant/hold_ttl_minutes', self::DEFAULT_HOLD_TTL_MIN );
+		$minutes = (int) apply_filters( 'reservant/hold_ttl_minutes', Settings::make()->checkoutTtlMin() );
 		return self::sql( $anchor->add( new \DateInterval( 'PT' . max( 1, $minutes ) . 'M' ) ) );
 	}
 
