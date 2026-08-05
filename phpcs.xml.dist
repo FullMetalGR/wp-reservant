@@ -19,4 +19,15 @@
       <property name="additionalWordDelimiters" value="/"/>
     </properties>
   </rule>
+  <!-- AGENTS.md section 7: the four custom capabilities registered by Admin\Capabilities. -->
+  <rule ref="WordPress.WP.Capabilities">
+    <properties>
+      <property name="custom_capabilities" type="array">
+        <element value="reservant_manage_bookings"/>
+        <element value="reservant_approve_bookings"/>
+        <element value="reservant_manage_settings"/>
+        <element value="reservant_view_own_calendar"/>
+      </property>
+    </properties>
+  </rule>
 </ruleset>

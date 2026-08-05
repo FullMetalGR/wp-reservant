@@ -3,6 +3,7 @@ declare( strict_types=1 );
 
 namespace Reservant\Tests\Integration\Admin;
 
+use Reservant\Admin\Capabilities;
 use Reservant\Admin\DemoDataPage;
 use Reservant\Cli\FixtureCommand;
 use Reservant\Tests\Integration\ReservantTestCase;
@@ -13,6 +14,9 @@ final class DemoDataPageTest extends ReservantTestCase {
 		parent::set_up();
 		require_once ABSPATH . 'wp-admin/includes/plugin.php';
 		require_once ABSPATH . 'wp-admin/includes/template.php';
+		// The page is gated on reservant_manage_settings (never manage_options); make sure the
+		// administrator role carries it regardless of how the test suite reset $wp_roles.
+		Capabilities::sync();
 	}
 
 	public function testStoredIsNullUntilSeededAndStableAfter(): void {

@@ -12,7 +12,8 @@ use Reservant\Rest\Routes;
  * Until the admin SPA (P4) ships, the engine is invisible from wp-admin: it only speaks REST, and
  * a fresh install has nothing to answer with. This page runs the same idempotent seeder the CLI
  * and the concurrency scripts use, then links straight to live REST calls so the result can be
- * seen in a browser. Gated behind `manage_options` and a nonce; seeding twice is safe by design.
+ * seen in a browser. Gated behind `reservant_manage_settings` and a nonce; seeding twice is safe
+ * by design.
  */
 final class DemoDataPage {
 
@@ -34,14 +35,14 @@ final class DemoDataPage {
 		return add_management_page(
 			__( 'Reservant Demo Data', 'reservant' ),
 			__( 'Reservant Demo Data', 'reservant' ),
-			'manage_options',
+			'reservant_manage_settings',
 			self::SLUG,
 			array( $this, 'render' )
 		);
 	}
 
 	public function seed(): void {
-		if ( ! current_user_can( 'manage_options' ) ) {
+		if ( ! current_user_can( 'reservant_manage_settings' ) ) {
 			wp_die( esc_html__( 'You are not allowed to seed demo data.', 'reservant' ) );
 		}
 		check_admin_referer( self::ACTION );
