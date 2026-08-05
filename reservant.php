@@ -27,5 +27,13 @@ define( 'RESERVANT_URL', plugin_dir_url( __FILE__ ) );
 
 require __DIR__ . '/vendor/autoload.php';
 
+// Action Scheduler self-initializes on `plugins_loaded` (priority 0-1, ahead of Plugin::boot()
+// below) - it is never constructed directly. Guarded because a host site running WooCommerce (or
+// another plugin bundling it) may already have loaded a copy; the guard is also what keeps a
+// `composer install --no-dev` skip of this path analysable.
+if ( file_exists( __DIR__ . '/vendor/woocommerce/action-scheduler/action-scheduler.php' ) ) {
+	require __DIR__ . '/vendor/woocommerce/action-scheduler/action-scheduler.php';
+}
+
 register_activation_hook( __FILE__, array( \Reservant\Plugin::class, 'activate' ) );
 add_action( 'plugins_loaded', array( \Reservant\Plugin::class, 'boot' ) );

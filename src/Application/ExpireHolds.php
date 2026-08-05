@@ -44,20 +44,37 @@ final class ExpireHolds {
 			if ( null === $booking ) {
 				continue;
 			}
-			$uuid = (string) $booking['uuid'];
-			/** @var list<array<string, mixed>> $items */
-			$items = $booking['items'];
-			$keys  = HoldBooking::lockKeysForItems( $items );
-			$this->resourceDays->ensure( $keys );
-
-			$snapshot = $this->txn->run( fn (): ?array => $this->expire( $keys, $uuid ) );
-			if ( null === $snapshot ) {
-				continue;
+			if ( null !== $this->expireByUuid( (string) $booking['uuid'] ) ) {
+				++$processed;
 			}
-			++$processed;
-			do_action( 'reservant/hold/expired', BookingSnapshot::fromArray( $snapshot ) );
 		}
 		return $processed;
+	}
+
+	/**
+	 * Expire a single booking by uuid, through the same terminal transition `run()` batches over.
+	 * Extracted so `Jobs::TIMEOUT` (AGENTS.md "Approval holds", `on_approval_timeout = 'expire'`)
+	 * can target exactly the one booking a timer fired for, without duplicating the
+	 * reap/lock/transition sequence. A `null` return is not an error - the booking may already be
+	 * confirmed, rejected, or expired by the time this runs.
+	 *
+	 * @return array<string, mixed>|null the post-expiry snapshot, or null if nothing happened.
+	 */
+	public function expireByUuid( string $uuid ): ?array {
+		$booking = $this->bookings->findByUuid( $uuid );
+		if ( null === $booking ) {
+			return null;
+		}
+		/** @var list<array<string, mixed>> $items */
+		$items = $booking['items'];
+		$keys  = HoldBooking::lockKeysForItems( $items );
+		$this->resourceDays->ensure( $keys );
+
+		$snapshot = $this->txn->run( fn (): ?array => $this->expire( $keys, $uuid ) );
+		if ( null !== $snapshot ) {
+			do_action( 'reservant/hold/expired', BookingSnapshot::fromArray( $snapshot ) );
+		}
+		return $snapshot;
 	}
 
 	/**

@@ -35,6 +35,24 @@ final class Plugin {
 	private function register(): void {
 		add_action( 'rest_api_init', array( new Rest\Routes(), 'register' ) );
 
+		// `add_action` here needs nothing from Action Scheduler itself - only the hook names this
+		// plugin owns - so it is safe at `plugins_loaded` time, unlike the sweeper guard below.
+		Infrastructure\Scheduler\Jobs::register();
+
+		// Action Scheduler's own data store initializes on `init` (priority 1, `ActionScheduler::init()`),
+		// which has not run yet at `plugins_loaded` - calling `as_*` functions here would silently
+		// no-op (and trigger `_doing_it_wrong`). Deferred to `init` at a lower-precedence priority
+		// so the store is guaranteed ready first. `everyFiveMinutes()` is itself idempotent
+		// (guards on `as_has_scheduled_action`), so running this on every request never
+		// accumulates a second recurring sweep.
+		add_action(
+			'init',
+			static function (): void {
+				Infrastructure\Scheduler\Scheduler::everyFiveMinutes( Infrastructure\Scheduler\Jobs::SWEEP );
+			},
+			20
+		);
+
 		if ( is_admin() ) {
 			( new Admin\DemoDataPage() )->register();
 			( new Admin\ApprovalActionEndpoint() )->register();

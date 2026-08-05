@@ -22,6 +22,8 @@ use Reservant\Infrastructure\Db\ResourceDayRepository;
 use Reservant\Infrastructure\Db\ResourceRepository;
 use Reservant\Infrastructure\Db\ServiceRepository;
 use Reservant\Infrastructure\Db\TransactionRunner;
+use Reservant\Infrastructure\Scheduler\Jobs;
+use Reservant\Infrastructure\Scheduler\Scheduler;
 use Reservant\Settings;
 
 /**
@@ -190,9 +192,42 @@ final class HoldBooking {
 			// only know the ordinary held -> (approve|confirm) lifecycle still see both events, in
 			// order, rather than a `confirmed` snapshot they never saw held.
 			do_action( 'reservant/booking/confirmed', $bookingSnapshot );
+		} elseif ( BookingStatus::AwaitingApproval->value === $snapshot['status'] ) {
+			// Scheduled strictly after commit - the same place the hooks above fire. A rolled-back
+			// hold throws out of `$this->txn->run()` above and never reaches this line, so it
+			// schedules nothing.
+			$this->scheduleApprovalTimers( $snapshot );
 		}
 		$snapshot['manage_token'] = $secret;
 		return $snapshot;
+	}
+
+	/**
+	 * Owner nags at 25/50/75% of the approval window, plus the timeout itself at expiry
+	 * (AGENTS.md "Approval holds"). The window runs from the booking's creation to its
+	 * `hold_expires_at` - the only two instants `HoldBooking` itself is authoritative about; the
+	 * jobs re-derive everything else (service policy, current status) when they actually fire.
+	 *
+	 * @param array<string, mixed> $booking BookingRepository row shape - 'created_at' and
+	 *                                       'hold_expires_at' both present since this runs on the
+	 *                                       just-committed row.
+	 */
+	private function scheduleApprovalTimers( array $booking ): void {
+		$uuid = (string) $booking['uuid'];
+		$utc  = new \DateTimeZone( 'UTC' );
+
+		$created = new \DateTimeImmutable( (string) $booking['created_at'], $utc );
+		$expires = new \DateTimeImmutable( (string) $booking['hold_expires_at'], $utc );
+		$window  = $expires->getTimestamp() - $created->getTimestamp();
+		if ( $window <= 0 ) {
+			return; // Defensive only: a zero/negative window would fire nags after the deadline.
+		}
+
+		foreach ( array( 25, 50, 75 ) as $percent ) {
+			$ts = $created->getTimestamp() + (int) round( $window * $percent / 100 );
+			Scheduler::at( $ts, Jobs::NAG, array( $uuid, $percent ) );
+		}
+		Scheduler::at( $expires->getTimestamp(), Jobs::TIMEOUT, array( $uuid ) );
 	}
 
 	/**

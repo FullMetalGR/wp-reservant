@@ -9,6 +9,8 @@ parameters:
         # WP-CLI is the runtime that loads WordPress, not a dependency of this plugin, so no
         # published stub set covers it. See the file header.
         - tests/stubs/wp-cli.php
+        # Action Scheduler ships no PHPStan stub set of its own. See the file header.
+        - tests/stubs/action-scheduler.php
     # The stub must define WP_CLI for the class to resolve; whether it is really defined is a
     # runtime question, so the `defined() && WP_CLI` guard must stay analysable in both directions.
     dynamicConstantNames:
