@@ -17,7 +17,7 @@ jobs:
       - run: composer stan
       - run: composer test:unit
 
-  fallow:
+  assets:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -25,6 +25,9 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: '20' }
       - run: npm ci
+      - run: npm run build
+      - run: npm run tsc
+      - run: npm run test:js
       - run: npx fallow --ci
 
   integration-and-concurrency:
