@@ -63,6 +63,22 @@ final class BookingRepository {
 		return null === $row ? null : $this->hydrate( $row );
 	}
 
+	/**
+	 * Same shape as `findByUuid()`, but row-locking: the authoritative read for a use case that is
+	 * about to guard a status/expiry check and then transition on it. Call inside a transaction
+	 * only - the lock is released at COMMIT/ROLLBACK.
+	 *
+	 * @return array<string, mixed>|null booking row + 'items' list, ints cast
+	 */
+	public function findByUuidForUpdate( string $uuid ): ?array {
+		$p   = $this->db->prefix;
+		$row = $this->db->get_row(
+			$this->db->prepare( "SELECT * FROM {$p}reservant_bookings WHERE uuid = %s FOR UPDATE", $uuid ), // phpcs:ignore WordPress.DB.PreparedSQL
+			ARRAY_A
+		);
+		return null === $row ? null : $this->hydrate( $row );
+	}
+
 	/** @return array<string, mixed>|null booking row + 'items' list, ints cast */
 	public function findById( int $id ): ?array {
 		$p   = $this->db->prefix;
