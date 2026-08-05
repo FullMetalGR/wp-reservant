@@ -83,6 +83,40 @@ final class AdminHoldTest extends ReservantTestCase {
 		self::assertNull( $admin['hold_expires_at'] );
 	}
 
+	/**
+	 * Backdating (AGENTS.md Task 6, human ruling: allowed on purpose). Skipping the lead-time arm
+	 * removes the only guard against a start already in the past, so the owner may record a
+	 * booking after the fact - a walk-in or a phone booking taken once the appointment is already
+	 * under way or over. `$start` here sits before the injected "now" itself, not merely inside an
+	 * ordinary notice window: an ordinary customer request for that same start still refuses
+	 * `lead_time` (a start in the past is always "too soon"), while the admin request lands
+	 * `confirmed` exactly like any other admin-mode hold.
+	 */
+	public function testAdminHoldWithStartBeforeInjectedNowSucceedsBackdating(): void {
+		$now   = $this->utc( 0 );
+		$start = $this->utc( -1, '09:00' ); // Before $now, whatever lead_time_min the service asks for.
+		self::assertTrue( $start < $now, 'Fixture must actually place $start before $now or this proves nothing.' );
+
+		global $wpdb;
+		try {
+			HoldBooking::make( $wpdb )->execute(
+				new HoldRequest( $this->customer(), new AppointmentRequest( $start, array( new SegmentChoice( $this->cutId, $this->staffA ) ) ) ),
+				$now
+			);
+			self::fail( 'Expected the ordinary customer hold to be refused for a start already before "now".' );
+		} catch ( SlotConflict $e ) {
+			self::assertSame( 'lead_time', $e->reason );
+		}
+
+		$admin = HoldBooking::make( $wpdb )->execute(
+			new HoldRequest( $this->customer(), new AppointmentRequest( $start, array( new SegmentChoice( $this->cutId, $this->staffA ) ) ), null, true ),
+			$now
+		);
+		self::assertSame( 'confirmed', $admin['status'] );
+		self::assertNull( $admin['hold_class'] );
+		self::assertNull( $admin['hold_expires_at'] );
+	}
+
 	public function testAdminHoldOnApprovalRequiringServiceLandsConfirmed(): void {
 		global $wpdb;
 		$consult = ( new ServiceRepository( $wpdb ) )->insert(

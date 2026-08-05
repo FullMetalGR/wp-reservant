@@ -10,6 +10,10 @@ namespace Reservant\Application\Dto;
  * lead-time and horizon refusals for it and lands the container straight on `confirmed` with no
  * hold at all. Every other refusal - outside_hours, overlap, capacity, seat_taken, bad_seat,
  * bad_time, not_found, no_staff - still applies unchanged.
+ *
+ * Skipping the lead-time arm also skips the guard against a start already in the past: an admin
+ * request may backdate `$start` to log a walk-in or a phone booking taken after the fact. This is
+ * intentional (a deliberate ruling, not an oversight) - see `HoldBooking::assertWithinWindow()`.
  */
 final class HoldRequest {
 

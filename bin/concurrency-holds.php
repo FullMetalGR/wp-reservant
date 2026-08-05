@@ -14,10 +14,23 @@ declare( strict_types=1 );
  * drives the admin-mode hold directly through `HoldBooking` via `wp eval` inside the tests
  * container -- see bin/run-concurrency.sh for the same shell-into-wp-env pattern used to lift the
  * rate limiter -- while the rival worker POSTs an ordinary customer hold over the live REST API
- * for the identical service/resource/start, with the wp eval process kicked off first so the two
- * genuinely contend for the same resource-day lock rather than running strictly one-after-another.
- * Exactly one may win, and the loser must fail with `overlap` -- never a different refusal (a
- * leftover hold, a bad window) that would happen to also carry a 409.
+ * for the identical service/resource/start.
+ *
+ * Spawning the `wp eval` side (`proc_open()`) and then immediately firing the curl side is NOT a
+ * race: `proc_open()` returns as soon as the child is forked, and everything that follows --
+ * `npx` resolving `wp-env`, `docker compose exec`, a full WordPress bootstrap -- reliably takes
+ * over a second (measured: ~1.1-1.6s for a bare `wp eval`), while the curl round trip against an
+ * already-running REST server is single-digit milliseconds. Left alone, the customer request
+ * always commits first and the admin-wins branch is never exercised, silently defeating the point
+ * of the test. The fix is a shared wall-clock rendezvous: the driver picks
+ * `$target = time() + 20` and hands it to both sides. The `wp eval` snippet calls
+ * `time_sleep_until($target)` immediately before `HoldBooking::execute()`; the driver calls
+ * `time_sleep_until($target)` immediately before `curl_exec()`. Both processes therefore enter the
+ * locked write protocol within milliseconds of the same instant, regardless of how long getting
+ * there took beforehand -- proc_open()/npx/docker overhead only eats into the 20s margin, it does
+ * not decide the outcome. Exactly one side may win, and the loser must fail with `overlap` --
+ * never a different refusal (a leftover hold, a bad window) that would happen to also carry a
+ * 409/failure.
  *
  * Usage: php bin/concurrency-holds.php <base_url> <service_id> <resource_id> <start_utc> [cli_container]
  */
@@ -89,11 +102,16 @@ function run_parallel_holds_race( string $base, int $serviceId, int $resourceId,
  * exact same service/resource/start the rival curl request below also targets. No opening `<?php`
  * tag -- `wp eval` supplies its own, exactly like the mu-plugin snippet in bin/run-concurrency.sh.
  * Prints one line of JSON and nothing else, so the driver can parse it straight off stdout.
+ *
+ * `time_sleep_until( $target )` runs immediately before `HoldBooking::execute()` -- the rendezvous
+ * that makes this a real race against the driver's own `time_sleep_until( $target )` before
+ * `curl_exec()` (see the file header).
  */
-function build_admin_hold_eval( int $serviceId, int $resourceId, string $startUtc ): string {
+function build_admin_hold_eval( int $serviceId, int $resourceId, string $startUtc, int $target ): string {
 	return sprintf(
 		<<<'PHP'
 		global $wpdb;
+		time_sleep_until( %d );
 		try {
 			$booking = \Reservant\Application\HoldBooking::make( $wpdb )->execute(
 				new \Reservant\Application\Dto\HoldRequest(
@@ -114,6 +132,7 @@ function build_admin_hold_eval( int $serviceId, int $resourceId, string $startUt
 			echo json_encode( array( 'ok' => false, 'reason' => 'exception', 'message' => $e->getMessage() ) );
 		}
 		PHP,
+		$target,
 		$startUtc,
 		$serviceId,
 		$resourceId
@@ -121,13 +140,54 @@ function build_admin_hold_eval( int $serviceId, int $resourceId, string $startUt
 }
 
 /**
- * Task 6: one admin-mode hold (direct, via `wp eval`) against one ordinary customer hold (REST),
- * same service/resource/start, fired as close together as PHP's own process-spawning allows.
+ * The machine-readable reason slug out of a `/holds` REST error body (Finding 2 fix -- verified
+ * against src/Rest/Errors.php, not assumed).
  *
- * @return array{admin: array<string, mixed>, customer_code: int, winner: ?string, loser_reason: ?string, pass: bool}
+ * `Errors::conflict()` and `Errors::failure()` both construct the `\WP_Error` as
+ * `new \WP_Error( $code, $reason, array( 'status' => ..., 'detail' => ... ) )` -- the reason slug
+ * is the `\WP_Error` MESSAGE, and WordPress's own `WP_REST_Server::error_to_response()` puts a
+ * `\WP_Error`'s message on the response body's top-level `message` key (`data.detail` is only the
+ * translated human sentence). Confirmed live: a genuine overlap against this codebase's REST API
+ * returns `{"code":"reservant_conflict","message":"overlap","data":{"status":409,"segment":0,
+ * "detail":"That time was just taken. Please pick another."}}`. `message` is therefore read
+ * first; `data.reason` and a `reservant_`-prefixed `code` are read as fallbacks in case a future
+ * error shape adds or renames the primary field, so this does not silently start reading the
+ * translated detail sentence as if it were the machine slug.
+ *
+ * @param mixed $decoded json_decode() of the response body, or null/scalar if it did not decode.
+ */
+function extract_reason( mixed $decoded ): ?string {
+	if ( ! is_array( $decoded ) ) {
+		return null;
+	}
+	$data = is_array( $decoded['data'] ?? null ) ? $decoded['data'] : array();
+	if ( is_string( $data['reason'] ?? null ) ) {
+		return $data['reason'];
+	}
+	if ( is_string( $decoded['message'] ?? null ) ) {
+		return $decoded['message'];
+	}
+	$code = $decoded['code'] ?? null;
+	if ( is_string( $code ) && str_starts_with( $code, 'reservant_' ) ) {
+		return substr( $code, strlen( 'reservant_' ) );
+	}
+	return null;
+}
+
+/**
+ * Task 6: one admin-mode hold (direct, via `wp eval`) against one ordinary customer hold (REST),
+ * same service/resource/start, both released into the locked write protocol at the same shared
+ * wall-clock instant (Finding 1 fix -- see the file header for why the naive
+ * "spawn-then-immediately-curl" approach never actually raced).
+ *
+ * @return array{admin: array<string, mixed>, customer_code: int, customer_body: string, winner: ?string, loser_reason: ?string, pass: bool}
  */
 function run_admin_customer_race( string $base, string $cli, int $serviceId, int $resourceId, string $startUtc ): array {
-	$phpCode = build_admin_hold_eval( $serviceId, $resourceId, $startUtc );
+	// 20s: comfortably clear of every overhead a `wp eval` round trip has shown in practice
+	// (~1.1-1.6s measured for `npx wp-env run ... wp eval`) so the child is certain to reach its
+	// own `time_sleep_until( $target )` before $target arrives, whatever load a CI box is under.
+	$target  = time() + 20;
+	$phpCode = build_admin_hold_eval( $serviceId, $resourceId, $startUtc, $target );
 
 	$descriptors = array( 1 => array( 'pipe', 'w' ), 2 => array( 'pipe', 'w' ) );
 	$process     = proc_open(
@@ -139,16 +199,13 @@ function run_admin_customer_race( string $base, string $cli, int $serviceId, int
 		return array(
 			'admin'         => array( 'ok' => false, 'reason' => 'spawn_failed' ),
 			'customer_code' => 0,
+			'customer_body' => '',
 			'winner'        => null,
 			'loser_reason'  => null,
 			'pass'          => false,
 		);
 	}
 
-	// Fired the instant the admin-mode process has been spawned: proc_open() returns as soon as
-	// the child is forked, before `npx` -> `wp-env` -> `docker exec` -> the WordPress bootstrap has
-	// done any real work, so this curl request and the admin-mode HoldBooking call genuinely
-	// contend for the same resource-day lock rather than running strictly one after the other.
 	$customerPayload = (string) json_encode(
 		array(
 			'customer'    => array(
@@ -177,6 +234,9 @@ function run_admin_customer_race( string $base, string $cli, int $serviceId, int
 			CURLOPT_TIMEOUT        => 30,
 		)
 	);
+	// The rendezvous: both sides enter the protocol within milliseconds of the same wall-clock
+	// instant, regardless of how long spawning the child process took beforehand.
+	time_sleep_until( $target );
 	$customerBody = (string) curl_exec( $ch );
 	$customerCode = (int) curl_getinfo( $ch, CURLINFO_RESPONSE_CODE );
 	curl_close( $ch );
@@ -200,11 +260,9 @@ function run_admin_customer_race( string $base, string $cli, int $serviceId, int
 		);
 	}
 
-	$adminWon    = true === ( $adminResult['ok'] ?? false );
-	$customerWon = 201 === $customerCode;
-
-	$decodedCustomer = json_decode( $customerBody, true );
-	$customerReason  = is_array( $decodedCustomer ) ? ( $decodedCustomer['message'] ?? null ) : null;
+	$adminWon       = true === ( $adminResult['ok'] ?? false );
+	$customerWon    = 201 === $customerCode;
+	$customerReason = extract_reason( json_decode( $customerBody, true ) );
 
 	$winner      = $adminWon ? 'admin' : ( $customerWon ? 'customer' : null );
 	$loserReason = $adminWon ? $customerReason : ( $customerWon ? ( $adminResult['reason'] ?? null ) : null );
@@ -220,6 +278,9 @@ function run_admin_customer_race( string $base, string $cli, int $serviceId, int
 	return array(
 		'admin'         => $adminResult,
 		'customer_code' => $customerCode,
+		// Kept even on success: a both-lose or both-win outcome (a real bug) is otherwise
+		// undiagnosable from the emitted JSON alone.
+		'customer_body' => $customerBody,
 		'winner'        => $winner,
 		'loser_reason'  => $loserReason,
 		'pass'          => $pass,
@@ -257,6 +318,7 @@ echo json_encode(
 		'loser_reason'  => $adminResult['loser_reason'],
 		'admin'         => $adminResult['admin'],
 		'customer_code' => $adminResult['customer_code'],
+		'customer_body' => $adminResult['customer_body'],
 		'pass'          => $adminResult['pass'],
 	)
 ), PHP_EOL;

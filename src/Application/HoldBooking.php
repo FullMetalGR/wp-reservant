@@ -41,6 +41,12 @@ use Reservant\Settings;
  * hold at all. Every other refusal above, and the entire locking/reap/re-validate/insert/bumpRev
  * sequence, is unchanged - the flag decides what is checked and what status is written, never how
  * the write is serialised.
+ *
+ * Skipping lead time is a deliberate ruling, not an oversight: it also removes the only guard
+ * against a `$start` already in the past, so an admin request may backdate a booking - recording a
+ * walk-in or a phone booking after the fact rather than at the moment it happened. Every other
+ * guard is unaffected: a backdated admin booking still cannot double-book a resource or a seat
+ * that overlap, capacity, or seat_taken would refuse a customer for.
  */
 final class HoldBooking {
 
@@ -415,10 +421,14 @@ final class HoldBooking {
 	 * not chosen by the customer, so refusing it for sitting off-grid would reject the shop's own
 	 * calendar. Lead time and horizon do: they answer "when may this be registered for", which is
 	 * as much an event question as an appointment one. Because lead time is never negative, this
-	 * is also what stops a seminar that has already started from being bookable.
+	 * is also what stops a seminar that has already started from being bookable - for an ordinary
+	 * customer request.
 	 *
-	 * `$admin` (AGENTS.md Task 6) skips that window check only - capacity and seat re-validation
-	 * below still run unconditionally, exactly as for a customer request.
+	 * `$admin` (AGENTS.md Task 6) skips that window check entirely, on purpose: the owner may
+	 * register a booking against a seminar that has already started (or already finished) to log a
+	 * walk-in or a phone booking taken after the fact, backdating included. Capacity and seat
+	 * re-validation below still run unconditionally, exactly as for a customer request - only the
+	 * "is this too soon or too late to register" guard is gone.
 	 */
 	private function validateEvent( EventRequest $event, \DateTimeImmutable $nowUtc, bool $admin ): void {
 		$occurrence = $this->occurrences->find( $event->occurrenceId );
@@ -502,9 +512,13 @@ final class HoldBooking {
 	 * The booking window: late enough to respect the notice period, near enough to be on sale.
 	 *
 	 * @param bool $admin Admin-mode manual booking (AGENTS.md Task 6): the owner is the approval,
-	 *                    so this whole check is skipped - never negative time travel, just no
-	 *                    notice-period or horizon refusal for a booking the owner is entering by
-	 *                    hand.
+	 *                    so this whole check is skipped - deliberately including the guard against
+	 *                    a `$start` already before `$anchor`. This DOES allow backdating: the owner
+	 *                    may record a walk-in or a phone booking against a start time already in
+	 *                    the past. That is a human ruling, not an oversight - every other guard
+	 *                    (overlap, capacity, seat_taken, bad_seat, bad_time, not_found, no_staff)
+	 *                    is completely unaffected, so a backdated booking still cannot double-book
+	 *                    a resource or a seat any other booking - past or present - already holds.
 	 * @throws SlotConflict `lead_time` or `horizon`.
 	 */
 	private static function assertWithinWindow( \DateTimeImmutable $start, \DateTimeImmutable $anchor, int $leadTimeMin, int $horizonDays, bool $admin = false ): void {
