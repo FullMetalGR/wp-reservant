@@ -44,13 +44,23 @@ final class FixtureCommand {
 	 * @return array<string, mixed> {cut, colour, staff_a, staff_b, seminar_occ, grid_occ, grid_seats}
 	 */
 	public static function ensure( \wpdb $db ): array {
-		$stored = get_option( self::OPTION );
-		if ( is_array( $stored ) && self::intact( $db, $stored ) ) {
+		$stored = self::stored( $db );
+		if ( null !== $stored ) {
 			return $stored;
 		}
 		$ids = self::build( $db );
 		update_option( self::OPTION, $ids, false );
 		return $ids;
+	}
+
+	/**
+	 * The remembered id map, or null when the fixture was never seeded or its rows are gone.
+	 *
+	 * @return array<string, mixed>|null
+	 */
+	public static function stored( \wpdb $db ): ?array {
+		$stored = get_option( self::OPTION );
+		return is_array( $stored ) && self::intact( $db, $stored ) ? $stored : null;
 	}
 
 	/**

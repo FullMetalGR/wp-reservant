@@ -19,6 +19,10 @@ final class Plugin {
 	private function register(): void {
 		add_action( 'rest_api_init', array( new Rest\Routes(), 'register' ) );
 
+		if ( is_admin() ) {
+			( new Admin\DemoDataPage() )->register();
+		}
+
 		if ( defined( 'WP_CLI' ) && WP_CLI ) {
 			\WP_CLI::add_command( 'reservant', Cli\FixtureCommand::class );
 		}
