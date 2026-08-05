@@ -213,7 +213,7 @@ final class ApprovalActionEndpointTest extends ReservantTestCase {
 		$exp       = $this->farFutureExp();
 		// The signature a real approval email would have carried, bound to the pre-approval
 		// updated_at - kept around to be replayed after the booking has already moved on.
-		$staleSig  = SignedAction::sign( wp_salt( 'auth' ), $booking['uuid'], 'approve', $exp, $updatedAt );
+		$staleSig = SignedAction::sign( wp_salt( 'auth' ), $booking['uuid'], 'approve', $exp, $updatedAt );
 
 		// First use: a legitimate approval, exactly as testPostWithValidSigApproves.
 		$this->setRequest( 'POST', $booking['uuid'], 'approve', $exp, $staleSig );
@@ -271,6 +271,12 @@ final class ApprovalActionEndpointTest extends ReservantTestCase {
 	 */
 	public function testUnknownRuntimeExceptionFiresErrorActionAndRendersGenericFailure(): void {
 		global $wpdb;
+		// Task 9 wires `Notifications\ApprovalEmails` on the same `reservant/booking/held` and
+		// `reservant/booking/approved` hooks this test already drives; a real `wp_mail()` in this
+		// environment has no transport and fails, which would fire its own `reservant/error` and
+		// break the exact count below. Short-circuited because this test's only concern is the
+		// injected RuntimeException, not mail delivery.
+		add_filter( 'pre_wp_mail', '__return_true' );
 		$booking   = $this->holdAwaitingApproval();
 		$updatedAt = (string) ( new BookingRepository( $wpdb ) )->findByUuid( $booking['uuid'] )['updated_at'];
 		$exp       = $this->farFutureExp();
@@ -295,6 +301,7 @@ final class ApprovalActionEndpointTest extends ReservantTestCase {
 
 		remove_action( 'reservant/booking/approved', $blowUp );
 		remove_action( 'reservant/error', $listener );
+		remove_filter( 'pre_wp_mail', '__return_true' );
 
 		self::assertCount( 1, $errors, 'the unknown RuntimeException must fire reservant/error' );
 		self::assertInstanceOf( \RuntimeException::class, $errors[0] );
