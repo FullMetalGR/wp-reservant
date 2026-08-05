@@ -37,12 +37,21 @@ final class Scheduler {
 	 * code ever wants that: production execution is WP-Cron's job, and integration tests are
 	 * explicitly told never to invoke the real queue runner. Starting one interval later sidesteps
 	 * the condition entirely rather than relying on a filter to suppress its effect.
+	 *
+	 * The `as_has_scheduled_action()` check below is a fast-path only, not the correctness
+	 * guarantee: it and the `as_schedule_recurring_action()` call are two separate round trips to
+	 * the store, and this method runs on every request's `init` hook, so two concurrent requests
+	 * can both see "not scheduled" before either has inserted, and both schedule a copy. The real
+	 * guarantee is `$unique = true` on `as_schedule_recurring_action()` itself - the store's own
+	 * insert is atomic against "a pending/running action with the same hook + group already
+	 * exists", per Action Scheduler's own documented contract (see the `$unique` param docs on
+	 * both scheduling functions in `tests/stubs/action-scheduler.php`).
 	 */
 	public static function everyFiveMinutes( string $hook ): void {
 		if ( as_has_scheduled_action( $hook, array(), self::GROUP ) ) {
 			return;
 		}
-		as_schedule_recurring_action( time() + 5 * MINUTE_IN_SECONDS, 5 * MINUTE_IN_SECONDS, $hook, array(), self::GROUP );
+		as_schedule_recurring_action( time() + 5 * MINUTE_IN_SECONDS, 5 * MINUTE_IN_SECONDS, $hook, array(), self::GROUP, true );
 	}
 
 	/**

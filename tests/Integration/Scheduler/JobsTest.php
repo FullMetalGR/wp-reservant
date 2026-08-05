@@ -301,6 +301,29 @@ final class JobsTest extends ReservantTestCase {
 		self::assertCount( 1, $this->scheduledIds( Jobs::SWEEP ) );
 	}
 
+	/**
+	 * `Scheduler::everyFiveMinutes()`'s `as_has_scheduled_action()` check is only a fast path: it
+	 * and the following `as_schedule_recurring_action()` call are two separate round trips to the
+	 * store, so two concurrent requests can both see "not scheduled" before either has inserted.
+	 * The actual correctness guarantee is `$unique = true` on `as_schedule_recurring_action()`
+	 * itself - proven here directly against the real store this wp-env ships, bypassing
+	 * `Scheduler` entirely and using a hook nothing else in this suite schedules, so it cannot be
+	 * confused with `Jobs::SWEEP`'s own bootstrap-created recurring action.
+	 */
+	public function testUniqueFlagOnRecurringActionIsAtomicAgainstDuplicates(): void {
+		$hook = 'reservant/test/unique_recurring_probe';
+
+		$first  = as_schedule_recurring_action( time() + HOUR_IN_SECONDS, 5 * MINUTE_IN_SECONDS, $hook, array(), 'reservant', true );
+		$second = as_schedule_recurring_action( time() + HOUR_IN_SECONDS, 5 * MINUTE_IN_SECONDS, $hook, array(), 'reservant', true );
+
+		self::assertGreaterThan( 0, $first );
+		self::assertSame( 0, $second );
+		self::assertCount(
+			1,
+			as_get_scheduled_actions( array( 'hook' => $hook, 'group' => 'reservant', 'per_page' => 10 ), 'ids' )
+		);
+	}
+
 	public function testSweepIsAlreadyScheduledByPluginRegistration(): void {
 		// Plugin::register() runs on every `plugins_loaded`, including the bootstrap for this
 		// test process (tests/Integration/bootstrap.php requires reservant.php on
