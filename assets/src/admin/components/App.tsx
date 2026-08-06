@@ -3,6 +3,8 @@ import { __ } from '@wordpress/i18n';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { Notice } from '@wordpress/components';
 import { ToastProvider } from './Toasts';
+import { CalendarScreen } from '../screens/CalendarScreen';
+import { MyCalendarScreen } from '../screens/MyCalendarScreen';
 
 export interface HashRoute {
 	screen: string;
@@ -51,6 +53,28 @@ function visibleActions( caps: string[] ): NavAction[] {
 	return actions.filter( ( action ) => caps.includes( action.cap ) );
 }
 
+/**
+ * Renders the current route's screen. `calendar` and `my-calendar` are real (Task 14); every other
+ * screen is still the Task 13 placeholder - Tasks 15-16 replace each in turn without touching this
+ * switch's shape.
+ */
+function renderScreen( route: HashRoute ): JSX.Element {
+	switch ( route.screen ) {
+		case 'calendar':
+			return <CalendarScreen />;
+		case 'my-calendar':
+			return <MyCalendarScreen />;
+		default:
+			return (
+				<Notice status="info" isDismissible={ false }>
+					{ route.id
+						? __( 'This detail view is not built yet.', 'reservant' )
+						: __( 'This screen is not built yet.', 'reservant' ) }
+				</Notice>
+			);
+	}
+}
+
 function useHash(): string {
 	const [ hash, setHash ] = useState( window.location.hash );
 
@@ -74,8 +98,8 @@ export interface AppProps {
 
 /**
  * The router shell (AGENTS.md P4, Task 13): mounts the query cache and toast queue once, then
- * switches on the page's own screen plus whatever detail id the hash carries. Every screen here is
- * a placeholder - Tasks 14-16 replace each case with the real component as it lands, without
+ * switches on the page's own screen plus whatever detail id the hash carries via `renderScreen()`.
+ * Tasks 15-16 replace the remaining placeholder cases with real components as they land, without
  * touching the chassis around it.
  */
 export function App( { screen, caps }: AppProps ) {
@@ -96,11 +120,7 @@ export function App( { screen, caps }: AppProps ) {
 							</button>
 						) ) }
 					</div>
-					<Notice status="info" isDismissible={ false }>
-						{ route.id
-							? __( 'This detail view is not built yet.', 'reservant' )
-							: __( 'This screen is not built yet.', 'reservant' ) }
-					</Notice>
+					{ renderScreen( route ) }
 				</div>
 			</ToastProvider>
 		</QueryClientProvider>
