@@ -6,6 +6,7 @@ namespace Reservant\Rest\Admin;
 use Reservant\Domain\Seating\SeatMapSpec;
 use Reservant\Domain\Seating\SpecParseError;
 use Reservant\Infrastructure\Db\SeatMapRepository;
+use Reservant\Infrastructure\Db\ServiceRepository;
 use Reservant\Infrastructure\Db\TransactionRunner;
 use Reservant\Rest\Errors;
 use Reservant\Rest\Input;
@@ -19,15 +20,26 @@ use Reservant\Rest\Input;
  * one of its seats: an unclaimed map has no booking history pointing at it, so there is nothing to
  * preserve a row for.
  *
- * Both PUT and DELETE share one guard rail - `SeatMapRepository::hasClaims()` - refused with 409
- * `referenced` the moment any seat on the map is claimed by an active booking, whether or not that
- * claim belongs to the occurrence the caller happens to be thinking about: a map is a reusable
- * template across every occurrence of its seat-mapped service (AGENTS.md section 4), and re-parsing
- * or deleting it would silently renumber or remove seats a live claim still names.
+ * PUT is guarded by `SeatMapRepository::hasClaims()` alone - refused with 409 `referenced` the
+ * moment any seat on the map is claimed by an active booking, whether or not that claim belongs to
+ * the occurrence the caller happens to be thinking about: a map is a reusable template across every
+ * occurrence of its seat-mapped service (AGENTS.md section 4), and re-parsing it would silently
+ * renumber seats a live claim still names.
  *
- * The guard is checked twice per write - once outside any transaction for a fast, ordinary refusal,
- * and again as the transaction's first statement immediately before the write - mirroring
- * `ServicesAdminController::destroy()` as fixed in the Task 11 review (fix round 1).
+ * DELETE is guarded by `hasClaims()` OR `ServiceRepository::usesSeatMap()` (review round 1 fix):
+ * `hasClaims()` alone does not catch a map that no seat has ever been claimed on but that a live
+ * service still points at via `seat_map_id` - deleting it would leave that column dangling rather
+ * than fail loudly, per the "no silent divergence" rule this task's brief states for occurrence
+ * capacity and this fix extends to the map link itself.
+ *
+ * Both guards are checked twice per write - once outside any transaction for a fast, ordinary
+ * refusal, and again as the transaction's first statement immediately before the write - mirroring
+ * `ServicesAdminController::destroy()` as fixed in the Task 11 review (fix round 1). PUT's in-
+ * transaction phase additionally re-verifies the row still exists via `SeatMapRepository::
+ * lockForUpdate()` (`SELECT ... FOR UPDATE`) before mutating anything (review round 1 fix): a plain
+ * `UPDATE`'s own affected-rows count cannot distinguish "the row is gone" from "the row exists but
+ * already held the values being written", so existence is proven by a dedicated locking read
+ * instead of inferred from the write.
  */
 final class SeatMapsAdminController {
 
@@ -102,10 +114,22 @@ final class SeatMapsAdminController {
 					// A fresh repository instance, deliberately not the outer `$repo` - a genuinely
 					// new read, not a reuse of the earlier result (Task 11 fix round 1 idiom).
 					$repo = new SeatMapRepository( $this->db );
+					// Locks the row for the rest of this transaction (review round 1 fix): the
+					// authoritative existence recheck, not inferred from `updateSpec()`'s own
+					// affected-rows count - see the class docblock for why that count is ambiguous.
+					// A concurrent DELETE either already removed the row (this returns false, and
+					// nothing below ever runs) or blocks until this transaction commits or rolls
+					// back, so `updateSpec()`/`deleteSeats()`/`insertSeats()` can never write against
+					// a row that vanishes mid-flight.
+					if ( ! $repo->lockForUpdate( $id ) ) {
+						throw new \RuntimeException( 'update_conflict' );
+					}
 					if ( $repo->hasClaims( $id ) ) {
 						throw new \RuntimeException( 'referenced' );
 					}
-					$repo->updateSpec( $id, $name, $specText );
+					if ( ! $repo->updateSpec( $id, $name, $specText ) ) {
+						throw new \RuntimeException( 'update_conflict' );
+					}
 					$repo->deleteSeats( $id );
 					$repo->insertSeats( $id, $spec->seats() );
 				}
@@ -114,25 +138,40 @@ final class SeatMapsAdminController {
 			return Errors::failure( $exception );
 		}
 
-		return new \WP_REST_Response( self::present( $repo, (array) $repo->find( $id ) ) );
+		$fresh = $repo->find( $id );
+		if ( null === $fresh ) {
+			// Defensive only (review round 1 fix): the transaction above already proved the row
+			// exists, immediately before writing, via a lock held until COMMIT - this would mean it
+			// vanished between that COMMIT and this plain read, which no write path in this codebase
+			// can cause. Never presents a garbage row (id 0, empty name) as a false 200.
+			return Errors::failure( new \RuntimeException( 'update_conflict' ) );
+		}
+		return new \WP_REST_Response( self::present( $repo, $fresh ) );
 	}
 
-	/** DELETE /admin/seat-maps/{id} - same claim guard as PUT; removes the map and every one of its seats. */
+	/**
+	 * DELETE /admin/seat-maps/{id} - removes the map and every one of its seats; refused with 409
+	 * `referenced` while any seat is claimed, or while any service (any status) still links this map
+	 * via `seat_map_id` (review round 1 fix - see the class docblock).
+	 */
 	public function destroy( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
 		$repo = new SeatMapRepository( $this->db );
 		$id   = (int) $request->get_param( 'id' );
 		if ( null === $repo->find( $id ) ) {
 			return Errors::notFound();
 		}
-		if ( $repo->hasClaims( $id ) ) {
+		if ( $repo->hasClaims( $id ) || ( new ServiceRepository( $this->db ) )->usesSeatMap( $id ) ) {
 			return Errors::failure( new \RuntimeException( 'referenced' ) );
 		}
 
 		try {
 			$deleted = ( new TransactionRunner( $this->db ) )->run(
 				function () use ( $id ): bool {
-					$repo = new SeatMapRepository( $this->db );
-					if ( $repo->hasClaims( $id ) ) {
+					// Fresh instances, deliberately not the outer ones above - genuinely new reads,
+					// not a reuse of the earlier result (Task 11 fix round 1 idiom).
+					$repo     = new SeatMapRepository( $this->db );
+					$services = new ServiceRepository( $this->db );
+					if ( $repo->hasClaims( $id ) || $services->usesSeatMap( $id ) ) {
 						throw new \RuntimeException( 'referenced' );
 					}
 					$repo->deleteSeats( $id );

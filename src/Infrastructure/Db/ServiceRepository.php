@@ -103,6 +103,26 @@ final class ServiceRepository {
 	}
 
 	/**
+	 * Whether any service - any status, active or inactive - still points at this seat map via
+	 * `seat_map_id` (AGENTS.md Task 12 review round 1 fix): the seat map DELETE guard.
+	 * `SeatMapRepository::hasClaims()` alone is not enough - a map nobody has ever claimed a seat on
+	 * can still be a live service's only seat map, and deleting it out from under that link would
+	 * leave `seat_map_id` dangling: a future occurrence for that service would silently derive a
+	 * capacity of 0 (`OccurrenceRepository::validSeatIds()` on a map that no longer exists returns
+	 * nothing) instead of failing loudly.
+	 */
+	public function usesSeatMap( int $seatMapId ): bool {
+		$p     = $this->db->prefix;
+		$count = (int) $this->db->get_var(
+			$this->db->prepare(
+				"SELECT COUNT(*) FROM {$p}reservant_services WHERE seat_map_id = %d", // phpcs:ignore WordPress.DB.PreparedSQL
+				$seatMapId
+			)
+		);
+		return $count > 0;
+	}
+
+	/**
 	 * Only reachable once `isReferenced()` is false - the caller enforces that, not this method.
 	 *
 	 * Returns whether a row was actually removed (AGENTS.md Task 11 fix round 1): `$wpdb->query()`

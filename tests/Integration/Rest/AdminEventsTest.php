@@ -408,6 +408,48 @@ final class AdminEventsTest extends ReservantTestCase {
 		self::assertSame( array(), ( new \Reservant\Infrastructure\Db\SeatMapRepository( $wpdb ) )->seatsForMap( (int) $map['id'] ) );
 	}
 
+	/**
+	 * Review round 1 fix: `hasClaims()` alone does not catch a map that no seat has ever been
+	 * claimed on but that a live service still points at via `seat_map_id` - deleting it would
+	 * leave that column dangling. No booking exists here at all, only the service link.
+	 */
+	public function test_seat_map_delete_linked_to_a_service_without_any_claims_is_refused_referenced(): void {
+		$this->asAdmin();
+		$map     = $this->createSeatMap();
+		$this->createSeatMappedService( 'GridShow', (int) $map['id'] );
+
+		$response = $this->request( 'DELETE', "/reservant/v1/admin/seat-maps/{$map['id']}" );
+		self::assertSame( 409, $response->get_status() );
+		self::assertSame( 'referenced', $response->get_data()['message'] );
+
+		self::assertSame( 200, $this->request( 'GET', "/reservant/v1/admin/seat-maps/{$map['id']}" )->get_status() );
+		global $wpdb;
+		self::assertNotSame(
+			array(),
+			( new \Reservant\Infrastructure\Db\SeatMapRepository( $wpdb ) )->seatsForMap( (int) $map['id'] ),
+			'Seats must survive a refused delete.'
+		);
+	}
+
+	/**
+	 * PUT's guard is deliberately narrower than DELETE's (see the class docblock): re-parsing a map
+	 * that a service still links but nobody has claimed a seat on is safe - the service goes on
+	 * pointing at a real, still-existing map, just with new geometry - so `usesSeatMap()` must not
+	 * block it the way it blocks DELETE.
+	 */
+	public function test_seat_map_put_is_allowed_while_linked_to_a_service_without_claims(): void {
+		$this->asAdmin();
+		$map = $this->createSeatMap();
+		$this->createSeatMappedService( 'GridShow', (int) $map['id'] );
+
+		$response = $this->jsonRequest(
+			'PUT',
+			"/reservant/v1/admin/seat-maps/{$map['id']}",
+			array( 'spec' => 'rows A-C, 2 per row' )
+		);
+		self::assertSame( 200, $response->get_status(), (string) wp_json_encode( $response->get_data() ) );
+	}
+
 	public function test_seat_map_delete_after_a_seat_claim_is_refused_referenced(): void {
 		$this->asAdmin();
 		$map        = $this->createSeatMap();

@@ -112,9 +112,18 @@ final class SeatMapRepository {
 		return $row;
 	}
 
-	/** Re-parsed spec text plus its (possibly renamed) map row - the seat rows are replaced separately. */
-	public function updateSpec( int $id, string $name, string $spec ): void {
-		$this->db->update(
+	/**
+	 * Re-parsed spec text plus its (possibly renamed) map row - the seat rows are replaced
+	 * separately. Returns whether the write itself succeeded (review round 1 fix, AGENTS.md Task 12):
+	 * `$wpdb->update()` returns `int|false` - `false` only on a genuine driver-level failure, while a
+	 * matched-but-unchanged row (every column already held the value being written) legitimately
+	 * reports `0` rows "affected" without being an error. The caller's own existence recheck
+	 * (`lockForUpdate()`) is what actually proves the row is still there before this runs; this
+	 * method's return is a secondary signal for "did the write itself fail", not "did anything
+	 * change".
+	 */
+	public function updateSpec( int $id, string $name, string $spec ): bool {
+		$result = $this->db->update(
 			"{$this->db->prefix}reservant_seat_maps",
 			array(
 				'name' => $name,
@@ -122,6 +131,22 @@ final class SeatMapRepository {
 			),
 			array( 'id' => $id )
 		);
+		return false !== $result;
+	}
+
+	/**
+	 * A locking existence recheck (review round 1 fix, AGENTS.md Task 12): `SELECT ... FOR UPDATE`,
+	 * only meaningful inside a transaction. Proves the row is still there right before a guarded
+	 * write mutates it, and - by taking the row lock - keeps it there for the rest of that
+	 * transaction, so a concurrent DELETE cannot remove it out from under `updateSpec()`/
+	 * `deleteSeats()`/`insertSeats()` and leave orphaned seat rows pointing at a vanished map.
+	 */
+	public function lockForUpdate( int $id ): bool {
+		$p     = $this->db->prefix;
+		$found = $this->db->get_var(
+			$this->db->prepare( "SELECT id FROM {$p}reservant_seat_maps WHERE id = %d FOR UPDATE", $id ) // phpcs:ignore WordPress.DB.PreparedSQL
+		);
+		return null !== $found;
 	}
 
 	/** Every seat row of one map, physically removed - only ever called alongside `insertSeats()` (a replace) or `delete()` (a teardown), both inside a transaction. */
