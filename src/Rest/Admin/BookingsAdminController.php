@@ -80,19 +80,25 @@ final class BookingsAdminController {
 		return new \WP_REST_Response(
 			array(
 				'total'    => $total,
-				'bookings' => array_map( fn ( array $row ): array => $this->presentBooking( $row ), $rows ),
+				'bookings' => array_map( fn ( array $row ): array => $this->presentForCaller( $row ), $rows ),
 			)
 		);
 	}
 
-	/** GET /admin/bookings/{uuid} - the same joined shape as the list, plus the audit trail. */
+	/**
+	 * GET /admin/bookings/{uuid} - the same joined shape as the list, plus the audit trail.
+	 *
+	 * Manage-gated (AGENTS.md Task 10 fix round 1: this route is only reachable with
+	 * `reservant_manage_bookings`, so `presentForCaller()`'s contact-stripping branch never fires
+	 * here - kept for defense in depth, not because a staff-only caller can reach this handler.
+	 */
 	public function show( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
 		$booking = ( new BookingRepository( $this->db ) )->findDetailByUuid( (string) $request->get_param( 'uuid' ) );
 		if ( null === $booking ) {
 			return Errors::notFound();
 		}
 		$audit   = ( new AuditLog( $this->db ) )->forBooking( (int) $booking['id'] );
-		$payload = $this->presentBooking( $booking );
+		$payload = $this->presentForCaller( $booking );
 
 		$payload['audit'] = $audit;
 		return new \WP_REST_Response( $payload );
@@ -104,8 +110,10 @@ final class BookingsAdminController {
 	 * other booking response goes through, so `manage_token` never leaves this endpoint.
 	 *
 	 * `HoldBooking` itself always records its own system-tagged audit row (actor `admin`, action
-	 * `admin_create`); this handler adds a second row naming the real WP user who did it, so the
-	 * detail view's audit trail can show both "this was an admin-mode booking" and "created by X".
+	 * `admin_create`); this handler adds a SECOND row, `admin_create_by`, naming the real WP user
+	 * who did it - a distinct action name on purpose (AGENTS.md Task 10 fix round 1: reusing
+	 * `admin_create` for both rows made "who created this" ambiguous in the audit trail), so the
+	 * detail view can show both "this was an admin-mode booking" and "created by X".
 	 */
 	public function create( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
 		try {
@@ -124,10 +132,10 @@ final class BookingsAdminController {
 
 		$actor = (string) wp_get_current_user()->user_login;
 		if ( '' !== $actor ) {
-			( new AuditLog( $this->db ) )->record( (int) $booking['id'], $actor, 'admin_create' );
+			( new AuditLog( $this->db ) )->record( (int) $booking['id'], $actor, 'admin_create_by' );
 		}
 
-		return new \WP_REST_Response( $this->presentBooking( $booking ), 201 );
+		return new \WP_REST_Response( $this->presentForCaller( $booking ), 201 );
 	}
 
 	/**
@@ -135,7 +143,10 @@ final class BookingsAdminController {
 	 *
 	 * A staff member (`reservant_approve_bookings` without `reservant_manage_bookings`) may only
 	 * approve a booking assigned to their own resource (AGENTS.md section 10: "Approval decisions are
-	 * made by admins or by the staff member assigned to the booking").
+	 * made by admins or by the staff member assigned to the booking"). Reachable with only
+	 * `reservant_approve_bookings` - `presentForCaller()` strips the customer's contact details for
+	 * exactly that caller (AGENTS.md Task 10 fix round 1: contact details require
+	 * `reservant_manage_bookings`).
 	 */
 	public function approve( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
 		$uuid    = (string) $request->get_param( 'uuid' );
@@ -154,10 +165,13 @@ final class BookingsAdminController {
 		} catch ( \RuntimeException $exception ) {
 			return Errors::failure( $exception );
 		}
-		return new \WP_REST_Response( $this->presentBooking( $approved ) );
+		return new \WP_REST_Response( $this->presentForCaller( $approved ) );
 	}
 
-	/** POST /admin/bookings/{uuid}/reject - body `{reason?: string}`. Same own-resource scope as approve. */
+	/**
+	 * POST /admin/bookings/{uuid}/reject - body `{reason?: string}`. Same own-resource scope, and
+	 * the same contact-stripping for a staff-only caller, as approve.
+	 */
 	public function reject( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
 		$uuid    = (string) $request->get_param( 'uuid' );
 		$booking = ( new BookingRepository( $this->db ) )->findByUuid( $uuid );
@@ -176,10 +190,19 @@ final class BookingsAdminController {
 		} catch ( \RuntimeException $exception ) {
 			return Errors::failure( $exception );
 		}
-		return new \WP_REST_Response( $this->presentBooking( $rejected ) );
+		return new \WP_REST_Response( $this->presentForCaller( $rejected ) );
 	}
 
-	/** POST /admin/bookings/{uuid}/cancel - the manager override (`force: true`); no staff scoping. */
+	/**
+	 * POST /admin/bookings/{uuid}/cancel - the manager override (`force: true`); no staff scoping,
+	 * manage-gated.
+	 *
+	 * `CancelBooking` always records its own audit row with the hardcoded actor `'customer'` (it is
+	 * shared with the guest-facing `DELETE /holds`/`POST /bookings/{uuid}/cancel` paths, where that
+	 * is correct); an admin force-cancel through THIS route adds a second row, `admin_cancel`, naming
+	 * the real WP user, so a manager's cancellation is never misattributed to the customer in the
+	 * audit trail (AGENTS.md Task 10 fix round 1).
+	 */
 	public function cancel( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
 		$uuid = (string) $request->get_param( 'uuid' );
 		if ( null === ( new BookingRepository( $this->db ) )->findByUuid( $uuid ) ) {
@@ -190,7 +213,13 @@ final class BookingsAdminController {
 		} catch ( \RuntimeException $exception ) {
 			return Errors::failure( $exception );
 		}
-		return new \WP_REST_Response( $this->presentBooking( $cancelled ) );
+
+		$actor = (string) wp_get_current_user()->user_login;
+		if ( '' !== $actor ) {
+			( new AuditLog( $this->db ) )->record( (int) $cancelled['id'], $actor, 'admin_cancel' );
+		}
+
+		return new \WP_REST_Response( $this->presentForCaller( $cancelled ) );
 	}
 
 	/** POST /admin/bookings/{uuid}/no_show */
@@ -214,7 +243,28 @@ final class BookingsAdminController {
 		} catch ( \RuntimeException $exception ) {
 			return Errors::failure( $exception );
 		}
-		return new \WP_REST_Response( $this->presentBooking( $result ) );
+		return new \WP_REST_Response( $this->presentForCaller( $result ) );
+	}
+
+	/**
+	 * `presentBooking()` plus one more rule (AGENTS.md Task 10 fix round 1, spec: "contact details
+	 * require `reservant_manage_bookings`"): a caller who reached this controller on
+	 * `reservant_approve_bookings`/`reservant_view_own_calendar` alone - never `reservant_manage_bookings`
+	 * - must not receive the customer's email or phone, on ANY admin response, not only the calendar.
+	 * Every handler in this class routes its response through this method rather than
+	 * `presentBooking()` directly, so the rule cannot be forgotten route-by-route; on the
+	 * manage-gated routes (list/detail/create/cancel/no_show/complete) the caller always holds
+	 * `reservant_manage_bookings` already, so the branch below is a no-op there.
+	 *
+	 * @param array<string, mixed> $booking
+	 * @return array<string, mixed>
+	 */
+	private function presentForCaller( array $booking ): array {
+		$payload = $this->presentBooking( $booking );
+		if ( ! current_user_can( Routes::CAP_MANAGE ) ) {
+			unset( $payload['customer_email'], $payload['customer_phone'] );
+		}
+		return $payload;
 	}
 
 	/**

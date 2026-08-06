@@ -130,16 +130,6 @@ final class AdminBookingsTest extends ReservantTestCase {
 		$wpdb->update( "{$wpdb->prefix}reservant_bookings", array( 'hold_expires_at' => '2000-01-01 00:00:00' ), array( 'uuid' => $uuid ) );
 	}
 
-	/** Next 5-minute-aligned instant at or after `$dt`. */
-	private static function alignedUp( \DateTimeImmutable $dt ): \DateTimeImmutable {
-		$ts = (int) ceil( $dt->getTimestamp() / 300 ) * 300;
-		return ( new \DateTimeImmutable( '@' . $ts ) )->setTimezone( new \DateTimeZone( 'UTC' ) );
-	}
-
-	private static function realNow(): \DateTimeImmutable {
-		return new \DateTimeImmutable( 'now', new \DateTimeZone( 'UTC' ) );
-	}
-
 	// ---------------------------------------------------------------- permission matrix
 
 	/**
@@ -270,13 +260,14 @@ final class AdminBookingsTest extends ReservantTestCase {
 		self::assertArrayNotHasKey( 'manage_token', $created );
 		self::assertArrayNotHasKey( 'manage_token_hash', $created );
 
-		// The audit trail attributes the create to the real WP user, not just HoldBooking's
-		// generic system tag.
-		$user  = wp_get_current_user();
-		$audit = $this->request( 'GET', "/reservant/v1/admin/bookings/{$created['uuid']}" )->get_data()['audit'];
-		$actors = array_column( $audit, 'actor' );
-		self::assertContains( 'admin', $actors );
-		self::assertContains( $user->user_login, $actors );
+		// The audit trail attributes the create to the real WP user via a distinctly-named row
+		// (`admin_create_by`), never colliding with HoldBooking's own system-tagged
+		// `admin`/`admin_create` row - two different rows, two different meanings.
+		$user   = wp_get_current_user();
+		$audit  = $this->request( 'GET', "/reservant/v1/admin/bookings/{$created['uuid']}" )->get_data()['audit'];
+		$byAction = array_column( $audit, 'actor', 'action' );
+		self::assertSame( 'admin', $byAction['admin_create'] );
+		self::assertSame( $user->user_login, $byAction['admin_create_by'] );
 	}
 
 	public function test_manual_booking_rejects_a_malformed_body(): void {
@@ -306,10 +297,18 @@ final class AdminBookingsTest extends ReservantTestCase {
 		self::assertSame( 200, $approved->get_status(), (string) wp_json_encode( $approved->get_data() ) );
 		self::assertSame( 'confirmed', $approved->get_data()['status'] );
 
-		// A manager needs no resource of their own.
+		// Spec: contact details require reservant_manage_bookings. A staff-only caller (only
+		// reservant_approve_bookings) sees the customer's name but never their email or phone, even
+		// on the booking they were just allowed to approve.
+		self::assertSame( 'Customer', $approved->get_data()['customer_name'] );
+		self::assertArrayNotHasKey( 'customer_email', $approved->get_data() );
+		self::assertArrayNotHasKey( 'customer_phone', $approved->get_data() );
+
+		// A manager needs no resource of their own, and sees the full contact details.
 		$this->asAdmin();
 		$managerApproved = $this->jsonRequest( 'POST', "/reservant/v1/admin/bookings/{$other}/approve", array() );
 		self::assertSame( 200, $managerApproved->get_status() );
+		self::assertSame( 'customer@example.com', $managerApproved->get_data()['customer_email'] );
 	}
 
 	public function test_reject_via_rest_records_the_reason(): void {
@@ -346,6 +345,15 @@ final class AdminBookingsTest extends ReservantTestCase {
 		$cancel     = $this->jsonRequest( 'POST', "/reservant/v1/admin/bookings/{$confirmed3['uuid']}/cancel", array() );
 		self::assertSame( 200, $cancel->get_status() );
 		self::assertSame( 'cancelled', $cancel->get_data()['status'] );
+
+		// The audit trail must not misattribute a manager's force-cancel to the customer:
+		// CancelBooking's own row is actor 'customer' (shared with the guest-facing cancel paths),
+		// and this route adds a second, distinctly-named row with the real WP user.
+		$user  = wp_get_current_user();
+		$audit = $this->request( 'GET', "/reservant/v1/admin/bookings/{$confirmed3['uuid']}" )->get_data()['audit'];
+		$byAction = array_column( $audit, 'actor', 'action' );
+		self::assertSame( 'customer', $byAction['cancelled'] );
+		self::assertSame( $user->user_login, $byAction['admin_cancel'] );
 	}
 
 	// ---------------------------------------------------------------- differential property test
@@ -457,51 +465,52 @@ final class AdminBookingsTest extends ReservantTestCase {
 	 * Fixture: a start inside an ordinary customer's lead-time window (AGENTS.md Task 10: this is
 	 * the divergence `AvailabilityQuery::$ignoreWindow` exists to close). The admin endpoint must
 	 * offer it - and an admin hold must accept it - exactly where the public endpoint refuses.
+	 *
+	 * The synthetic "now" is pinned via the suite's own `utc()`/`sql()` fixture helpers, like every
+	 * other test in this class, rather than computed from the real wall clock: a 20-day lead time
+	 * against `$this->utc(1)` (always ~8 real-world days out - see `ReservantTestCase::utc()`) sits
+	 * inside the lead window for an ordinary customer request regardless of what hour the suite
+	 * happens to run at. The previous version of this test computed its target as `real now + 1
+	 * hour` rounded to the grid, which crossed midnight - and so fell outside the fixture's daytime
+	 * opening-hours rule - whenever the suite ran late enough in the UTC day; pinning removes that
+	 * dependency entirely, and the ordinary 09:00-17:00 rule from `set_up()` is enough.
 	 */
 	public function test_differential_lead_time_boundary_is_admin_only(): void {
 		global $wpdb;
 		$service = ( new ServiceRepository( $wpdb ) )->insert(
-			array( 'name' => 'LeadEdge', 'type' => 'appointment', 'duration_min' => 30, 'payment_mode' => 'onsite', 'lead_time_min' => 180 )
+			array( 'name' => 'LeadEdge', 'type' => 'appointment', 'duration_min' => 30, 'payment_mode' => 'onsite', 'lead_time_min' => 28800 )
 		);
-		$staff = ( new ResourceRepository( $wpdb ) )->insert( array( 'name' => 'AllDay' ) );
-		( new ResourceRepository( $wpdb ) )->linkService( $service, $staff );
-		foreach ( range( 1, 7 ) as $weekday ) {
-			( new AvailabilityRepository( $wpdb ) )->insertRule( $staff, new AvailabilityRule( $weekday, '00:00', '23:55' ) );
-		}
+		( new ResourceRepository( $wpdb ) )->linkService( $service, $this->staffA );
 
-		$now    = self::realNow();
-		$target = self::alignedUp( $now->modify( '+1 hour' ) ); // Well inside the 180-minute lead window.
-		$from   = $now->format( 'Y-m-d' );
-		$to     = $now->modify( '+2 days' )->format( 'Y-m-d' );
-		$targetSql = $target->format( 'Y-m-d H:i:s' );
-
+		$target = $this->sql( 1, '10:00' );
 		$params = array(
-			'items' => wp_json_encode( array( array( 'service_id' => $service, 'resource_id' => $staff ) ) ),
-			'from'  => $from,
-			'to'    => $to,
+			'items' => wp_json_encode( array( array( 'service_id' => $service, 'resource_id' => $this->staffA ) ) ),
+			'from'  => $this->utc( 1 )->format( 'Y-m-d' ),
+			'to'    => $this->utc( 2 )->format( 'Y-m-d' ),
 		);
 
 		$this->asAdmin();
 		$adminStarts = array_column( $this->request( 'GET', '/reservant/v1/admin/availability', $params )->get_data()['starts'], 'utc' );
-		self::assertContains( $targetSql, $adminStarts, 'The admin endpoint must ignore the lead-time clamp.' );
+		self::assertContains( $target, $adminStarts, 'The admin endpoint must ignore the lead-time clamp.' );
 
 		$publicStarts = array_column( $this->request( 'GET', '/reservant/v1/availability', $params )->get_data()['starts'], 'utc' );
-		self::assertNotContains( $targetSql, $publicStarts, 'The public endpoint must still respect the lead-time clamp.' );
+		self::assertNotContains( $target, $publicStarts, 'The public endpoint must still respect the lead-time clamp.' );
 
-		$adminHeld = $this->manualBooking( $targetSql, $service, $staff );
+		$adminHeld = $this->manualBooking( $target, $service, $this->staffA );
 		self::assertSame( 'confirmed', $adminHeld['status'] );
 
+		// A genuinely free, untaken adjacent start - not the one the admin just occupied - still
+		// refuses an ordinary customer request specifically on `lead_time`, not merely `overlap`.
+		$adjacent        = $this->sql( 1, '11:00' );
 		$customerRefused = $this->jsonRequest(
 			'POST',
 			'/reservant/v1/holds',
 			array(
 				'customer'    => array( 'name' => 'M', 'email' => 'm@example.com' ),
-				'appointment' => array( 'start_utc' => $targetSql, 'segments' => array( array( 'service_id' => $service, 'resource_id' => $staff ) ) ),
+				'appointment' => array( 'start_utc' => $adjacent, 'segments' => array( array( 'service_id' => $service, 'resource_id' => $this->staffA ) ) ),
 			)
 		);
-		// The admin's own booking already occupies the slot, so a customer request refuses on
-		// `overlap` at worst - and would have refused on `lead_time` even against a free slot,
-		// as the direct public-availability assertion above already demonstrates.
 		self::assertSame( 409, $customerRefused->get_status() );
+		self::assertSame( 'lead_time', $customerRefused->get_data()['message'] );
 	}
 }
