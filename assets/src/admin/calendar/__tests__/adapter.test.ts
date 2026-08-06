@@ -1,4 +1,4 @@
-import { toEvents, utcToSite } from '../adapter';
+import { siteToUtc, toEvents, utcToSite } from '../adapter';
 import type { CalendarBooking, CalendarBookingItem, CalendarOccurrence } from '../../api/types';
 
 describe( 'utcToSite', () => {
@@ -42,6 +42,47 @@ describe( 'utcToSite', () => {
 		const site = utcToSite( '2026-01-15 00:00:00', 'Pacific/Kiritimati' ); // UTC+14, crosses a date
 		expect( site.getDate() ).toBe( 15 );
 		expect( site.getHours() ).toBe( 14 );
+	} );
+} );
+
+describe( 'siteToUtc', () => {
+	it( 'is a no-op shift for UTC itself', () => {
+		expect( siteToUtc( '2026-06-01', '09:30:15', 'UTC' ) ).toBe( '2026-06-01 09:30:15' );
+	} );
+
+	it( 'defaults seconds to :00 when the time string carries none (a bare HH:MM time input)', () => {
+		expect( siteToUtc( '2026-06-01', '09:30', 'UTC' ) ).toBe( '2026-06-01 09:30:00' );
+	} );
+
+	it( 'converts Europe/Athens local noon (EEST, +3, before the fold) to 09:00 UTC', () => {
+		expect( siteToUtc( '2026-06-01', '12:00', 'Europe/Athens' ) ).toBe( '2026-06-01 09:00:00' );
+	} );
+
+	it( 'converts Europe/Athens local 11:00 on 2026-10-26 (EET, +2, after the fold) to 09:00 UTC', () => {
+		expect( siteToUtc( '2026-10-26', '11:00', 'Europe/Athens' ) ).toBe( '2026-10-26 09:00:00' );
+	} );
+
+	it( 'is the exact inverse of utcToSite for a normal (non-ambiguous) instant', () => {
+		const utc = siteToUtc( '2026-06-01', '09:30:00', 'Europe/Athens' );
+		const site = utcToSite( utc, 'Europe/Athens' );
+		expect( [ site.getMonth(), site.getDate(), site.getHours(), site.getMinutes() ] ).toEqual( [ 5, 1, 9, 30 ] );
+	} );
+
+	// Europe/Athens, 2026-10-25: DST ends that day at 04:00 EEST -> 03:00 EET, so local 03:00-03:59
+	// is ambiguous - it happens twice, once as EEST (+3, UTC 00:00-00:59) and once as EET (+2, UTC
+	// 01:00-01:59). `siteToUtc` resolves the ambiguity deterministically to the LATER of the two
+	// real instants (the post-transition, standard-time EET occurrence): its first pass samples the
+	// site's offset by treating the target wall-clock digits themselves as a UTC instant on the same
+	// calendar date, which - for any transition landing in the small hours local time, as every real
+	// IANA rule does - already lies past the transition point in real UTC time, so the offset it
+	// samples is always the POST-transition one. This is pinned exactly here rather than left
+	// implicit, mirroring `utcToSite`'s own fold-boundary tests above.
+	it( 'resolves the ambiguous fall-back hour (local 03:30 on 2026-10-25) to its later, post-transition (EET, +2) UTC instant', () => {
+		expect( siteToUtc( '2026-10-25', '03:30', 'Europe/Athens' ) ).toBe( '2026-10-25 01:30:00' );
+	} );
+
+	it( 'is portable across the host machine\'s own timezone (does not depend on process.env.TZ)', () => {
+		expect( siteToUtc( '2026-01-15', '14:00', 'Pacific/Kiritimati' ) ).toBe( '2026-01-15 00:00:00' ); // UTC+14
 	} );
 } );
 

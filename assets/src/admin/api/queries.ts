@@ -9,6 +9,7 @@ import { addDays, format, parseISO } from 'date-fns';
 import { bootConfig } from '../boot';
 import { apiFetch } from './client';
 import type {
+	AvailabilityException,
 	AvailabilityResponse,
 	BookingDetail,
 	BookingFilters,
@@ -26,6 +27,7 @@ import type {
 	Service,
 	ServicesResponse,
 	SettingsPayload,
+	WpUser,
 } from './types';
 
 /** A date-only range, `to` exclusive - matches `CalendarAdminController::window()`. */
@@ -123,6 +125,222 @@ export function useSettings(): UseQueryResult< SettingsPayload, Error > {
 	return useQuery( {
 		queryKey: [ 'settings' ],
 		queryFn: () => apiFetch< SettingsPayload >( '/admin/settings' ),
+	} );
+}
+
+/**
+ * WP-core user search (Task 16, `StaffScreen`'s wp_user link) - `GET /wp/v2/users?search=`, the
+ * core namespace rather than `reservant/v1` (`apiFetch`'s namespace override, `api/client.ts`).
+ * Disabled for a blank search: an admin site can carry thousands of users, and the endpoint's own
+ * default page size (10) would otherwise show an arbitrary, unsearched slice of them.
+ */
+export function useWpUsers( search: string ): UseQueryResult< WpUser[], Error > {
+	const trimmed = search.trim();
+	return useQuery( {
+		queryKey: [ 'wp-users', trimmed ],
+		queryFn: () => apiFetch< WpUser[] >( `/users${ toQueryString( { search: trimmed } ) }`, {}, 'wp/v2' ),
+		enabled: '' !== trimmed,
+	} );
+}
+
+/**
+ * A single WP-core user by id (`GET /wp/v2/users/{id}`) - `StaffScreen`'s own display name for a
+ * resource's already-linked `wp_user_id`, which `Resource` itself never carries (only the bare id):
+ * without this, editing a resource that already names a user would show the search combobox blank
+ * rather than who is actually linked. Disabled for `null` (no link to look up).
+ */
+export function useWpUser( id: number | null ): UseQueryResult< WpUser, Error > {
+	return useQuery( {
+		queryKey: [ 'wp-user', id ],
+		queryFn: () => apiFetch< WpUser >( `/users/${ id ?? 0 }`, {}, 'wp/v2' ),
+		enabled: null !== id,
+	} );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Catalog mutations (Task 16) - services, staff (resources + availability rules/exceptions),
+// occurrences, seat maps and settings. Each save takes an optional `id`: present -> PUT (a partial
+// patch, mirroring every *AdminController::update()`'s own semantics), absent -> POST (create).
+// Every one invalidates its own list key; `resources`/`occurrences` also invalidate `calendar`
+// (Task 14's grid reads both), since only those two feed it - `services`/`seat-maps`/`settings` do
+// not (the brief's own invalidation table).
+// ---------------------------------------------------------------------------------------------
+
+export interface ServiceSaveInput extends Partial< Omit< Service, 'id' | 'wc_product_id' | 'created_at' | 'updated_at' > > {
+	id?: number;
+}
+
+export function useSaveService(): UseMutationResult< Service, Error, ServiceSaveInput > {
+	const queryClient = useQueryClient();
+	return useMutation( {
+		mutationFn: ( { id, ...patch }: ServiceSaveInput ) =>
+			undefined === id
+				? apiFetch< Service >( '/admin/services', { method: 'POST', body: JSON.stringify( patch ) } )
+				: apiFetch< Service >( `/admin/services/${ id }`, { method: 'PUT', body: JSON.stringify( patch ) } ),
+		onSuccess: () => {
+			void queryClient.invalidateQueries( { queryKey: [ 'services' ] } );
+		},
+	} );
+}
+
+export function useDeleteService(): UseMutationResult< void, Error, number > {
+	const queryClient = useQueryClient();
+	return useMutation( {
+		mutationFn: ( id: number ) => apiFetch< void >( `/admin/services/${ id }`, { method: 'DELETE' } ),
+		onSuccess: () => {
+			void queryClient.invalidateQueries( { queryKey: [ 'services' ] } );
+		},
+	} );
+}
+
+/** A weekly rule as `ResourcesAdminController::sanitizeRules()` wants it - no id/valid_from/valid_to; the admin route never accepts or returns those on a save. */
+export interface RuleInput {
+	weekday: number;
+	start_time: string;
+	end_time: string;
+}
+
+export interface ResourceSaveInput {
+	id?: number;
+	name?: string;
+	email?: string | null;
+	wp_user_id?: number | null;
+	status?: Resource[ 'status' ];
+	/** Replace-all-per-save, only when present (`ResourcesAdminController` class docblock). */
+	service_ids?: number[];
+	/** Replace-all-per-save, only when present - same rule as `service_ids`. */
+	rules?: RuleInput[];
+}
+
+export function useSaveResource(): UseMutationResult< Resource, Error, ResourceSaveInput > {
+	const queryClient = useQueryClient();
+	return useMutation( {
+		mutationFn: ( { id, ...patch }: ResourceSaveInput ) =>
+			undefined === id
+				? apiFetch< Resource >( '/admin/resources', { method: 'POST', body: JSON.stringify( patch ) } )
+				: apiFetch< Resource >( `/admin/resources/${ id }`, { method: 'PUT', body: JSON.stringify( patch ) } ),
+		onSuccess: () => {
+			void queryClient.invalidateQueries( { queryKey: [ 'resources' ] } );
+			void queryClient.invalidateQueries( { queryKey: [ 'calendar' ] } );
+		},
+	} );
+}
+
+/**
+ * One availability exception, resource-scoped or business-wide - `resourceId: null` routes to
+ * `/admin/exceptions` (`ResourcesAdminController::addBusinessException()`/`removeBusinessException()`),
+ * a real id to `/admin/resources/{id}/exceptions`. The same shape serves both add (POST) and remove
+ * (DELETE, which matches by shape - date plus whether a window was given - not by row id; see the
+ * controller's own class docblock).
+ */
+export interface ExceptionInput {
+	resourceId: number | null;
+	date: string;
+	start_time?: string;
+	end_time?: string;
+	/** Accepted for forward compatibility only - the schema carries no such column, so it never round-trips back. */
+	reason?: string;
+}
+
+function exceptionPath( resourceId: number | null ): string {
+	return null === resourceId ? '/admin/exceptions' : `/admin/resources/${ resourceId }/exceptions`;
+}
+
+export function useAddException(): UseMutationResult< AvailabilityException, Error, ExceptionInput > {
+	const queryClient = useQueryClient();
+	return useMutation( {
+		mutationFn: ( { resourceId, ...body }: ExceptionInput ) =>
+			apiFetch< AvailabilityException >( exceptionPath( resourceId ), { method: 'POST', body: JSON.stringify( body ) } ),
+		onSuccess: ( _data, variables ) => {
+			if ( null !== variables.resourceId ) {
+				void queryClient.invalidateQueries( { queryKey: [ 'resources' ] } );
+			}
+		},
+	} );
+}
+
+export function useRemoveException(): UseMutationResult< { deleted: number }, Error, ExceptionInput > {
+	const queryClient = useQueryClient();
+	return useMutation( {
+		mutationFn: ( { resourceId, ...body }: ExceptionInput ) =>
+			apiFetch< { deleted: number } >( exceptionPath( resourceId ), { method: 'DELETE', body: JSON.stringify( body ) } ),
+		onSuccess: ( _data, variables ) => {
+			if ( null !== variables.resourceId ) {
+				void queryClient.invalidateQueries( { queryKey: [ 'resources' ] } );
+			}
+		},
+	} );
+}
+
+/** `OccurrencesAdminController` - `service_id` only matters for a create (POST); a PUT patch ignores it if sent. */
+export interface OccurrenceSaveInput {
+	id?: number;
+	service_id?: number;
+	start_utc?: string;
+	end_utc?: string;
+	capacity?: number;
+}
+
+export function useSaveOccurrence(): UseMutationResult< Occurrence, Error, OccurrenceSaveInput > {
+	const queryClient = useQueryClient();
+	return useMutation( {
+		mutationFn: ( { id, ...patch }: OccurrenceSaveInput ) =>
+			undefined === id
+				? apiFetch< Occurrence >( '/admin/occurrences', { method: 'POST', body: JSON.stringify( patch ) } )
+				: apiFetch< Occurrence >( `/admin/occurrences/${ id }`, { method: 'PUT', body: JSON.stringify( patch ) } ),
+		onSuccess: () => {
+			void queryClient.invalidateQueries( { queryKey: [ 'occurrences' ] } );
+			void queryClient.invalidateQueries( { queryKey: [ 'calendar' ] } );
+		},
+	} );
+}
+
+/** DELETE /admin/occurrences/{id} - a soft cancel (`OccurrenceRepository::cancel()`), refused with 409 `referenced` while any booking actively holds it. */
+export function useCancelOccurrence(): UseMutationResult< void, Error, number > {
+	const queryClient = useQueryClient();
+	return useMutation( {
+		mutationFn: ( id: number ) => apiFetch< void >( `/admin/occurrences/${ id }`, { method: 'DELETE' } ),
+		onSuccess: () => {
+			void queryClient.invalidateQueries( { queryKey: [ 'occurrences' ] } );
+			void queryClient.invalidateQueries( { queryKey: [ 'calendar' ] } );
+		},
+	} );
+}
+
+export interface SeatMapSaveInput {
+	id?: number;
+	name: string;
+	spec: string;
+}
+
+/** POST/PUT /admin/seat-maps - a 400 carries the parser's own message verbatim in `detail`; a PUT may 409 `referenced` once any seat is claimed. */
+export function useSaveSeatMap(): UseMutationResult< SeatMap, Error, SeatMapSaveInput > {
+	const queryClient = useQueryClient();
+	return useMutation( {
+		mutationFn: ( { id, ...patch }: SeatMapSaveInput ) =>
+			undefined === id
+				? apiFetch< SeatMap >( '/admin/seat-maps', { method: 'POST', body: JSON.stringify( patch ) } )
+				: apiFetch< SeatMap >( `/admin/seat-maps/${ id }`, { method: 'PUT', body: JSON.stringify( patch ) } ),
+		onSuccess: () => {
+			void queryClient.invalidateQueries( { queryKey: [ 'seat-maps' ] } );
+		},
+	} );
+}
+
+/**
+ * PUT /admin/settings - a partial patch; the caller must never forward an explicit `null` (T3
+ * ledger note - `SettingsAdminController::sanitizeFields()` 400s any key present with a `null`
+ * value rather than silently keeping the old one), so `SettingsScreen` only ever includes keys it
+ * holds a real value for.
+ */
+export function useSaveSettings(): UseMutationResult< SettingsPayload, Error, Partial< SettingsPayload > > {
+	const queryClient = useQueryClient();
+	return useMutation( {
+		mutationFn: ( patch: Partial< SettingsPayload > ) =>
+			apiFetch< SettingsPayload >( '/admin/settings', { method: 'PUT', body: JSON.stringify( patch ) } ),
+		onSuccess: () => {
+			void queryClient.invalidateQueries( { queryKey: [ 'settings' ] } );
+		},
 	} );
 }
 

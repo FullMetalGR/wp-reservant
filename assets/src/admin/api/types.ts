@@ -315,6 +315,17 @@ export interface ManualBookingRequest {
 	event?: ManualBookingEvent;
 }
 
+/**
+ * A WP core user row, `view` context (`GET /wp/v2/users?search=`, WP-core namespace, not
+ * `reservant/v1` - `api/client.ts`'s `apiFetch` namespace override) - only the two fields
+ * `StaffScreen`'s (Task 16) user-search link needs; `view` context never carries `email` (that
+ * needs `edit` context and `list_users`), which this SPA does not need either.
+ */
+export interface WpUser {
+	id: number;
+	name: string;
+}
+
 /** `AvailabilityAdminController::index()` - one feasible chain start time, in both zones. */
 export interface AvailabilityStart {
 	utc: string;

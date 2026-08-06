@@ -5,8 +5,13 @@ import { Notice } from '@wordpress/components';
 import { ToastProvider } from './Toasts';
 import { BookingsScreen } from '../screens/BookingsScreen';
 import { CalendarScreen } from '../screens/CalendarScreen';
+import { EventsScreen } from '../screens/EventsScreen';
 import { ManualBookingDrawer } from '../screens/ManualBookingDrawer';
 import { MyCalendarScreen } from '../screens/MyCalendarScreen';
+import { SeatMapsScreen } from '../screens/SeatMapsScreen';
+import { ServicesScreen } from '../screens/ServicesScreen';
+import { SettingsScreen } from '../screens/SettingsScreen';
+import { StaffScreen } from '../screens/StaffScreen';
 
 export interface HashRoute {
 	screen: string;
@@ -56,9 +61,9 @@ function visibleActions( caps: string[] ): NavAction[] {
 }
 
 /**
- * Renders the current route's screen. `calendar`, `my-calendar` (Task 14) and `bookings` (Task 15)
- * are real; every other screen is still the Task 13 placeholder - Task 16 replaces each in turn
- * without touching this switch's shape.
+ * Renders the current route's screen. Every screen named in `SCREEN_TITLES` is now real (Task 16
+ * completes the catalog + settings screens Task 13 left as placeholders); the `default` branch
+ * survives only as a guard for a menu slug this switch has not caught up to.
  */
 function renderScreen( route: HashRoute ): JSX.Element {
 	switch ( route.screen ) {
@@ -68,6 +73,16 @@ function renderScreen( route: HashRoute ): JSX.Element {
 			return <MyCalendarScreen />;
 		case 'bookings':
 			return <BookingsScreen id={ route.id } />;
+		case 'services':
+			return <ServicesScreen />;
+		case 'staff':
+			return <StaffScreen />;
+		case 'events':
+			return <EventsScreen />;
+		case 'seat-maps':
+			return <SeatMapsScreen />;
+		case 'settings':
+			return <SettingsScreen />;
 		default:
 			return (
 				<Notice status="info" isDismissible={ false }>
