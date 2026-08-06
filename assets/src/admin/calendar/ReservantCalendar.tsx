@@ -1,3 +1,4 @@
+import type { CSSProperties } from 'react';
 import { format, getDay, parse, startOfWeek } from 'date-fns';
 import { enUS } from 'date-fns/locale';
 import { __ } from '@wordpress/i18n';
@@ -17,6 +18,23 @@ const localizer = dateFnsLocalizer( { format, parse, startOfWeek, getDay, locale
 
 const NEUTRAL_COLOR = '#6b7280';
 
+// A compact, self-contained pill: opaque cream fill + dark amber text/border so it stays readable
+// at calendar-cell size regardless of which staff color (`colorFor()`) the event itself is sitting
+// on - matching the inline-`style` treatment `eventPropGetter` already gives `gap`/`occurrence`.
+const BADGE_STYLE: CSSProperties = {
+	display: 'inline-block',
+	marginRight: 4,
+	padding: '0 4px',
+	borderRadius: 3,
+	border: '1px solid #7a5900',
+	backgroundColor: '#fff3cd',
+	color: '#7a5900',
+	fontSize: 10,
+	lineHeight: '14px',
+	fontWeight: 700,
+	textTransform: 'uppercase',
+};
+
 export interface CalendarSlot {
 	start: Date;
 	end: Date;
@@ -33,12 +51,29 @@ export interface ReservantCalendarProps {
 	onSelectEvent?: ( event: CalEvent ) => void;
 }
 
+/**
+ * Which events `staffFilter` lets through: an ordinary `booking`/`gap` only when its own
+ * `resourceId` matches, but an `occurrence` always passes - occurrences are business-wide (the
+ * design spec's calendar scoping rule), always carry `resourceId: null`, and a plain
+ * `resourceId === staffFilter` comparison would otherwise hide them behind any specific staff
+ * filter. A `gap` inherits its parent item's `resourceId` (adapter.ts), so it filters correctly
+ * without special-casing here.
+ */
+export function visibleEvents( events: CalEvent[], staffFilter: number | 'all' ): CalEvent[] {
+	if ( 'all' === staffFilter ) {
+		return events;
+	}
+	return events.filter( ( event ) => 'occurrence' === event.kind || event.resourceId === staffFilter );
+}
+
 /** The event body: a status badge for an awaiting-approval booking, otherwise just the title. */
 function EventContent( { event }: EventProps< CalEvent > ) {
 	return (
 		<div className="reservant-cal-event__content">
 			{ 'awaiting_approval' === event.status && (
-				<span className="reservant-cal-event__badge">{ __( 'Pending', 'reservant' ) }</span>
+				<span className="reservant-cal-event__badge" style={ BADGE_STYLE }>
+					{ __( 'Pending', 'reservant' ) }
+				</span>
 			) }
 			<span className="reservant-cal-event__title">{ event.title }</span>
 		</div>
@@ -104,7 +139,7 @@ export function ReservantCalendar( {
 	const step = granularityMin > 0 ? granularityMin : 30;
 	const timeslots = Math.max( 1, Math.round( 60 / step ) );
 
-	const visible = 'all' === staffFilter ? events : events.filter( ( event ) => event.resourceId === staffFilter );
+	const visible = visibleEvents( events, staffFilter );
 
 	const canSelectSlots = ! readOnly && undefined !== onSelectSlot;
 
