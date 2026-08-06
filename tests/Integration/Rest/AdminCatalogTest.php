@@ -7,12 +7,16 @@ use Reservant\Admin\Capabilities;
 use Reservant\Infrastructure\Db\AvailabilityRepository;
 use Reservant\Infrastructure\Db\ResourceRepository;
 use Reservant\Infrastructure\Db\ServiceRepository;
+use Reservant\Infrastructure\Db\TransactionRunner;
 use Reservant\Domain\Availability\AvailabilityRule;
 use Reservant\Tests\Integration\ReservantTestCase;
 
 /**
  * `reservant/v1/admin/services` and `admin/resources` (Task 11, AGENTS.md section 4): catalog CRUD, the
  * `referenced` delete guard, atomic rule replacement on resource save, and business-wide exceptions.
+ *
+ * Fix round 1 (review): `destroy()`'s transactional in-lock reference recheck and its zero-affected-
+ * rows failure surface are covered at the bottom of the file, under "delete race guards".
  */
 final class AdminCatalogTest extends ReservantTestCase {
 
@@ -500,5 +504,205 @@ final class AdminCatalogTest extends ReservantTestCase {
 		$this->asBookingManager();
 		self::assertSame( 403, $this->jsonRequest( 'POST', '/reservant/v1/admin/exceptions', array( 'date' => $this->utc( 1 )->format( 'Y-m-d' ) ) )->get_status() );
 		self::assertSame( 403, $this->jsonRequest( 'DELETE', '/reservant/v1/admin/exceptions', array( 'date' => $this->utc( 1 )->format( 'Y-m-d' ) ) )->get_status() );
+	}
+
+	// ---------------------------------------------------------------- delete race guards (fix round 1)
+
+	/**
+	 * A second, independent DB connection - not a second OS process/thread, but a genuinely separate
+	 * MySQL session with its own transaction state, autocommit by default. Used below to commit
+	 * writes "concurrently" with the primary `$wpdb` connection's still-open transaction, the same
+	 * way `LockingTest` exercises `TransactionRunner`/`LockManager` directly rather than spinning up
+	 * real parallel processes.
+	 */
+	private function secondConnection(): \wpdb {
+		return new \wpdb( DB_USER, DB_PASSWORD, DB_NAME, DB_HOST );
+	}
+
+	public function test_service_delete_returns_false_and_leaves_other_rows_untouched_when_nothing_matches(): void {
+		global $wpdb;
+		$repo = new ServiceRepository( $wpdb );
+		$kept = $repo->insert( array( 'name' => 'Kept', 'type' => 'appointment', 'duration_min' => 30 ) );
+
+		// No row with this id exists at all - delete() must report failure, not silently "succeed".
+		self::assertFalse( $repo->delete( $kept + 1000000 ) );
+
+		// The failed attempt has no side effect on an unrelated, still-existing row.
+		self::assertNotNull( $repo->find( $kept ) );
+	}
+
+	public function test_resource_delete_returns_false_and_leaves_other_rows_untouched_when_nothing_matches(): void {
+		global $wpdb;
+		$repo = new ResourceRepository( $wpdb );
+		$kept = $repo->insert( array( 'name' => 'Kept' ) );
+
+		self::assertFalse( $repo->delete( $kept + 1000000 ) );
+		self::assertNotNull( $repo->find( $kept ) );
+	}
+
+	/**
+	 * Reproduces `ServicesAdminController::destroy()`'s fixed sequence exactly: the outer,
+	 * non-transactional checks pass, then - in the gap before the transaction opens - a second
+	 * connection removes the row and commits (nothing a reference-count check would ever catch,
+	 * since it is not about a booking referencing the row, but the row itself vanishing by some
+	 * other path). The recheck still passes (never referenced), so the cascade proceeds to the
+	 * physical delete, which now matches nothing - `delete()` must report `false` rather than a
+	 * unconditional success the fixed controller would otherwise turn into a false 204.
+	 */
+	public function test_service_delete_reports_failure_when_the_row_vanishes_before_the_physical_delete(): void {
+		global $wpdb;
+		$repo = new ServiceRepository( $wpdb );
+		$id   = $repo->insert( array( 'name' => 'Ghost', 'type' => 'appointment', 'duration_min' => 30 ) );
+
+		// Mirrors destroy()'s outer checks: the row exists and is unreferenced.
+		self::assertNotNull( $repo->find( $id ) );
+		self::assertFalse( $repo->isReferenced( $id ) );
+
+		// Release the ambient transaction WP's own test framework wraps every test in (same note as
+		// TransactionRunner's own docblock): otherwise the just-inserted row is still lock-held by
+		// $wpdb's open transaction, and the second connection's DELETE below blocks until it times out.
+		$wpdb->query( 'COMMIT' ); // phpcs:ignore WordPress.DB.PreparedSQL
+
+		$second = $this->secondConnection();
+		$second->query( $second->prepare( "DELETE FROM {$wpdb->prefix}reservant_services WHERE id = %d", $id ) ); // phpcs:ignore WordPress.DB.PreparedSQL
+		$second->close();
+
+		// Reproduces the fixed destroy()'s in-transaction cascade: recheck first, then delete.
+		$result = ( new TransactionRunner( $wpdb ) )->run(
+			static function () use ( $repo, $id ): bool {
+				self::assertFalse( $repo->isReferenced( $id ), 'Nothing ever referenced this row - only its existence changed.' );
+				return $repo->delete( $id );
+			}
+		);
+		self::assertFalse( $result, 'delete() must report failure when the physical DELETE affects zero rows, even though every check passed.' );
+	}
+
+	public function test_resource_delete_reports_failure_when_the_row_vanishes_before_the_physical_delete(): void {
+		global $wpdb;
+		$repo = new ResourceRepository( $wpdb );
+		$id   = $repo->insert( array( 'name' => 'Ghost' ) );
+
+		self::assertNotNull( $repo->find( $id ) );
+		self::assertFalse( $repo->isReferenced( $id ) );
+
+		// See the sibling service test above for why this is necessary before a second connection
+		// touches the same row.
+		$wpdb->query( 'COMMIT' ); // phpcs:ignore WordPress.DB.PreparedSQL
+
+		$second = $this->secondConnection();
+		$second->query( $second->prepare( "DELETE FROM {$wpdb->prefix}reservant_resources WHERE id = %d", $id ) ); // phpcs:ignore WordPress.DB.PreparedSQL
+		$second->close();
+
+		$result = ( new TransactionRunner( $wpdb ) )->run(
+			static function () use ( $repo, $id ): bool {
+				self::assertFalse( $repo->isReferenced( $id ) );
+				return $repo->delete( $id );
+			}
+		);
+		self::assertFalse( $result );
+	}
+
+	/** "Deleting twice" (the review's own suggested simulation) at the REST layer: the second call must not lie and say 204. */
+	public function test_delete_service_twice_is_not_204_the_second_time(): void {
+		$this->asAdmin();
+		$created = $this->createService();
+		self::assertSame( 204, $this->request( 'DELETE', "/reservant/v1/admin/services/{$created['id']}" )->get_status() );
+		self::assertNotSame( 204, $this->request( 'DELETE', "/reservant/v1/admin/services/{$created['id']}" )->get_status() );
+	}
+
+	public function test_delete_resource_twice_is_not_204_the_second_time(): void {
+		$this->asAdmin();
+		$created = $this->createResource();
+		self::assertSame( 204, $this->request( 'DELETE', "/reservant/v1/admin/resources/{$created['id']}" )->get_status() );
+		self::assertNotSame( 204, $this->request( 'DELETE', "/reservant/v1/admin/resources/{$created['id']}" )->get_status() );
+	}
+
+	/**
+	 * The core claim behind the fix: the in-transaction recheck - run as the transaction's FIRST
+	 * statement, exactly as `destroy()` performs it - observes a reference committed by a second
+	 * connection AFTER the outer, pre-transaction check already passed. Under InnoDB REPEATABLE READ
+	 * a transaction's consistency snapshot is established at its first read, not reused from an
+	 * earlier autocommit-mode read, so this is not a tautology: it proves the specific ordering the
+	 * fix depends on actually holds.
+	 *
+	 * True OS-level concurrency (a second process racing the exact same HTTP request) is not
+	 * orchestrated here - PHPUnit's single-threaded process can't pause mid-request to let another
+	 * process act, and this codebase's own concurrency tests (`LockingTest`) do not spin one up
+	 * either. This is the "unit-level seam" proof: the same two statements, in the same order, on the
+	 * same two connections `destroy()` would see under a real race.
+	 */
+	public function test_service_isReferenced_recheck_observes_a_reference_committed_after_the_outer_check(): void {
+		global $wpdb;
+		$this->asAdmin();
+		$service  = $this->createService();
+		$resource = ( new ResourceRepository( $wpdb ) )->insert( array( 'name' => 'Alex' ) );
+		$services = new ServiceRepository( $wpdb );
+
+		// The outer check, exactly as destroy() runs it - not referenced yet.
+		self::assertFalse( $services->isReferenced( (int) $service['id'] ) );
+
+		// A second, independent connection commits a referencing booking item in the gap between the
+		// outer check and the transaction the fix wraps the cascade in.
+		$second = $this->secondConnection();
+		$second->insert(
+			"{$wpdb->prefix}reservant_booking_items",
+			array(
+				'booking_id'      => 999999,
+				'service_id'      => (int) $service['id'],
+				'resource_id'     => $resource,
+				'start_utc'       => $this->sql( 1, '09:00' ),
+				'end_utc'         => $this->sql( 1, '09:30' ),
+				'block_start_utc' => $this->sql( 1, '09:00' ),
+				'block_end_utc'   => $this->sql( 1, '09:30' ),
+			)
+		);
+		$second->close();
+
+		// The recheck, as the new transaction's first statement, sees the now-committed reference.
+		$observedInTransaction = ( new TransactionRunner( $wpdb ) )->run(
+			static fn (): bool => $services->isReferenced( (int) $service['id'] )
+		);
+		self::assertTrue( $observedInTransaction, 'The in-transaction recheck must see a reference committed after the outer check.' );
+
+		// End to end: destroy() itself refuses with 409 and the row survives.
+		$deleted = $this->request( 'DELETE', "/reservant/v1/admin/services/{$service['id']}" );
+		self::assertSame( 409, $deleted->get_status() );
+		self::assertSame( 'referenced', $deleted->get_data()['message'] );
+		self::assertNotNull( $services->find( (int) $service['id'] ) );
+	}
+
+	public function test_resource_isReferenced_recheck_observes_a_reference_committed_after_the_outer_check(): void {
+		global $wpdb;
+		$this->asAdmin();
+		$service   = $this->createService();
+		$resource  = $this->createResource();
+		$resources = new ResourceRepository( $wpdb );
+
+		self::assertFalse( $resources->isReferenced( (int) $resource['id'] ) );
+
+		$second = $this->secondConnection();
+		$second->insert(
+			"{$wpdb->prefix}reservant_booking_items",
+			array(
+				'booking_id'      => 999998,
+				'service_id'      => (int) $service['id'],
+				'resource_id'     => (int) $resource['id'],
+				'start_utc'       => $this->sql( 1, '09:00' ),
+				'end_utc'         => $this->sql( 1, '09:30' ),
+				'block_start_utc' => $this->sql( 1, '09:00' ),
+				'block_end_utc'   => $this->sql( 1, '09:30' ),
+			)
+		);
+		$second->close();
+
+		$observedInTransaction = ( new TransactionRunner( $wpdb ) )->run(
+			static fn (): bool => $resources->isReferenced( (int) $resource['id'] )
+		);
+		self::assertTrue( $observedInTransaction, 'The in-transaction recheck must see a reference committed after the outer check.' );
+
+		$deleted = $this->request( 'DELETE', "/reservant/v1/admin/resources/{$resource['id']}" );
+		self::assertSame( 409, $deleted->get_status() );
+		self::assertSame( 'referenced', $deleted->get_data()['message'] );
+		self::assertNotNull( $resources->find( (int) $resource['id'] ) );
 	}
 }

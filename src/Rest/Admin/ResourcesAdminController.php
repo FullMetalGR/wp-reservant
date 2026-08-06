@@ -114,6 +114,20 @@ final class ResourcesAdminController {
 	}
 
 	/** DELETE /admin/resources/{id} */
+	/**
+	 * The cheap check happens first, outside any transaction, purely to give an ordinary caller a
+	 * fast 404/409 without ever opening one. The check that actually matters runs again as the FIRST
+	 * statement inside `TransactionRunner::run()` (AGENTS.md Task 11 fix round 1, mirroring section
+	 * 2.2's re-validate-under-lock pattern): under InnoDB REPEATABLE READ a fresh transaction's
+	 * snapshot is established at its first read, so this recheck sees anything a concurrent
+	 * `HoldBooking` committed in the gap between the outer check and here. The whole cascade (recheck,
+	 * unlink, rule/exception cleanup, physical delete) is one transaction, so a mid-cascade failure
+	 * rolls back rather than leaving the resource partially unlinked.
+	 *
+	 * `ResourceRepository::delete()` reports whether a row was actually removed; a `false` here means
+	 * the row vanished by some other path between the outer check and this point (or the DELETE
+	 * itself failed) - either way it is surfaced as a failure, never folded into an unconditional 204.
+	 */
 	public function destroy( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
 		$repo = new ResourceRepository( $this->db );
 		$id   = (int) $request->get_param( 'id' );
@@ -124,18 +138,36 @@ final class ResourcesAdminController {
 			return Errors::failure( new \RuntimeException( 'referenced' ) );
 		}
 
-		foreach ( $repo->serviceIdsForResource( $id ) as $serviceId ) {
-			$repo->unlinkService( $serviceId, $id );
-		}
-		$availability = new AvailabilityRepository( $this->db );
-		foreach ( $availability->rulesForResource( $id ) as $rule ) {
-			$availability->deleteRule( (int) $rule['id'] );
-		}
-		foreach ( $availability->exceptionsForResource( $id ) as $exception ) {
-			$availability->deleteException( (int) $exception['id'] );
+		$db = $this->db;
+		try {
+			$deleted = ( new TransactionRunner( $db ) )->run(
+				function () use ( $db, $id ): bool {
+					// A fresh repository instance, deliberately not the `$repo` used for the outer
+					// check above: this is a genuinely new read, not a reuse of the earlier result.
+					$repo = new ResourceRepository( $db );
+					if ( $repo->isReferenced( $id ) ) {
+						throw new \RuntimeException( 'referenced' );
+					}
+					foreach ( $repo->serviceIdsForResource( $id ) as $serviceId ) {
+						$repo->unlinkService( $serviceId, $id );
+					}
+					$availability = new AvailabilityRepository( $db );
+					foreach ( $availability->rulesForResource( $id ) as $rule ) {
+						$availability->deleteRule( (int) $rule['id'] );
+					}
+					foreach ( $availability->exceptionsForResource( $id ) as $exception ) {
+						$availability->deleteException( (int) $exception['id'] );
+					}
+					return $repo->delete( $id );
+				}
+			);
+		} catch ( \RuntimeException $exception ) {
+			return Errors::failure( $exception );
 		}
 
-		$repo->delete( $id );
+		if ( ! $deleted ) {
+			return Errors::failure( new \RuntimeException( 'delete_conflict' ) );
+		}
 		return new \WP_REST_Response( null, 204 );
 	}
 

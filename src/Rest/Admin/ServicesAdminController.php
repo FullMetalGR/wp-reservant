@@ -7,6 +7,7 @@ use Reservant\Domain\Enum\PaymentMode;
 use Reservant\Domain\Enum\ServiceType;
 use Reservant\Infrastructure\Db\ResourceRepository;
 use Reservant\Infrastructure\Db\ServiceRepository;
+use Reservant\Infrastructure\Db\TransactionRunner;
 use Reservant\Rest\Errors;
 use Reservant\Rest\Input;
 
@@ -126,7 +127,23 @@ final class ServicesAdminController {
 		return new \WP_REST_Response( self::present( (array) $repo->find( $id ) ) );
 	}
 
-	/** DELETE /admin/services/{id} */
+	/**
+	 * DELETE /admin/services/{id}.
+	 *
+	 * The cheap check happens first, outside any transaction, purely to give an ordinary caller a
+	 * fast 404/409 without ever opening one. The check that actually matters runs again as the FIRST
+	 * statement inside `TransactionRunner::run()` (AGENTS.md Task 11 fix round 1, mirroring section
+	 * 2.2's re-validate-under-lock pattern): under InnoDB REPEATABLE READ a fresh transaction's
+	 * snapshot is established at its first read, so this recheck sees anything a concurrent
+	 * `HoldBooking` committed in the gap between the outer check and here - a reference that appears
+	 * in that window is caught before the physical delete runs, not after. The whole cascade (recheck,
+	 * unlink, physical delete) is one transaction, so a mid-cascade failure rolls back rather than
+	 * leaving link rows unlinked but the service still present, or vice versa.
+	 *
+	 * `ServiceRepository::delete()` reports whether a row was actually removed; a `false` here means
+	 * the row vanished by some other path between the outer check and this point (or the DELETE
+	 * itself failed) - either way it is surfaced as a failure, never folded into an unconditional 204.
+	 */
 	public function destroy( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
 		$repo = new ServiceRepository( $this->db );
 		$id   = (int) $request->get_param( 'id' );
@@ -137,14 +154,31 @@ final class ServicesAdminController {
 			return Errors::failure( new \RuntimeException( 'referenced' ) );
 		}
 
-		// No FK constraints on reservant_service_resource (AGENTS.md section 4) - clear this service's
-		// links explicitly rather than leave them dangling on a dead id.
-		$resources = new ResourceRepository( $this->db );
-		foreach ( $resources->idsForService( $id ) as $resourceId ) {
-			$resources->unlinkService( $id, $resourceId );
+		try {
+			$deleted = ( new TransactionRunner( $this->db ) )->run(
+				function () use ( $id ): bool {
+					// A fresh repository instance, deliberately not the `$repo` used for the outer
+					// check above: this is a genuinely new read, not a reuse of the earlier result.
+					$repo = new ServiceRepository( $this->db );
+					if ( $repo->isReferenced( $id ) ) {
+						throw new \RuntimeException( 'referenced' );
+					}
+					// No FK constraints on reservant_service_resource (AGENTS.md section 4) - clear
+					// this service's links explicitly rather than leave them dangling on a dead id.
+					$resources = new ResourceRepository( $this->db );
+					foreach ( $resources->idsForService( $id ) as $resourceId ) {
+						$resources->unlinkService( $id, $resourceId );
+					}
+					return $repo->delete( $id );
+				}
+			);
+		} catch ( \RuntimeException $exception ) {
+			return Errors::failure( $exception );
 		}
 
-		$repo->delete( $id );
+		if ( ! $deleted ) {
+			return Errors::failure( new \RuntimeException( 'delete_conflict' ) );
+		}
 		return new \WP_REST_Response( null, 204 );
 	}
 
