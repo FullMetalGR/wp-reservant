@@ -3,7 +3,9 @@ import { __ } from '@wordpress/i18n';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { Notice } from '@wordpress/components';
 import { ToastProvider } from './Toasts';
+import { BookingsScreen } from '../screens/BookingsScreen';
 import { CalendarScreen } from '../screens/CalendarScreen';
+import { ManualBookingDrawer } from '../screens/ManualBookingDrawer';
 import { MyCalendarScreen } from '../screens/MyCalendarScreen';
 
 export interface HashRoute {
@@ -43,10 +45,10 @@ interface NavAction {
 }
 
 /**
- * The only nav action the chassis itself knows about; later tasks (15) wire it to
- * `ManualBookingDrawer`. Filtered by the caller's Reservant caps (from the inline boot config) so
- * a user without `reservant_manage_bookings` - a staff-only viewer, most notably - never sees it:
- * "the SPA renders no action buttons for staff-role users" (AGENTS.md P4 spec).
+ * The only nav action the chassis itself knows about; `App` wires it to `ManualBookingDrawer`.
+ * Filtered by the caller's Reservant caps (from the inline boot config) so a user without
+ * `reservant_manage_bookings` - a staff-only viewer, most notably - never sees it: "the SPA renders
+ * no action buttons for staff-role users" (AGENTS.md P4 spec).
  */
 function visibleActions( caps: string[] ): NavAction[] {
 	const actions: NavAction[] = [ { cap: 'reservant_manage_bookings', label: __( 'New booking', 'reservant' ) } ];
@@ -54,9 +56,9 @@ function visibleActions( caps: string[] ): NavAction[] {
 }
 
 /**
- * Renders the current route's screen. `calendar` and `my-calendar` are real (Task 14); every other
- * screen is still the Task 13 placeholder - Tasks 15-16 replace each in turn without touching this
- * switch's shape.
+ * Renders the current route's screen. `calendar`, `my-calendar` (Task 14) and `bookings` (Task 15)
+ * are real; every other screen is still the Task 13 placeholder - Task 16 replaces each in turn
+ * without touching this switch's shape.
  */
 function renderScreen( route: HashRoute ): JSX.Element {
 	switch ( route.screen ) {
@@ -64,6 +66,8 @@ function renderScreen( route: HashRoute ): JSX.Element {
 			return <CalendarScreen />;
 		case 'my-calendar':
 			return <MyCalendarScreen />;
+		case 'bookings':
+			return <BookingsScreen id={ route.id } />;
 		default:
 			return (
 				<Notice status="info" isDismissible={ false }>
@@ -99,14 +103,18 @@ export interface AppProps {
 /**
  * The router shell (AGENTS.md P4, Task 13): mounts the query cache and toast queue once, then
  * switches on the page's own screen plus whatever detail id the hash carries via `renderScreen()`.
- * Tasks 15-16 replace the remaining placeholder cases with real components as they land, without
- * touching the chassis around it.
+ * Task 16 replaces the remaining placeholder cases as they land, without touching the chassis
+ * around it. The one nav action (`New booking`, Task 13's placeholder) now opens
+ * `ManualBookingDrawer` (Task 15) - it lives in the header rather than any one screen since every
+ * caller who can see the button holds `reservant_manage_bookings` regardless of which screen they
+ * are currently on.
  */
 export function App( { screen, caps }: AppProps ) {
 	const hash = useHash();
 	const route = parseHash( screen, hash );
 	const title = ( SCREEN_TITLES[ route.screen ] ?? ( () => route.screen ) )();
 	const actions = visibleActions( caps );
+	const [ manualBookingOpen, setManualBookingOpen ] = useState( false );
 
 	return (
 		<QueryClientProvider client={ queryClient }>
@@ -115,12 +123,18 @@ export function App( { screen, caps }: AppProps ) {
 					<div className="reservant-admin-header">
 						<h1>{ title }</h1>
 						{ actions.map( ( action ) => (
-							<button key={ action.cap } type="button" className="button button-primary">
+							<button
+								key={ action.cap }
+								type="button"
+								className="button button-primary"
+								onClick={ () => setManualBookingOpen( true ) }
+							>
 								{ action.label }
 							</button>
 						) ) }
 					</div>
 					{ renderScreen( route ) }
+					{ manualBookingOpen && <ManualBookingDrawer onClose={ () => setManualBookingOpen( false ) } /> }
 				</div>
 			</ToastProvider>
 		</QueryClientProvider>

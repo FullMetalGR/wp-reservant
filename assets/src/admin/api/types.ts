@@ -314,3 +314,19 @@ export interface ManualBookingRequest {
 	appointment?: ManualBookingAppointment;
 	event?: ManualBookingEvent;
 }
+
+/** `AvailabilityAdminController::index()` - one feasible chain start time, in both zones. */
+export interface AvailabilityStart {
+	utc: string;
+	local: string;
+}
+
+/**
+ * `GET /admin/availability` response envelope for the appointment branch (`AvailabilityAdminController`'s
+ * `occurrences()` branch, used for event services, has no client yet - the manual booking drawer only
+ * ever chains appointment services).
+ */
+export interface AvailabilityResponse {
+	granularity_min: number;
+	starts: AvailabilityStart[];
+}

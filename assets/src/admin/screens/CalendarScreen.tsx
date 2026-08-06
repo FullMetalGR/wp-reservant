@@ -7,6 +7,8 @@ import { useCalendar, useResources } from '../api/queries';
 import type { Resource } from '../api/types';
 import { toEvents, utcToSite, type CalEvent } from '../calendar/adapter';
 import { ReservantCalendar, type CalendarSlot } from '../calendar/ReservantCalendar';
+import { BookingDrawer } from './BookingDrawer';
+import { ManualBookingDrawer } from './ManualBookingDrawer';
 
 export type CalView = 'week' | 'day';
 
@@ -68,21 +70,54 @@ function staffOptions( resources: Resource[] ): { label: string; value: string }
 	];
 }
 
-type Selection = { kind: 'slot'; slot: CalendarSlot } | { kind: 'event'; event: CalEvent };
+type Selection = { kind: 'slot'; slot: CalendarSlot } | { kind: 'booking'; uuid: string };
 
-/** Task 15 replaces this with the real drawers; for now the selection just names itself. */
-function selectionMessage( selection: Selection ): string {
-	if ( 'event' === selection.kind ) {
-		return `${ __( 'Selected', 'reservant' ) }: ${ selection.event.title }`;
+/**
+ * `CalEvent.id` is uuid-based (`adapter.ts`): `${uuid}:${index}` for a `booking` event,
+ * `${uuid}:${index}:gap` for the processing gap that follows one - both belong to a real booking,
+ * so the uuid is always the id's first `:`-separated segment. An `occurrence` event
+ * (`occurrence:${id}`) names no booking at all - Task 15's drawers cover bookings only, so those
+ * clicks are a deliberate no-op rather than opening a drawer for something that does not exist.
+ */
+function bookingUuidFor( event: CalEvent ): string | null {
+	if ( 'occurrence' === event.kind ) {
+		return null;
 	}
-	return __( 'Selected an empty slot - booking creation lands in a later task.', 'reservant' );
+	return event.id.split( ':' )[ 0 ] ?? null;
+}
+
+/** Whichever drawer the current selection calls for - `null` when nothing is selected. */
+function SelectionDrawer( {
+	selection,
+	staffFilter,
+	onClose,
+}: {
+	selection: Selection | null;
+	staffFilter: number | 'all';
+	onClose: () => void;
+} ) {
+	if ( null === selection ) {
+		return null;
+	}
+	if ( 'booking' === selection.kind ) {
+		return <BookingDrawer uuid={ selection.uuid } onClose={ onClose } />;
+	}
+	return (
+		<ManualBookingDrawer
+			onClose={ onClose }
+			initialDate={ format( selection.slot.start, 'yyyy-MM-dd' ) }
+			initialResourceId={ 'all' === staffFilter ? undefined : staffFilter }
+		/>
+	);
 }
 
 /**
  * The owner's whole schedule (Task 14 brief): a staff filter, week/day toggle, date nav, and the
- * week/day grid itself. Selecting a slot or an event just records the selection and shows it in a
- * plain `<Notice>` for now - Task 15 replaces that with `ManualBookingDrawer`/`BookingDrawer`
- * without this screen needing to change its own selection wiring.
+ * week/day grid itself. Selecting an event opens `BookingDrawer` for the booking it belongs to
+ * (skipped for an `occurrence` - see `bookingUuidFor`); selecting an empty slot opens
+ * `ManualBookingDrawer` prefilled with that slot's date and the screen's own `staffFilter` -
+ * `CalendarSlot.resourceId` itself is unreliable (undefined outside a resource-per-row view, per
+ * `ReservantCalendar`), so `staffFilter` is the prefill source of truth, not the slot payload.
  */
 export function CalendarScreen() {
 	const { timezone } = bootConfig();
@@ -103,10 +138,19 @@ export function CalendarScreen() {
 
 	const step = 'day' === view ? 1 : 7;
 
+	function handleSelectEvent( event: CalEvent ): void {
+		const uuid = bookingUuidFor( event );
+		if ( null !== uuid ) {
+			setSelection( { kind: 'booking', uuid } );
+		}
+	}
+
 	return (
 		<div className="reservant-calendar-screen">
 			<div className="reservant-calendar-toolbar">
 				<SelectControl
+					__next40pxDefaultSize
+					__nextHasNoMarginBottom
 					label={ __( 'Staff', 'reservant' ) }
 					value={ 'all' === staffFilter ? 'all' : String( staffFilter ) }
 					options={ staffOptions( resourcesQuery.data ?? [] ) }
@@ -132,14 +176,10 @@ export function CalendarScreen() {
 				date={ date }
 				staffFilter={ staffFilter }
 				onSelectSlot={ ( slot ) => setSelection( { kind: 'slot', slot } ) }
-				onSelectEvent={ ( event ) => setSelection( { kind: 'event', event } ) }
+				onSelectEvent={ handleSelectEvent }
 			/>
 
-			{ null !== selection && (
-				<Notice status="info" onRemove={ () => setSelection( null ) }>
-					{ selectionMessage( selection ) }
-				</Notice>
-			) }
+			<SelectionDrawer selection={ selection } staffFilter={ staffFilter } onClose={ () => setSelection( null ) } />
 		</div>
 	);
 }
