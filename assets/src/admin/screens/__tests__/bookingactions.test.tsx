@@ -136,8 +136,19 @@ describe( 'BookingDrawer - Approve action', () => {
 		expect( screen.queryByRole( 'button', { name: 'Approve' } ) ).not.toBeInTheDocument();
 	} );
 
-	it( 'calls the approve endpoint with the booking uuid when Approve is clicked', async () => {
+	it( 'hides Approve and Reject for a manage-only caller - reservant_manage_bookings does not imply reservant_approve_bookings (AdminGuard::approveBookings() gates on the latter alone)', async () => {
 		setCaps( [ 'reservant_manage_bookings' ] );
+		mockedApiFetch.mockResolvedValue( bookingFixture( { status: 'awaiting_approval' } ) );
+
+		renderWithClient( <BookingDrawer uuid="uuid-1" onClose={ jest.fn() } /> );
+
+		await screen.findByText( 'Jane Doe' );
+		expect( screen.queryByRole( 'button', { name: 'Approve' } ) ).not.toBeInTheDocument();
+		expect( screen.queryByRole( 'button', { name: 'Reject' } ) ).not.toBeInTheDocument();
+	} );
+
+	it( 'calls the approve endpoint with the booking uuid when Approve is clicked', async () => {
+		setCaps( [ 'reservant_approve_bookings' ] );
 		mockedApiFetch.mockImplementation( ( path ) => {
 			if ( '/admin/bookings/uuid-1' === path ) {
 				return Promise.resolve( bookingFixture( { status: 'awaiting_approval' } ) );

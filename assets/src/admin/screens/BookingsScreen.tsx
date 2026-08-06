@@ -5,7 +5,7 @@ import { bootConfig } from '../boot';
 import { useBookings, useResources, useServices } from '../api/queries';
 import type { BookingFilters, BookingListResponse, BookingSummary, Resource, Service } from '../api/types';
 import { utcToSite } from '../calendar/adapter';
-import { BookingDrawer, formatMoney } from './BookingDrawer';
+import { BookingDrawer, formatMoney, statusLabel } from './BookingDrawer';
 
 const PER_PAGE = 20;
 
@@ -143,7 +143,7 @@ function BookingsTable( { bookings = [], timezone, onRowClick }: BookingsTablePr
 					return (
 						<tr key={ booking.uuid } className="reservant-bookings-table__row" onClick={ () => onRowClick( booking.uuid ) }>
 							<td>{ booking.customer_name }</td>
-							<td>{ booking.status }</td>
+							<td>{ statusLabel( booking.status ) }</td>
 							<td>{ null === start ? '' : utcToSite( start, timezone ).toLocaleString() }</td>
 							<td>{ formatMoney( booking.total_minor, booking.currency ) }</td>
 						</tr>

@@ -10,9 +10,14 @@ import { useToasts } from '../components/Toasts';
 /** Every booking hold class (AGENTS.md section 2.3) plus `confirmed` - Cancel is offered on all four. */
 const CANCELLABLE_STATUSES: readonly BookingStatus[] = [ 'pending', 'awaiting_approval', 'awaiting_payment', 'confirmed' ];
 
-/** Approve/reject need `reservant_approve_bookings` OR the broader `reservant_manage_bookings`. */
+/**
+ * Approve/reject route on `reservant_approve_bookings` ALONE (`AdminGuard::approveBookings()`,
+ * `AdminRoutes.php`'s own docblock: "approve/reject only need `reservant_approve_bookings`") -
+ * `reservant_manage_bookings` does NOT imply it. A caller who holds manage without approve (e.g. a
+ * custom "booking manager" role built with a role editor) must not see a button that 403s.
+ */
 export function canDecide( caps: string[], status: BookingStatus ): boolean {
-	return 'awaiting_approval' === status && ( caps.includes( 'reservant_approve_bookings' ) || caps.includes( 'reservant_manage_bookings' ) );
+	return 'awaiting_approval' === status && caps.includes( 'reservant_approve_bookings' );
 }
 
 /** Cancel is a manager override (`BookingsAdminController::cancel()` is manage-gated outright). */
@@ -64,6 +69,19 @@ const STATUS_LABELS: Record< BookingStatus, () => string > = {
 	expired: () => __( 'Expired', 'reservant' ),
 };
 
+/**
+ * The translated status label - the single source both `BookingDetailBody` (below) and
+ * `BookingsScreen`'s table use, so the same value never reads translated in one place and as the
+ * raw enum in the other. Falls back to the raw value for anything `STATUS_LABELS` does not
+ * recognize: `status` is typed as the closed `BookingStatus` union, but the wire is not statically
+ * guaranteed to match it (a backend enum addition the frontend has not caught up to yet), so an
+ * unrecognized value degrades to plain text rather than throwing.
+ */
+export function statusLabel( status: BookingStatus ): string {
+	const label = STATUS_LABELS[ status ];
+	return undefined === label ? status : label();
+}
+
 function errorMessage( error: unknown ): string {
 	return error instanceof Error ? error.message : __( 'Something went wrong.', 'reservant' );
 }
@@ -73,7 +91,7 @@ function BookingDetailBody( { booking, timezone }: { booking: BookingDetail; tim
 	return (
 		<>
 			<p>
-				<strong>{ __( 'Status', 'reservant' ) }:</strong> { STATUS_LABELS[ booking.status ]() }
+				<strong>{ __( 'Status', 'reservant' ) }:</strong> { statusLabel( booking.status ) }
 			</p>
 			{ booking.customer_email && <p>{ booking.customer_email }</p> }
 			{ booking.customer_phone && <p>{ booking.customer_phone }</p> }
