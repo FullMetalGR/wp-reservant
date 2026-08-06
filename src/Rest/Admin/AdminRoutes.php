@@ -34,6 +34,7 @@ final class AdminRoutes {
 		$resources    = new ResourcesAdminController( $this->db );
 		$occurrences  = new OccurrencesAdminController( $this->db );
 		$seatMaps     = new SeatMapsAdminController( $this->db );
+		$settings     = new SettingsAdminController();
 
 		register_rest_route(
 			Routes::NS,
@@ -383,6 +384,23 @@ final class AdminRoutes {
 					'callback'            => array( $seatMaps, 'destroy' ),
 					'permission_callback' => array( $guard, 'manageSettings' ),
 					'args'                => self::idArgs(),
+				),
+			)
+		);
+
+		register_rest_route(
+			Routes::NS,
+			'/admin/settings',
+			array(
+				array(
+					'methods'             => \WP_REST_Server::READABLE,
+					'callback'            => array( $settings, 'index' ),
+					'permission_callback' => array( $guard, 'manageSettings' ),
+				),
+				array(
+					'methods'             => \WP_REST_Server::EDITABLE,
+					'callback'            => array( $settings, 'update' ),
+					'permission_callback' => array( $guard, 'manageSettings' ),
 				),
 			)
 		);
