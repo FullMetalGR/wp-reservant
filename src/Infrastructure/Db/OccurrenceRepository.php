@@ -181,4 +181,97 @@ final class OccurrenceRepository {
 		);
 		return array_map( 'intval', $ids );
 	}
+
+	/**
+	 * Every occurrence of one service, any status, admin listing order (AGENTS.md Task 12) - not
+	 * `findForService()`'s customer-facing `status = 'active'` window filter, since the admin needs
+	 * to see a cancelled occurrence too. `booked` is `blockingSeatSum()` per row via one batched
+	 * query (`blockingSeatSums()`), never the stale `booked_seats` column.
+	 *
+	 * @return list<array<string, mixed>>
+	 */
+	public function forService( int $serviceId ): array {
+		$p    = $this->db->prefix;
+		$rows = $this->db->get_results(
+			$this->db->prepare(
+				"SELECT id, service_id, start_utc, end_utc, capacity, status
+				 FROM {$p}reservant_occurrences
+				 WHERE service_id = %d
+				 ORDER BY start_utc ASC", // phpcs:ignore WordPress.DB.PreparedSQL
+				$serviceId
+			),
+			ARRAY_A
+		);
+		$rows = array_map(
+			static function ( array $row ): array {
+				foreach ( array( 'id', 'service_id', 'capacity' ) as $column ) {
+					$row[ $column ] = (int) $row[ $column ];
+				}
+				return $row;
+			},
+			$rows
+		);
+		$sums = $this->blockingSeatSums( array_column( $rows, 'id' ) );
+		return array_map(
+			static function ( array $row ) use ( $sums ): array {
+				$row['booked'] = $sums[ $row['id'] ] ?? 0;
+				return $row;
+			},
+			$rows
+		);
+	}
+
+	/**
+	 * A partial column update - only the given fields change (AGENTS.md Task 12, mirrors
+	 * `ServiceRepository::update()`).
+	 *
+	 * @param array<string, mixed> $fields
+	 */
+	public function update( int $id, array $fields ): void {
+		if ( array() === $fields ) {
+			return;
+		}
+		$this->db->update( "{$this->db->prefix}reservant_occurrences", $fields, array( 'id' => $id ) );
+	}
+
+	/**
+	 * Soft-cancel: `status = 'cancelled'`, never a physical delete (AGENTS.md Task 12) - a cancelled
+	 * occurrence's row must survive for any booking history that already names it, unlike the
+	 * catalog's `referenced` guard on services/resources, which refuses deletion outright instead.
+	 * `WHERE status <> 'cancelled'` doubles as the affected-rows idempotency check the caller relies
+	 * on (Task 11 fix round 1 idiom): cancelling an already-cancelled row reports zero rows changed,
+	 * exactly like `ServiceRepository::delete()` reports `false` on a second call.
+	 */
+	public function cancel( int $id ): bool {
+		$p      = $this->db->prefix;
+		$result = $this->db->query(
+			$this->db->prepare(
+				"UPDATE {$p}reservant_occurrences SET status = 'cancelled' WHERE id = %d AND status <> 'cancelled'", // phpcs:ignore WordPress.DB.PreparedSQL
+				$id
+			)
+		);
+		return is_int( $result ) && $result > 0;
+	}
+
+	/**
+	 * Distinct bookings currently blocking this occurrence (AGENTS.md Task 12): the PUT/DELETE
+	 * `referenced` guard's authority. `BLOCKING_SQL` already ORs `confirmed` into its own definition
+	 * (AGENTS.md section 2.1), so this is the same predicate `blockingSeatSum()` uses, counted by
+	 * booking rather than summed by seat - a grid booking can spread several items (one per claimed
+	 * seat) across one booking row, and this must count that as one active booking, not several.
+	 */
+	public function activeBookingCount( int $occurrenceId ): int {
+		$p     = $this->db->prefix;
+		$count = $this->db->get_var(
+			$this->db->prepare(
+				"SELECT COUNT(DISTINCT i.booking_id)
+				 FROM {$p}reservant_booking_items i
+				 INNER JOIN {$p}reservant_bookings b ON b.id = i.booking_id
+				 WHERE i.occurrence_id = %d
+				 AND " . BookingRepository::BLOCKING_SQL, // phpcs:ignore WordPress.DB.PreparedSQL
+				$occurrenceId
+			)
+		);
+		return (int) $count;
+	}
 }

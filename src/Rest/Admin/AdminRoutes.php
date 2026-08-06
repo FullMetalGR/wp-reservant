@@ -32,6 +32,8 @@ final class AdminRoutes {
 		$availability = new AvailabilityAdminController( $this->db );
 		$services     = new ServicesAdminController( $this->db );
 		$resources    = new ResourcesAdminController( $this->db );
+		$occurrences  = new OccurrencesAdminController( $this->db );
+		$seatMaps     = new SeatMapsAdminController( $this->db );
 
 		register_rest_route(
 			Routes::NS,
@@ -297,6 +299,90 @@ final class AdminRoutes {
 					'methods'             => \WP_REST_Server::DELETABLE,
 					'callback'            => array( $resources, 'removeBusinessException' ),
 					'permission_callback' => array( $guard, 'manageSettings' ),
+				),
+			)
+		);
+
+		register_rest_route(
+			Routes::NS,
+			'/admin/occurrences',
+			array(
+				array(
+					'methods'             => \WP_REST_Server::READABLE,
+					'callback'            => array( $occurrences, 'index' ),
+					'permission_callback' => array( $guard, 'manageSettings' ),
+					'args'                => array(
+						'service_id' => array(
+							'required'          => true,
+							'sanitize_callback' => 'absint',
+						),
+					),
+				),
+				array(
+					'methods'             => \WP_REST_Server::CREATABLE,
+					'callback'            => array( $occurrences, 'create' ),
+					'permission_callback' => array( $guard, 'manageSettings' ),
+				),
+			)
+		);
+
+		register_rest_route(
+			Routes::NS,
+			'/admin/occurrences/' . self::ID,
+			array(
+				array(
+					'methods'             => \WP_REST_Server::EDITABLE,
+					'callback'            => array( $occurrences, 'update' ),
+					'permission_callback' => array( $guard, 'manageSettings' ),
+					'args'                => self::idArgs(),
+				),
+				array(
+					'methods'             => \WP_REST_Server::DELETABLE,
+					'callback'            => array( $occurrences, 'destroy' ),
+					'permission_callback' => array( $guard, 'manageSettings' ),
+					'args'                => self::idArgs(),
+				),
+			)
+		);
+
+		register_rest_route(
+			Routes::NS,
+			'/admin/seat-maps',
+			array(
+				array(
+					'methods'             => \WP_REST_Server::READABLE,
+					'callback'            => array( $seatMaps, 'index' ),
+					'permission_callback' => array( $guard, 'manageSettings' ),
+				),
+				array(
+					'methods'             => \WP_REST_Server::CREATABLE,
+					'callback'            => array( $seatMaps, 'create' ),
+					'permission_callback' => array( $guard, 'manageSettings' ),
+				),
+			)
+		);
+
+		register_rest_route(
+			Routes::NS,
+			'/admin/seat-maps/' . self::ID,
+			array(
+				array(
+					'methods'             => \WP_REST_Server::READABLE,
+					'callback'            => array( $seatMaps, 'show' ),
+					'permission_callback' => array( $guard, 'manageSettings' ),
+					'args'                => self::idArgs(),
+				),
+				array(
+					'methods'             => \WP_REST_Server::EDITABLE,
+					'callback'            => array( $seatMaps, 'update' ),
+					'permission_callback' => array( $guard, 'manageSettings' ),
+					'args'                => self::idArgs(),
+				),
+				array(
+					'methods'             => \WP_REST_Server::DELETABLE,
+					'callback'            => array( $seatMaps, 'destroy' ),
+					'permission_callback' => array( $guard, 'manageSettings' ),
+					'args'                => self::idArgs(),
 				),
 			)
 		);
