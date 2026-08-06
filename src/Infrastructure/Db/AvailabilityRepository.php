@@ -42,6 +42,91 @@ final class AvailabilityRepository {
 	}
 
 	/**
+	 * Raw rows, ids included - the shape the admin catalog needs to replace-all-on-save (AGENTS.md
+	 * Task 11: old row ids must not survive a resource save, so the caller deletes each of these by
+	 * id before inserting the replacement set).
+	 *
+	 * @return list<array<string, mixed>>
+	 */
+	public function rulesForResource( int $resourceId ): array {
+		$p    = $this->db->prefix;
+		$rows = $this->db->get_results(
+			$this->db->prepare(
+				"SELECT id, resource_id, weekday, start_time, end_time, valid_from, valid_to
+				 FROM {$p}reservant_availability_rules
+				 WHERE resource_id = %d
+				 ORDER BY weekday ASC, start_time ASC", // phpcs:ignore WordPress.DB.PreparedSQL
+				$resourceId
+			),
+			ARRAY_A
+		);
+		return array_map( array( self::class, 'castRuleRow' ), $rows );
+	}
+
+	public function deleteRule( int $id ): void {
+		$p = $this->db->prefix;
+		$this->db->query( $this->db->prepare( "DELETE FROM {$p}reservant_availability_rules WHERE id = %d", $id ) ); // phpcs:ignore WordPress.DB.PreparedSQL
+	}
+
+	/**
+	 * Raw rows, ids included, for exactly one scope - unlike `exceptionsForResources()`, which merges
+	 * business-wide rows into every requested resource for availability math, this is the management
+	 * view: a resource's own exceptions (`$resourceId` given), or the business-wide list on its own
+	 * (`null`) - AGENTS.md Task 11.
+	 *
+	 * @return list<array<string, mixed>>
+	 */
+	public function exceptionsForResource( ?int $resourceId ): array {
+		$p = $this->db->prefix;
+		if ( null === $resourceId ) {
+			$rows = $this->db->get_results(
+				"SELECT id, resource_id, date_local, closed, start_time, end_time FROM {$p}reservant_availability_exceptions WHERE resource_id IS NULL ORDER BY date_local ASC", // phpcs:ignore WordPress.DB.PreparedSQL
+				ARRAY_A
+			);
+		} else {
+			$rows = $this->db->get_results(
+				$this->db->prepare(
+					"SELECT id, resource_id, date_local, closed, start_time, end_time FROM {$p}reservant_availability_exceptions WHERE resource_id = %d ORDER BY date_local ASC", // phpcs:ignore WordPress.DB.PreparedSQL
+					$resourceId
+				),
+				ARRAY_A
+			);
+		}
+		return array_map( array( self::class, 'castExceptionRow' ), $rows );
+	}
+
+	public function deleteException( int $id ): void {
+		$p = $this->db->prefix;
+		$this->db->query( $this->db->prepare( "DELETE FROM {$p}reservant_availability_exceptions WHERE id = %d", $id ) ); // phpcs:ignore WordPress.DB.PreparedSQL
+	}
+
+	/**
+	 * @param array<string, mixed> $row
+	 * @return array<string, mixed>
+	 */
+	private static function castRuleRow( array $row ): array {
+		$row['id']          = (int) $row['id'];
+		$row['resource_id'] = (int) $row['resource_id'];
+		$row['weekday']     = (int) $row['weekday'];
+		$row['start_time']  = substr( (string) $row['start_time'], 0, 5 );
+		$row['end_time']    = substr( (string) $row['end_time'], 0, 5 );
+		return $row;
+	}
+
+	/**
+	 * @param array<string, mixed> $row
+	 * @return array<string, mixed>
+	 */
+	private static function castExceptionRow( array $row ): array {
+		$row['id']          = (int) $row['id'];
+		$row['resource_id'] = null === $row['resource_id'] ? null : (int) $row['resource_id'];
+		$row['closed']      = '1' === (string) $row['closed'];
+		$row['start_time']  = null === $row['start_time'] ? null : substr( (string) $row['start_time'], 0, 5 );
+		$row['end_time']    = null === $row['end_time'] ? null : substr( (string) $row['end_time'], 0, 5 );
+		return $row;
+	}
+
+	/**
 	 * @param list<int> $resourceIds
 	 * @return array<int, list<AvailabilityRule>>
 	 */

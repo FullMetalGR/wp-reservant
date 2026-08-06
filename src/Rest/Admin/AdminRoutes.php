@@ -21,6 +21,7 @@ use Reservant\Rest\Routes;
 final class AdminRoutes {
 
 	private const UUID = '(?P<uuid>[0-9a-f-]{36})';
+	private const ID   = '(?P<id>\d+)';
 
 	public function __construct( private readonly \wpdb $db ) {}
 
@@ -29,6 +30,8 @@ final class AdminRoutes {
 		$bookings     = new BookingsAdminController( $this->db );
 		$calendar     = new CalendarAdminController( $this->db );
 		$availability = new AvailabilityAdminController( $this->db );
+		$services     = new ServicesAdminController( $this->db );
+		$resources    = new ResourcesAdminController( $this->db );
 
 		register_rest_route(
 			Routes::NS,
@@ -175,6 +178,128 @@ final class AdminRoutes {
 				),
 			)
 		);
+
+		register_rest_route(
+			Routes::NS,
+			'/admin/services',
+			array(
+				array(
+					'methods'             => \WP_REST_Server::READABLE,
+					'callback'            => array( $services, 'index' ),
+					'permission_callback' => array( $guard, 'manageSettings' ),
+					'args'                => self::includeInactiveArgs(),
+				),
+				array(
+					'methods'             => \WP_REST_Server::CREATABLE,
+					'callback'            => array( $services, 'create' ),
+					'permission_callback' => array( $guard, 'manageSettings' ),
+				),
+			)
+		);
+
+		register_rest_route(
+			Routes::NS,
+			'/admin/services/' . self::ID,
+			array(
+				array(
+					'methods'             => \WP_REST_Server::READABLE,
+					'callback'            => array( $services, 'show' ),
+					'permission_callback' => array( $guard, 'manageSettings' ),
+					'args'                => self::idArgs(),
+				),
+				array(
+					'methods'             => \WP_REST_Server::EDITABLE,
+					'callback'            => array( $services, 'update' ),
+					'permission_callback' => array( $guard, 'manageSettings' ),
+					'args'                => self::idArgs(),
+				),
+				array(
+					'methods'             => \WP_REST_Server::DELETABLE,
+					'callback'            => array( $services, 'destroy' ),
+					'permission_callback' => array( $guard, 'manageSettings' ),
+					'args'                => self::idArgs(),
+				),
+			)
+		);
+
+		register_rest_route(
+			Routes::NS,
+			'/admin/resources',
+			array(
+				array(
+					'methods'             => \WP_REST_Server::READABLE,
+					'callback'            => array( $resources, 'index' ),
+					'permission_callback' => array( $guard, 'manageSettings' ),
+					'args'                => self::includeInactiveArgs(),
+				),
+				array(
+					'methods'             => \WP_REST_Server::CREATABLE,
+					'callback'            => array( $resources, 'create' ),
+					'permission_callback' => array( $guard, 'manageSettings' ),
+				),
+			)
+		);
+
+		register_rest_route(
+			Routes::NS,
+			'/admin/resources/' . self::ID,
+			array(
+				array(
+					'methods'             => \WP_REST_Server::READABLE,
+					'callback'            => array( $resources, 'show' ),
+					'permission_callback' => array( $guard, 'manageSettings' ),
+					'args'                => self::idArgs(),
+				),
+				array(
+					'methods'             => \WP_REST_Server::EDITABLE,
+					'callback'            => array( $resources, 'update' ),
+					'permission_callback' => array( $guard, 'manageSettings' ),
+					'args'                => self::idArgs(),
+				),
+				array(
+					'methods'             => \WP_REST_Server::DELETABLE,
+					'callback'            => array( $resources, 'destroy' ),
+					'permission_callback' => array( $guard, 'manageSettings' ),
+					'args'                => self::idArgs(),
+				),
+			)
+		);
+
+		register_rest_route(
+			Routes::NS,
+			'/admin/resources/' . self::ID . '/exceptions',
+			array(
+				array(
+					'methods'             => \WP_REST_Server::CREATABLE,
+					'callback'            => array( $resources, 'addException' ),
+					'permission_callback' => array( $guard, 'manageSettings' ),
+					'args'                => self::idArgs(),
+				),
+				array(
+					'methods'             => \WP_REST_Server::DELETABLE,
+					'callback'            => array( $resources, 'removeException' ),
+					'permission_callback' => array( $guard, 'manageSettings' ),
+					'args'                => self::idArgs(),
+				),
+			)
+		);
+
+		register_rest_route(
+			Routes::NS,
+			'/admin/exceptions',
+			array(
+				array(
+					'methods'             => \WP_REST_Server::CREATABLE,
+					'callback'            => array( $resources, 'addBusinessException' ),
+					'permission_callback' => array( $guard, 'manageSettings' ),
+				),
+				array(
+					'methods'             => \WP_REST_Server::DELETABLE,
+					'callback'            => array( $resources, 'removeBusinessException' ),
+					'permission_callback' => array( $guard, 'manageSettings' ),
+				),
+			)
+		);
 	}
 
 	/** @return array<string, array<string, mixed>> */
@@ -221,6 +346,26 @@ final class AdminRoutes {
 			'uuid' => array(
 				'required'          => true,
 				'sanitize_callback' => 'sanitize_text_field',
+			),
+		);
+	}
+
+	/** @return array<string, array<string, mixed>> */
+	private static function idArgs(): array {
+		return array(
+			'id' => array(
+				'required'          => true,
+				'sanitize_callback' => 'absint',
+			),
+		);
+	}
+
+	/** @return array<string, array<string, mixed>> */
+	private static function includeInactiveArgs(): array {
+		return array(
+			'include_inactive' => array(
+				'default'           => false,
+				'sanitize_callback' => 'rest_sanitize_boolean',
 			),
 		);
 	}

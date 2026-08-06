@@ -47,9 +47,72 @@ final class ServiceRepository {
 			$this->db->prepare( "SELECT * FROM {$p}reservant_services WHERE id = %d", $id ), // phpcs:ignore WordPress.DB.PreparedSQL
 			ARRAY_A
 		);
-		if ( null === $row ) {
-			return null;
+		return null === $row ? null : self::castRow( $row );
+	}
+
+	/**
+	 * The catalog listing (AGENTS.md Task 11): `$includeInactive = false` hides a deactivated service -
+	 * the state a `referenced` service is steered towards instead of deletion.
+	 *
+	 * @return list<array<string, mixed>>
+	 */
+	public function all( bool $includeInactive = true ): array {
+		$p   = $this->db->prefix;
+		$sql = "SELECT * FROM {$p}reservant_services";
+		if ( ! $includeInactive ) {
+			$sql .= " WHERE status <> 'inactive'";
 		}
+		$sql .= ' ORDER BY id ASC';
+		/** @var list<array<string, mixed>> $rows */
+		$rows = $this->db->get_results( $sql, ARRAY_A ); // phpcs:ignore WordPress.DB.PreparedSQL
+		return array_map( array( self::class, 'castRow' ), $rows );
+	}
+
+	/**
+	 * A partial column update - only the given fields change, plus `updated_at`. Used for both
+	 * ordinary edits and the `setStatus()` deactivate shortcut.
+	 *
+	 * @param array<string, mixed> $fields
+	 */
+	public function update( int $id, array $fields ): void {
+		if ( array() === $fields ) {
+			return;
+		}
+		$fields['updated_at'] = gmdate( 'Y-m-d H:i:s' );
+		$this->db->update( "{$this->db->prefix}reservant_services", $fields, array( 'id' => $id ) );
+	}
+
+	public function setStatus( int $id, string $status ): void {
+		$this->update( $id, array( 'status' => $status ) );
+	}
+
+	/**
+	 * Whether any booking item - of any status, past or present - names this service. The `referenced`
+	 * delete guard (AGENTS.md Task 11): a booking's history must never dangle a foreign id, so deletion is
+	 * refused in favour of deactivation whenever this is true.
+	 */
+	public function isReferenced( int $id ): bool {
+		$p     = $this->db->prefix;
+		$count = (int) $this->db->get_var(
+			$this->db->prepare(
+				"SELECT COUNT(*) FROM {$p}reservant_booking_items WHERE service_id = %d", // phpcs:ignore WordPress.DB.PreparedSQL
+				$id
+			)
+		);
+		return $count > 0;
+	}
+
+	/** Only reachable once `isReferenced()` is false - the caller enforces that, not this method. */
+	public function delete( int $id ): void {
+		$p = $this->db->prefix;
+		$this->db->query( $this->db->prepare( "DELETE FROM {$p}reservant_services WHERE id = %d", $id ) ); // phpcs:ignore WordPress.DB.PreparedSQL
+	}
+
+	/**
+	 * @param array<string, mixed> $row
+	 * @return array<string, mixed>
+	 */
+	private static function castRow( array $row ): array {
 		foreach ( self::INT_COLUMNS as $column ) {
 			if ( isset( $row[ $column ] ) ) {
 				$row[ $column ] = (int) $row[ $column ];

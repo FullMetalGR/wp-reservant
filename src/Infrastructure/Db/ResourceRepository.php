@@ -28,9 +28,73 @@ final class ResourceRepository {
 			$this->db->prepare( "SELECT * FROM {$p}reservant_resources WHERE id = %d", $id ), // phpcs:ignore WordPress.DB.PreparedSQL
 			ARRAY_A
 		);
-		if ( null === $row ) {
-			return null;
+		return null === $row ? null : self::castRow( $row );
+	}
+
+	/**
+	 * The staff listing (AGENTS.md Task 11): `$includeInactive = false` hides a deactivated resource.
+	 *
+	 * @return list<array<string, mixed>>
+	 */
+	public function all( bool $includeInactive = true ): array {
+		$p   = $this->db->prefix;
+		$sql = "SELECT * FROM {$p}reservant_resources";
+		if ( ! $includeInactive ) {
+			$sql .= " WHERE status <> 'inactive'";
 		}
+		$sql .= ' ORDER BY id ASC';
+		/** @var list<array<string, mixed>> $rows */
+		$rows = $this->db->get_results( $sql, ARRAY_A ); // phpcs:ignore WordPress.DB.PreparedSQL
+		return array_map( array( self::class, 'castRow' ), $rows );
+	}
+
+	/**
+	 * A partial column update - only the given fields change. Used for both ordinary edits and the
+	 * `setStatus()` deactivate shortcut.
+	 *
+	 * @param array<string, mixed> $fields
+	 */
+	public function update( int $id, array $fields ): void {
+		if ( array() === $fields ) {
+			return;
+		}
+		$this->db->update( "{$this->db->prefix}reservant_resources", $fields, array( 'id' => $id ) );
+	}
+
+	public function setStatus( int $id, string $status ): void {
+		$this->update( $id, array( 'status' => $status ) );
+	}
+
+	/**
+	 * Whether any booking item - of any status, past or present - names this resource. The `referenced`
+	 * delete guard (AGENTS.md Task 11): a booking's history must never dangle a foreign id, so deletion is
+	 * refused in favour of deactivation whenever this is true.
+	 */
+	public function isReferenced( int $id ): bool {
+		$p     = $this->db->prefix;
+		$count = (int) $this->db->get_var(
+			$this->db->prepare(
+				"SELECT COUNT(*) FROM {$p}reservant_booking_items WHERE resource_id = %d", // phpcs:ignore WordPress.DB.PreparedSQL
+				$id
+			)
+		);
+		return $count > 0;
+	}
+
+	/**
+	 * Only reachable once `isReferenced()` is false - the caller is also expected to have already
+	 * unlinked services and cleared availability rules/exceptions via `AvailabilityRepository`.
+	 */
+	public function delete( int $id ): void {
+		$p = $this->db->prefix;
+		$this->db->query( $this->db->prepare( "DELETE FROM {$p}reservant_resources WHERE id = %d", $id ) ); // phpcs:ignore WordPress.DB.PreparedSQL
+	}
+
+	/**
+	 * @param array<string, mixed> $row
+	 * @return array<string, mixed>
+	 */
+	private static function castRow( array $row ): array {
 		$row['id'] = (int) $row['id'];
 		if ( isset( $row['wp_user_id'] ) ) {
 			$row['wp_user_id'] = (int) $row['wp_user_id'];
@@ -73,6 +137,18 @@ final class ResourceRepository {
 		);
 	}
 
+	/** The other half of `linkService()` - a resource save replacing its `service_ids` (AGENTS.md Task 11). */
+	public function unlinkService( int $serviceId, int $resourceId ): void {
+		$p = $this->db->prefix;
+		$this->db->query(
+			$this->db->prepare(
+				"DELETE FROM {$p}reservant_service_resource WHERE service_id = %d AND resource_id = %d", // phpcs:ignore WordPress.DB.PreparedSQL
+				$serviceId,
+				$resourceId
+			)
+		);
+	}
+
 	/**
 	 * Bookable staff only - a deactivated resource keeps its links but takes no new work.
 	 *
@@ -102,6 +178,21 @@ final class ResourceRepository {
 			$this->db->prepare(
 				"SELECT resource_id FROM {$p}reservant_service_resource WHERE service_id = %d ORDER BY resource_id ASC", // phpcs:ignore WordPress.DB.PreparedSQL
 				$serviceId
+			)
+		);
+		return array_map( 'intval', $ids );
+	}
+
+	/** The mirror of `idsForService()` - which services a given resource performs (AGENTS.md Task 11).
+	 *
+	 * @return list<int> ascending
+	 */
+	public function serviceIdsForResource( int $resourceId ): array {
+		$p   = $this->db->prefix;
+		$ids = $this->db->get_col(
+			$this->db->prepare(
+				"SELECT service_id FROM {$p}reservant_service_resource WHERE resource_id = %d ORDER BY service_id ASC", // phpcs:ignore WordPress.DB.PreparedSQL
+				$resourceId
 			)
 		);
 		return array_map( 'intval', $ids );
