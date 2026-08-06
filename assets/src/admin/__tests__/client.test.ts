@@ -77,4 +77,59 @@ describe( 'apiFetch', () => {
 		expect( caught ).toBeInstanceOf( ApiError );
 		expect( ( caught as ApiError ).segment ).toBeUndefined();
 	} );
+
+	// review round 1 verification item: `namespace` (Task 16's WP-core user search) joins the URL
+	// the same way, and `ApiError.fromResponse()` must tolerate a WP-CORE error body - no
+	// `reservant/v1` envelope fields (`code`/`message` are core's own, `data` carries only `status`,
+	// never `detail`/`segment`) - without throwing, degrading to sane values rather than blowing up
+	// on a shape it was never written against.
+	it( 'joins restRoot with a namespace override rather than the default reservant/v1', async () => {
+		( global.fetch as jest.Mock ).mockResolvedValue( jsonResponse( [] ) );
+
+		await apiFetch( '/users?search=jane', {}, 'wp/v2' );
+
+		expect( global.fetch ).toHaveBeenCalledTimes( 1 );
+		const [ url ] = ( global.fetch as jest.Mock ).mock.calls[ 0 ] as [ string, RequestInit ];
+		expect( url ).toBe( '/wp-json/wp/v2/users?search=jane' );
+	} );
+
+	it( 'tolerates a WP-core error body (no reservant envelope fields) from a namespace-override call, without throwing an unhandled error', async () => {
+		( global.fetch as jest.Mock ).mockResolvedValue(
+			jsonResponse( { code: 'rest_forbidden', message: 'Sorry, you are not allowed to do that.', data: { status: 403 } }, 403 )
+		);
+
+		let caught: unknown;
+		try {
+			await apiFetch( '/users?search=jane', {}, 'wp/v2' );
+		} catch ( error ) {
+			caught = error;
+		}
+
+		expect( caught ).toBeInstanceOf( ApiError );
+		const error = caught as ApiError;
+		expect( error.code ).toBe( 'rest_forbidden' );
+		expect( error.status ).toBe( 403 );
+		// No reservant-shaped `data.detail` on a core error - falls back to `message`, never throws
+		// or leaves `detail` undefined.
+		expect( error.detail ).toBe( 'Sorry, you are not allowed to do that.' );
+		expect( error.segment ).toBeUndefined();
+	} );
+
+	it( 'tolerates a WP-core error body with no "data" object at all, falling back to the response status', async () => {
+		( global.fetch as jest.Mock ).mockResolvedValue( jsonResponse( { code: 'rest_no_route', message: 'No route was found.' }, 404 ) );
+
+		let caught: unknown;
+		try {
+			await apiFetch( '/users/999999', {}, 'wp/v2' );
+		} catch ( error ) {
+			caught = error;
+		}
+
+		expect( caught ).toBeInstanceOf( ApiError );
+		const error = caught as ApiError;
+		expect( error.code ).toBe( 'rest_no_route' );
+		// No `data` at all -> falls back to the HTTP status actually observed, not a crash.
+		expect( error.status ).toBe( 404 );
+		expect( error.detail ).toBe( 'No route was found.' );
+	} );
 } );

@@ -9,6 +9,19 @@ function errorMessage( error: unknown ): string {
 	return error instanceof Error ? error.message : __( 'Something went wrong.', 'reservant' );
 }
 
+/**
+ * A TTL field is only ever meaningful as a positive whole number - `SettingsAdminController`'s own
+ * `posIntOrThrow()` 400s anything else. Checked client-side too (review round 1): `toPatch()` below
+ * used to fold a blank/garbage value through `parseInt(...) || 0`, which let a blanked-out field
+ * reach `Save` as a literal `0` - a 0-minute checkout hold, submitted with nothing but a generic
+ * error toast (or worse, silently accepted) rather than being caught before it was ever sent.
+ */
+function isPositiveIntString( value: string ): boolean {
+	return /^[0-9]+$/.test( value.trim() ) && parseInt( value, 10 ) > 0;
+}
+
+const TTL_ERROR = __( 'Must be a positive whole number.', 'reservant' );
+
 interface SettingsFormState {
 	currency: string;
 	checkoutTtlMin: string;
@@ -82,7 +95,11 @@ export function SettingsScreen() {
 		} );
 	}
 
-	const canSave = null !== form && /^[A-Za-z]{3}$/.test( form.currency.trim() );
+	const checkoutValid = null !== form && isPositiveIntString( form.checkoutTtlMin );
+	const approvalValid = null !== form && isPositiveIntString( form.approvalTtlHours );
+	const paymentValid = null !== form && isPositiveIntString( form.paymentTtlHours );
+	const currencyValid = null !== form && /^[A-Za-z]{3}$/.test( form.currency.trim() );
+	const canSave = currencyValid && checkoutValid && approvalValid && paymentValid;
 
 	return (
 		<div className="reservant-settings-screen">
@@ -110,6 +127,7 @@ export function SettingsScreen() {
 						type="number"
 						min={ 1 }
 						label={ __( 'Checkout hold (minutes)', 'reservant' ) }
+						help={ checkoutValid ? undefined : TTL_ERROR }
 						value={ form.checkoutTtlMin }
 						onChange={ ( value ) => patchForm( { checkoutTtlMin: value } ) }
 					/>
@@ -119,6 +137,7 @@ export function SettingsScreen() {
 						type="number"
 						min={ 1 }
 						label={ __( 'Approval hold (hours)', 'reservant' ) }
+						help={ approvalValid ? undefined : TTL_ERROR }
 						value={ form.approvalTtlHours }
 						onChange={ ( value ) => patchForm( { approvalTtlHours: value } ) }
 					/>
@@ -128,6 +147,7 @@ export function SettingsScreen() {
 						type="number"
 						min={ 1 }
 						label={ __( 'Payment hold (hours)', 'reservant' ) }
+						help={ paymentValid ? undefined : TTL_ERROR }
 						value={ form.paymentTtlHours }
 						onChange={ ( value ) => patchForm( { paymentTtlHours: value } ) }
 					/>
