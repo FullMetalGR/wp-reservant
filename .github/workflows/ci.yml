@@ -46,6 +46,10 @@ jobs:
         with: { node-version: '20' }
       - run: composer install --no-progress
       - run: npm ci
+      # `Admin\AdminPage` enqueues build/admin.js on its own wp-admin pages (Task 13) - the
+      # integration suite exercises that enqueue path for real, so the bundle has to exist before
+      # it runs, same as it would on a released site.
+      - run: npm run build
       - run: npx wp-env start
       - run: composer test:integration
       - run: sudo apt-get install -y jq && chmod +x bin/run-concurrency.sh && ./bin/run-concurrency.sh

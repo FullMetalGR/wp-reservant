@@ -55,6 +55,7 @@ final class Plugin {
 		);
 
 		if ( is_admin() ) {
+			( new Admin\AdminPage() )->register();
 			( new Admin\DemoDataPage() )->register();
 			( new Admin\ApprovalActionEndpoint() )->register();
 		}
