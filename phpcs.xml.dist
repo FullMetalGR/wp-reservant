@@ -1,6 +1,13 @@
 <?xml version="1.0"?>
 <ruleset name="Reservant">
   <file>src</file>
+  <!-- The only destructive file in the repository. Unlinted until now, which is exactly backwards. -->
+  <file>uninstall.php</file>
+  <!-- The concurrency harness AGENTS.md section 2.2 forbids skipping is ~600 lines of PHP that no
+       linter looked at until now. It is CLI-only code (no WordPress bootstrap, no HTTP output), so
+       a handful of WPCS sniffs written for plugin runtime code do not apply - excluded below rather
+       than left unlinted altogether. -->
+  <file>bin</file>
   <arg name="extensions" value="php"/>
   <arg value="sp"/>
   <rule ref="WordPress-Extra">
@@ -13,10 +20,36 @@
     <exclude name="Generic.Commenting"/>
     <exclude name="PEAR.NamingConventions"/>
   </rule>
+  <!-- bin/*.php are standalone CLI drivers: they run under plain `php`, with no WordPress loaded,
+       so the WP wrappers these three sniff groups recommend (wp_remote_*, wp_json_encode, WP_Filesystem)
+       do not exist there, and `proc_open()` is how the admin-vs-customer race spawns its rival.
+       Scoped to bin/ only - src/ keeps every one of them. -->
+  <rule ref="WordPress.WP.AlternativeFunctions">
+    <exclude-pattern>bin/*</exclude-pattern>
+  </rule>
+  <rule ref="WordPress.PHP.DiscouragedPHPFunctions">
+    <exclude-pattern>bin/*</exclude-pattern>
+  </rule>
+  <!-- These files open with a shebang, then `<?php`, then `declare( strict_types=1 );` - the same
+       order src/ uses. PSR12 wants the file docblock immediately after the opening tag instead. -->
+  <rule ref="PSR12.Files.FileHeader">
+    <exclude-pattern>bin/*</exclude-pattern>
+  </rule>
   <!-- AGENTS.md section 7 mandates slash-namespaced hooks (reservant/booking/held). Keep the sniff, teach it the delimiter. -->
   <rule ref="WordPress.NamingConventions.ValidHookName">
     <properties>
       <property name="additionalWordDelimiters" value="/"/>
+    </properties>
+  </rule>
+  <!-- AGENTS.md section 7: the four custom capabilities registered by Admin\Capabilities. -->
+  <rule ref="WordPress.WP.Capabilities">
+    <properties>
+      <property name="custom_capabilities" type="array">
+        <element value="reservant_manage_bookings"/>
+        <element value="reservant_approve_bookings"/>
+        <element value="reservant_manage_settings"/>
+        <element value="reservant_view_own_calendar"/>
+      </property>
     </properties>
   </rule>
 </ruleset>

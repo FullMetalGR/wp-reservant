@@ -144,9 +144,9 @@ $baseStart = ( new DateTimeImmutable( $startBase, new DateTimeZone( 'UTC' ) ) )-
 // One round per calendar day -- day is the resource-day mutex's own granularity (AGENTS.md section 4), so
 // this guarantees every round is a clean slate with zero risk of bleeding into working-hours limits
 // the way ten same-day hourly offsets would (0900-1700 doesn't hold ten 90-minute chain footprints).
-$rounds     = 10;
-$results    = array();
-$overallOk  = true;
+$rounds    = 10;
+$results   = array();
+$overallOk = true;
 
 for ( $round = 0; $round < $rounds; $round++ ) {
 	$roundDay = $baseStart->modify( "+{$round} days" );

@@ -23,7 +23,7 @@ Works with or without money. WooCommerce is an *optional* payment bridge, never 
 | Cancellation granularity | **Whole booking only.** Status lives on the container. Items have no independent lifecycle. |
 | Payments | **Optional WooCommerce bridge.** Plugin activates and fully works with WC absent. |
 | Approval queue | Per service: booking may require owner approval. **Approve -> emailed payment link -> paid -> confirmed.** No money moves before a human says yes. |
-| Approval holds | A pending request **blocks the slot**. On timeout (default 48h) the service's `on_approval_timeout` applies: `expire` or `auto_approve`. Owner emails carry one-click signed approve/reject links. |
+| Approval holds | A pending request **blocks the slot**. On timeout (default 48h) the service's `on_approval_timeout` applies: `expire` or `auto_approve`. Owner emails carry signed approve/reject links; each opens a confirm page requiring one human click before the decision executes (scanner-proof). |
 | Seats | Optional per service: capacity-only, or a **row x seat grid** the customer picks from. No visual canvas editor. |
 | Resources | **Multiple staff, single location.** Rooms/equipment and multi-location are v2. |
 | Distribution | **Premium only.** Licensing abstracted behind an interface, vendor undecided. |
@@ -140,7 +140,9 @@ audit row. A chain requiring approval on *any* segment requires approval as a wh
 
 On approval timeout the service's `on_approval_timeout` decides: `expire` (release the slot) or
 `auto_approve` (proceed as if the owner said yes). Owners get a nag at 25/50/75% of the window,
-and every approval email carries signed one-click approve/reject URLs so the decision never
+and every approval email carries signed approve/reject URLs; each opens a confirm page requiring
+one human click before the decision executes (scanner-proof - the link itself is inert, so an
+email security scanner that GETs every link in the message never trips it), so the decision never
 requires a wp-admin login.
 
 ### 2.4 How availability is computed
@@ -183,7 +185,7 @@ requires a wp-admin login.
 ```
 reservant/
 +-- reservant.php              # header, guards (PHP/WP version), bootstrap only
-+-- uninstall.php              # honors reservant_delete_data_on_uninstall (default: keep)
++-- uninstall.php              # honors reservant_settings['purge_on_uninstall'] (default: keep)
 +-- composer.json  package.json
 +-- src/
 |   +-- Plugin.php             # container + hook registration, nothing else
@@ -265,8 +267,20 @@ Migrations are versioned and run through `Infrastructure/Db/Migrations` on activ
 | `POST /bookings/{uuid}/confirm` | free / pay-on-site path |
 | `GET\|POST /bookings/{uuid}` | guest self-service, requires `token` |
 | `POST /bookings/{uuid}/cancel` , `/reschedule` | policy-checked. Reschedule moves **all** segments as one atomic release + re-hold; partial success is impossible. |
-| `POST /admin/bookings/{uuid}/approve` , `/reject` | capability-gated; approve issues the payment link when the booking is paid |
-| `/admin/*` | bookings, approval inbox, services, resources, availability, seat maps |
+| `GET /admin/bookings` | search/list; `reservant_manage_bookings` |
+| `POST /admin/bookings` | the owner's manual booking - lands on `confirmed` directly, never a hold; `reservant_manage_bookings` |
+| `GET /admin/bookings/{uuid}` | detail plus the audit trail; `reservant_manage_bookings` |
+| `POST /admin/bookings/{uuid}/approve` , `/reject` | `reservant_approve_bookings` alone is enough - a staff member without `reservant_manage_bookings` is scoped to bookings with an item on their own resource. Approve lands the booking on `confirmed` unconditionally: the approve -> `awaiting_payment` -> payment-link step for a paid service is the WooCommerce bridge's job (section 6), and it is not built yet - see P7 in section 9 |
+| `POST /admin/bookings/{uuid}/cancel` , `/no_show` , `/complete` | manager overrides; `reservant_manage_bookings` |
+| `GET /admin/calendar` | the week/day grid; `reservant_manage_bookings` or `reservant_view_own_calendar` |
+| `GET /admin/availability` | chain feasibility for the manual-booking drawer, same request shape as the public `GET /availability`; `reservant_manage_bookings` or `reservant_view_own_calendar` |
+| `GET\|POST /admin/services`, `GET\|PUT\|DELETE /admin/services/{id}` | service catalog CRUD; `reservant_manage_settings` |
+| `GET\|POST /admin/resources`, `GET\|PUT\|DELETE /admin/resources/{id}` | staff CRUD - identity, linked WP user, services performed, weekly rules; `reservant_manage_settings` |
+| `POST\|DELETE /admin/resources/{id}/exceptions` | one resource's own blackout dates; `reservant_manage_settings` |
+| `GET\|POST\|DELETE /admin/exceptions` | business-wide blackout dates (`GET` also lists a single resource's own, via `resource_id`); `reservant_manage_settings` |
+| `GET\|POST /admin/occurrences`, `PUT\|DELETE /admin/occurrences/{id}` | event occurrences; `reservant_manage_settings` |
+| `GET\|POST /admin/seat-maps`, `GET\|PUT\|DELETE /admin/seat-maps/{id}` | seat grid specs; `reservant_manage_settings` |
+| `GET\|PUT /admin/settings` | plugin settings; `reservant_manage_settings` |
 
 Auth: `X-WP-Nonce` for logged-in/admin; for guests a **signed manage token** - random secret in the
 email link, only its hash stored (`manage_token_hash`), compared with `hash_equals()`, expiring
@@ -331,19 +345,32 @@ That namespace only loads when `class_exists( 'WooCommerce' )`. Everything else 
 ## 8. Commands
 
 ```bash
+# One-time / after a pull
 composer install && npm install
-npm run start                 # watch build
-npm run build                 # production build
-npx wp-env start              # local WP + DB
+npm run build                 # production build - REQUIRED before any suite that renders wp-admin
+npx wp-env start              # local WP + DB - REQUIRED before the integration, concurrency and e2e suites
+npx playwright install chromium   # once, before the first e2e run
 
-composer test:unit            # Domain/ - no WP bootstrap, fast
-composer test:integration     # repositories, REST, locking (needs wp-env)
-npm run test:e2e              # Playwright booking flow
-composer lint                 # PHPCS / WPCS
-composer stan                 # PHPStan level 6+
+npm run start                 # watch build (development)
+
+# Gates, in the order CI runs them
+composer lint                 # PHPCS / WPCS over src/ and bin/
+composer stan                 # PHPStan level 6+ over src/
+composer test:unit            # Domain/ + pure Application/ - no WP bootstrap, fast
+composer test:integration     # repositories, REST, migrations, locking (needs wp-env)
+npm run tsc                   # TypeScript strict, no emit
+npm run test:js               # Jest + Testing Library over assets/src
+npm run fallow                # fallow static analysis, failing on its error-level findings
+./bin/run-concurrency.sh      # parallel holds, opposing-order chains, contested seats (needs wp-env)
+npm run test:e2e              # Playwright admin smoke (needs wp-env + a built bundle)
 ```
 
-CI runs all of the above. Concurrency tests are not allowed to be marked skipped.
+CI runs all of the above. Concurrency tests are not allowed to be marked skipped: `./bin/run-concurrency.sh`
+is the command, and it must pass, not be commented out or `|| true`-d.
+
+`npm run fallow` is the enforcing form of `npx fallow --ci`: fallow writes SARIF but exits 0 even when
+it has reported `level: "error"` findings, so the wrapper (`bin/fallow-gate.mjs`) reads the report and
+fails the build on any of them. Running `npx fallow --ci` alone gates nothing.
 
 ---
 
@@ -370,8 +397,9 @@ UI, not data.
 8. **P7** WooCommerce bridge.
 9. **P8** Licensing stub, packaging, docs.
 
-**v1.1 - approval queue.** Statuses and columns already exist. Adds the admin inbox, one-click
-signed approve/reject links, nag + timeout jobs, and the approval -> payment-link path in the bridge.
+**v1.1 - approval queue.** Statuses and columns already exist. Adds the admin inbox, signed
+approve/reject links with a one-click confirm page, nag + timeout jobs, and the approval ->
+payment-link path in the bridge.
 
 **v1.2 - assigned seats.** Seat picker in the widget. The admin builder is a **text spec**
 ("rows A-J, 12 per row, aisle after 6"), not a drag-and-drop canvas - identical data model, a

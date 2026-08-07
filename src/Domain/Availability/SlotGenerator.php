@@ -24,6 +24,12 @@ final class SlotGenerator {
 	 * @param array<int, list<AvailabilityRule>>                                     $rulesByResource
 	 * @param array<int, list<AvailabilityException>>                                $exceptionsByResource
 	 * @param array<int, list<array{\DateTimeImmutable,\DateTimeImmutable}>>         $busyByResource
+	 * @param bool $ignoreWindow Admin relaxation (AGENTS.md Task 6/10): skip the lead-time/horizon
+	 *                           clamps derived from `$nowUtc` ONLY - `$fromUtc`/`$toUtc` (the
+	 *                           caller's requested window) still bound the result. Mirrors
+	 *                           `HoldBooking`'s `admin` flag exactly, including allowing starts
+	 *                           already before `$nowUtc` (the backdating ruling), so the manual
+	 *                           booking drawer offers exactly what an admin hold accepts.
 	 * @return list<\DateTimeImmutable>
 	 */
 	public function starts(
@@ -37,12 +43,13 @@ final class SlotGenerator {
 		array $exceptionsByResource,
 		array $busyByResource,
 		bool $sameStaff = false,
+		bool $ignoreWindow = false,
 	): array {
 		$granularity = $this->maskBuilder->granularityMin;
 		$segments    = array_map( static fn ( ChainSegment $s ): ChainSegment => self::aligned( $s, $granularity ), $segments );
 
-		$from = max( $fromUtc, $nowUtc->add( new \DateInterval( 'PT' . max( 0, $leadTimeMin ) . 'M' ) ) );
-		$to   = min( $toUtc, $nowUtc->add( new \DateInterval( 'P' . max( 0, $horizonDays ) . 'D' ) ) );
+		$from = $ignoreWindow ? $fromUtc : max( $fromUtc, $nowUtc->add( new \DateInterval( 'PT' . max( 0, $leadTimeMin ) . 'M' ) ) );
+		$to   = $ignoreWindow ? $toUtc : min( $toUtc, $nowUtc->add( new \DateInterval( 'P' . max( 0, $horizonDays ) . 'D' ) ) );
 		if ( $from >= $to ) {
 			return array();
 		}

@@ -1,0 +1,262 @@
+<?php
+declare( strict_types=1 );
+
+namespace Reservant\Tests\Integration\Notifications;
+
+use Reservant\Admin\ApprovalActionEndpoint;
+use Reservant\Application\ApproveBooking;
+use Reservant\Application\Dto\AppointmentRequest;
+use Reservant\Application\Dto\Customer;
+use Reservant\Application\Dto\HoldRequest;
+use Reservant\Application\Dto\SegmentChoice;
+use Reservant\Application\HoldBooking;
+use Reservant\Application\RejectBooking;
+use Reservant\Domain\Availability\AvailabilityRule;
+use Reservant\Infrastructure\Db\AvailabilityRepository;
+use Reservant\Infrastructure\Db\BookingRepository;
+use Reservant\Infrastructure\Db\ResourceRepository;
+use Reservant\Infrastructure\Db\ServiceRepository;
+use Reservant\Infrastructure\Scheduler\Jobs;
+use Reservant\Tests\Integration\ReservantTestCase;
+
+/**
+ * `Notifications\ApprovalEmails` (Task 9): the mailer seam wired on the four approval-flow hooks.
+ *
+ * `ApprovalEmails::register()` is never called directly here - exactly like `JobsTest` relies on
+ * `Plugin::register()` having already wired `Jobs::register()` at bootstrap
+ * (`tests/Integration/bootstrap.php` requires `reservant.php` on `muplugins_loaded`), these tests
+ * rely on the same bootstrap having wired `ApprovalEmails::register()`. That is itself the wiring
+ * assertion: if `Plugin::register()` never calls it, every test below sees zero captured mail.
+ *
+ * Mail is captured via the `pre_wp_mail` filter (WP core, `wp-includes/pluggable.php`): returning
+ * non-null short-circuits `wp_mail()` before any real transport is touched.
+ */
+final class ApprovalEmailsTest extends ReservantTestCase {
+
+	private int $approvalServiceId;
+	private int $staffId;
+
+	public function set_up(): void {
+		parent::set_up();
+		global $wpdb;
+		$services  = new ServiceRepository( $wpdb );
+		$resources = new ResourceRepository( $wpdb );
+		$avail     = new AvailabilityRepository( $wpdb );
+
+		$this->approvalServiceId = $services->insert(
+			array(
+				'name'                => 'Consultation',
+				'type'                => 'appointment',
+				'duration_min'        => 30,
+				'price_minor'         => 3000,
+				'payment_mode'        => 'onsite',
+				'requires_approval'   => 1,
+				'approval_hold_hours' => 48,
+			)
+		);
+		$this->staffId           = $resources->insert(
+			array(
+				'name'  => 'Alex',
+				'email' => 'alex@example.com',
+			)
+		);
+		$resources->linkService( $this->approvalServiceId, $this->staffId );
+		foreach ( range( 1, 7 ) as $weekday ) {
+			$avail->insertRule( $this->staffId, new AvailabilityRule( $weekday, '09:00', '17:00' ) );
+		}
+	}
+
+	private function customer(): Customer {
+		return new Customer( 'Maria', 'maria@example.com' );
+	}
+
+	/** @return array<string, mixed> */
+	private function holdAwaitingApproval(): array {
+		global $wpdb;
+		return HoldBooking::make( $wpdb )->execute(
+			new HoldRequest(
+				$this->customer(),
+				new AppointmentRequest( $this->utc( 1, '09:00' ), array( new SegmentChoice( $this->approvalServiceId ) ) )
+			),
+			$this->utc( 0 )
+		);
+	}
+
+	/**
+	 * @return list<array{to: string, subject: string, message: string}>
+	 */
+	private function captureMail( callable $trigger ): array {
+		$captured = array();
+		$listener = static function ( $preempt, array $atts ) use ( &$captured ) {
+			$to         = $atts['to'] ?? '';
+			$captured[] = array(
+				'to'      => is_array( $to ) ? implode( ',', $to ) : (string) $to,
+				'subject' => (string) ( $atts['subject'] ?? '' ),
+				'message' => (string) ( $atts['message'] ?? '' ),
+			);
+			return true; // Short-circuits wp_mail() - never touches a real transport.
+		};
+		add_filter( 'pre_wp_mail', $listener, 10, 2 );
+		$trigger();
+		remove_filter( 'pre_wp_mail', $listener, 10 );
+		return $captured;
+	}
+
+	public function testHeldApprovalRequestGoesToAssignedStaffWithBothSignedUrls(): void {
+		global $wpdb;
+		$booking = null;
+		$sent    = $this->captureMail(
+			function () use ( &$booking ): void {
+				$booking = $this->holdAwaitingApproval();
+			}
+		);
+
+		self::assertCount( 1, $sent );
+		self::assertSame( 'alex@example.com', $sent[0]['to'] );
+		self::assertStringContainsString( 'approval', strtolower( $sent[0]['subject'] ) );
+
+		$fresh      = ( new BookingRepository( $wpdb ) )->findByUuid( $booking['uuid'] );
+		$expiresTs  = ( new \DateTimeImmutable( (string) $fresh['hold_expires_at'], new \DateTimeZone( 'UTC' ) ) )->getTimestamp();
+		$approveUrl = ApprovalActionEndpoint::url( $booking['uuid'], 'approve', (string) $fresh['updated_at'], $expiresTs );
+		$rejectUrl  = ApprovalActionEndpoint::url( $booking['uuid'], 'reject', (string) $fresh['updated_at'], $expiresTs );
+
+		self::assertStringContainsString( $approveUrl, $sent[0]['message'], 'body must carry the signed approve URL' );
+		self::assertStringContainsString( $rejectUrl, $sent[0]['message'], 'body must carry the signed reject URL' );
+	}
+
+	public function testNagSendsApprovalNagEmailWithTheSameLinksToTheSameApprover(): void {
+		global $wpdb;
+		$booking = $this->holdAwaitingApproval();
+
+		$sent = $this->captureMail(
+			static function () use ( $booking ): void {
+				do_action( Jobs::NAG, $booking['uuid'], 50 );
+			}
+		);
+
+		self::assertCount( 1, $sent );
+		self::assertSame( 'alex@example.com', $sent[0]['to'] );
+
+		$fresh      = ( new BookingRepository( $wpdb ) )->findByUuid( $booking['uuid'] );
+		$expiresTs  = ( new \DateTimeImmutable( (string) $fresh['hold_expires_at'], new \DateTimeZone( 'UTC' ) ) )->getTimestamp();
+		$approveUrl = ApprovalActionEndpoint::url( $booking['uuid'], 'approve', (string) $fresh['updated_at'], $expiresTs );
+		$rejectUrl  = ApprovalActionEndpoint::url( $booking['uuid'], 'reject', (string) $fresh['updated_at'], $expiresTs );
+
+		self::assertStringContainsString( $approveUrl, $sent[0]['message'] );
+		self::assertStringContainsString( $rejectUrl, $sent[0]['message'] );
+	}
+
+	public function testApprovedSendsBookingApprovedEmailToTheCustomer(): void {
+		global $wpdb;
+		$booking = $this->holdAwaitingApproval();
+
+		$sent = $this->captureMail(
+			function () use ( $wpdb, $booking ): void {
+				ApproveBooking::make( $wpdb )->execute( $booking['uuid'], $this->utc( 0, '01:00' ), 'admin' );
+			}
+		);
+
+		self::assertCount( 1, $sent );
+		self::assertSame( 'maria@example.com', $sent[0]['to'] );
+		self::assertStringContainsString( 'approved', strtolower( $sent[0]['subject'] ) );
+	}
+
+	public function testRejectedEmailToCustomerIncludesTheReason(): void {
+		global $wpdb;
+		$booking = $this->holdAwaitingApproval();
+
+		$sent = $this->captureMail(
+			function () use ( $wpdb, $booking ): void {
+				RejectBooking::make( $wpdb )->execute( $booking['uuid'], 'not enough staff available', $this->utc( 0, '01:00' ), 'admin' );
+			}
+		);
+
+		self::assertCount( 1, $sent );
+		self::assertSame( 'maria@example.com', $sent[0]['to'] );
+		self::assertStringContainsString( 'not enough staff available', $sent[0]['message'] );
+	}
+
+	public function testApprovalRequestArgsFilterCanRewriteTheRecipient(): void {
+		$rewrite = static function ( array $args ): array {
+			$args['to'] = 'override@example.com';
+			return $args;
+		};
+		add_filter( 'reservant/email/approval_request/args', $rewrite );
+
+		$sent = $this->captureMail(
+			function (): void {
+				$this->holdAwaitingApproval();
+			}
+		);
+
+		remove_filter( 'reservant/email/approval_request/args', $rewrite );
+
+		self::assertCount( 1, $sent );
+		self::assertSame( 'override@example.com', $sent[0]['to'] );
+	}
+
+	public function testHeldWithoutApprovalSendsNoMail(): void {
+		global $wpdb;
+		$services  = new ServiceRepository( $wpdb );
+		$plainId   = $services->insert(
+			array(
+				'name'         => 'Cut',
+				'type'         => 'appointment',
+				'duration_min' => 30,
+				'price_minor'  => 2000,
+				'payment_mode' => 'onsite',
+			)
+		);
+		$resources = new ResourceRepository( $wpdb );
+		$staff     = $resources->insert(
+			array(
+				'name'  => 'Sam',
+				'email' => 'sam@example.com',
+			)
+		);
+		$resources->linkService( $plainId, $staff );
+		$avail = new AvailabilityRepository( $wpdb );
+		foreach ( range( 1, 7 ) as $weekday ) {
+			$avail->insertRule( $staff, new AvailabilityRule( $weekday, '09:00', '17:00' ) );
+		}
+
+		$sent = $this->captureMail(
+			function () use ( $wpdb, $plainId ): void {
+				HoldBooking::make( $wpdb )->execute(
+					new HoldRequest(
+						$this->customer(),
+						new AppointmentRequest( $this->utc( 1, '13:00' ), array( new SegmentChoice( $plainId ) ) )
+					),
+					$this->utc( 0 )
+				);
+			}
+		);
+
+		self::assertCount( 0, $sent );
+	}
+
+	/**
+	 * No assigned resource (an event booking's item carries no `resource_id`) falls back to the
+	 * site admin - AGENTS.md "Approval decisions are made by admins or by the staff member assigned
+	 * to the booking." Simulated directly on the row rather than via a real event fixture: the only
+	 * thing under test is the approver-email fallback, not event booking mechanics.
+	 */
+	public function testApprovalRequestFallsBackToAdminEmailWithNoAssignedResource(): void {
+		global $wpdb;
+		$booking = $this->holdAwaitingApproval();
+		$wpdb->update(
+			$wpdb->prefix . 'reservant_booking_items',
+			array( 'resource_id' => null ),
+			array( 'booking_id' => ( new BookingRepository( $wpdb ) )->findByUuid( $booking['uuid'] )['id'] )
+		);
+
+		$sent = $this->captureMail(
+			static function () use ( $booking ): void {
+				do_action( Jobs::NAG, $booking['uuid'], 25 );
+			}
+		);
+
+		self::assertCount( 1, $sent );
+		self::assertSame( (string) get_option( 'admin_email' ), $sent[0]['to'] );
+	}
+}

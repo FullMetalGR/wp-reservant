@@ -3,6 +3,7 @@ declare( strict_types=1 );
 
 namespace Reservant\Application;
 
+use Reservant\Application\Dto\BookingSnapshot;
 use Reservant\Domain\Enum\BookingStatus;
 use Reservant\Domain\Enum\PaymentMode;
 use Reservant\Infrastructure\Db\AuditLog;
@@ -55,7 +56,7 @@ final class ConfirmBooking {
 
 		/** @var array<string, mixed> $snapshot */
 		$snapshot = $this->bookings->findByUuid( $uuid );
-		do_action( 'reservant/booking/confirmed', $snapshot );
+		do_action( 'reservant/booking/confirmed', BookingSnapshot::fromArray( $snapshot ) );
 		return $snapshot;
 	}
 }

@@ -42,6 +42,13 @@ final class Errors {
 		'stale_state',
 		'not_held',
 		'currency_mismatch',
+		// Lifecycle - ApproveBooking, RejectBooking.
+		'not_approvable',
+		// Lifecycle - MarkBookingOutcome.
+		'bad_outcome',
+		// Lifecycle - the admin catalog's delete guard (Task 11), thrown when a service or resource is
+		// still named by a booking item and deletion is refused in favour of deactivation.
+		'referenced',
 	);
 
 	/**
@@ -145,6 +152,9 @@ final class Errors {
 			'not_confirmable'         => __( 'This booking cannot be confirmed in its current state.', 'reservant' ),
 			'approval_required'       => __( 'This booking is waiting for our approval.', 'reservant' ),
 			'not_cancellable'         => __( 'This booking can no longer be cancelled.', 'reservant' ),
+			'not_approvable'          => __( 'This booking can no longer be approved or rejected.', 'reservant' ),
+			'bad_outcome'             => __( 'That outcome is not recognised.', 'reservant' ),
+			'referenced'              => __( 'This item is still used by existing bookings. Deactivate it instead of deleting it.', 'reservant' ),
 			default                   => __( 'That request could not be completed.', 'reservant' ),
 		};
 	}

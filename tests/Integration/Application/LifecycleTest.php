@@ -6,6 +6,7 @@ namespace Reservant\Tests\Integration\Application;
 use Reservant\Application\CancelBooking;
 use Reservant\Application\ConfirmBooking;
 use Reservant\Application\Dto\AppointmentRequest;
+use Reservant\Application\Dto\BookingSnapshot;
 use Reservant\Application\Dto\Customer;
 use Reservant\Application\Dto\HoldRequest;
 use Reservant\Application\Dto\SegmentChoice;
@@ -113,8 +114,8 @@ final class LifecycleTest extends ReservantTestCase {
 		$wpdb->update( $wpdb->prefix . 'reservant_bookings', array( 'hold_expires_at' => '2020-01-01 00:00:00' ), array( 'uuid' => $stale['uuid'] ) );
 
 		$notified = array();
-		$listener = static function ( array $booking ) use ( &$notified ): void {
-			$notified[] = $booking['uuid'];
+		$listener = static function ( BookingSnapshot $booking ) use ( &$notified ): void {
+			$notified[] = $booking->uuid;
 		};
 		add_action( 'reservant/hold/expired', $listener );
 		// Taking the slot reaps the stale hold inline; ExpireHolds can never see it afterwards,

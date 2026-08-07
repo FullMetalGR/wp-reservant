@@ -3,6 +3,7 @@ declare( strict_types=1 );
 
 namespace Reservant\Application;
 
+use Reservant\Application\Dto\BookingSnapshot;
 use Reservant\Domain\Booking\CancellationPolicy;
 use Reservant\Domain\Enum\BookingStatus;
 use Reservant\Infrastructure\Db\AuditLog;
@@ -108,7 +109,7 @@ final class CancelBooking {
 			}
 		);
 
-		do_action( 'reservant/booking/cancelled', $snapshot );
+		do_action( 'reservant/booking/cancelled', BookingSnapshot::fromArray( $snapshot ) );
 		return $snapshot;
 	}
 

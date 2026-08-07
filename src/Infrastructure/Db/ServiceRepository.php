@@ -47,9 +47,102 @@ final class ServiceRepository {
 			$this->db->prepare( "SELECT * FROM {$p}reservant_services WHERE id = %d", $id ), // phpcs:ignore WordPress.DB.PreparedSQL
 			ARRAY_A
 		);
-		if ( null === $row ) {
-			return null;
+		return null === $row ? null : self::castRow( $row );
+	}
+
+	/**
+	 * The catalog listing (AGENTS.md Task 11): `$includeInactive = false` hides a deactivated service -
+	 * the state a `referenced` service is steered towards instead of deletion.
+	 *
+	 * @return list<array<string, mixed>>
+	 */
+	public function all( bool $includeInactive = true ): array {
+		$p   = $this->db->prefix;
+		$sql = "SELECT * FROM {$p}reservant_services";
+		if ( ! $includeInactive ) {
+			$sql .= " WHERE status <> 'inactive'";
 		}
+		$sql .= ' ORDER BY id ASC';
+		/** @var list<array<string, mixed>> $rows */
+		$rows = $this->db->get_results( $sql, ARRAY_A ); // phpcs:ignore WordPress.DB.PreparedSQL
+		return array_map( array( self::class, 'castRow' ), $rows );
+	}
+
+	/**
+	 * A partial column update - only the given fields change, plus `updated_at`. Used for both
+	 * ordinary edits and the `setStatus()` deactivate shortcut.
+	 *
+	 * @param array<string, mixed> $fields
+	 */
+	public function update( int $id, array $fields ): void {
+		if ( array() === $fields ) {
+			return;
+		}
+		$fields['updated_at'] = gmdate( 'Y-m-d H:i:s' );
+		$this->db->update( "{$this->db->prefix}reservant_services", $fields, array( 'id' => $id ) );
+	}
+
+	public function setStatus( int $id, string $status ): void {
+		$this->update( $id, array( 'status' => $status ) );
+	}
+
+	/**
+	 * Whether any booking item - of any status, past or present - names this service. The `referenced`
+	 * delete guard (AGENTS.md Task 11): a booking's history must never dangle a foreign id, so deletion is
+	 * refused in favour of deactivation whenever this is true.
+	 */
+	public function isReferenced( int $id ): bool {
+		$p     = $this->db->prefix;
+		$count = (int) $this->db->get_var(
+			$this->db->prepare(
+				"SELECT COUNT(*) FROM {$p}reservant_booking_items WHERE service_id = %d", // phpcs:ignore WordPress.DB.PreparedSQL
+				$id
+			)
+		);
+		return $count > 0;
+	}
+
+	/**
+	 * Whether any service - any status, active or inactive - still points at this seat map via
+	 * `seat_map_id` (AGENTS.md Task 12 review round 1 fix): the seat map DELETE guard.
+	 * `SeatMapRepository::hasClaims()` alone is not enough - a map nobody has ever claimed a seat on
+	 * can still be a live service's only seat map, and deleting it out from under that link would
+	 * leave `seat_map_id` dangling: a future occurrence for that service would silently derive a
+	 * capacity of 0 (`OccurrenceRepository::validSeatIds()` on a map that no longer exists returns
+	 * nothing) instead of failing loudly.
+	 */
+	public function usesSeatMap( int $seatMapId ): bool {
+		$p     = $this->db->prefix;
+		$count = (int) $this->db->get_var(
+			$this->db->prepare(
+				"SELECT COUNT(*) FROM {$p}reservant_services WHERE seat_map_id = %d", // phpcs:ignore WordPress.DB.PreparedSQL
+				$seatMapId
+			)
+		);
+		return $count > 0;
+	}
+
+	/**
+	 * Only reachable once `isReferenced()` is false - the caller enforces that, not this method.
+	 *
+	 * Returns whether a row was actually removed (AGENTS.md Task 11 fix round 1): `$wpdb->query()`
+	 * reports the number of affected rows on success, or `false` on a driver-level failure - either
+	 * way, "not exactly one row removed" must not be read by the caller as success. The caller is
+	 * expected to run this inside the same transaction as its own fresh `isReferenced()` recheck, so
+	 * a `false` here means the row vanished (or a write genuinely failed) in the gap between the
+	 * caller's outer check and this call, not that the guard was bypassed.
+	 */
+	public function delete( int $id ): bool {
+		$p      = $this->db->prefix;
+		$result = $this->db->query( $this->db->prepare( "DELETE FROM {$p}reservant_services WHERE id = %d", $id ) ); // phpcs:ignore WordPress.DB.PreparedSQL
+		return is_int( $result ) && $result > 0;
+	}
+
+	/**
+	 * @param array<string, mixed> $row
+	 * @return array<string, mixed>
+	 */
+	private static function castRow( array $row ): array {
 		foreach ( self::INT_COLUMNS as $column ) {
 			if ( isset( $row[ $column ] ) ) {
 				$row[ $column ] = (int) $row[ $column ];

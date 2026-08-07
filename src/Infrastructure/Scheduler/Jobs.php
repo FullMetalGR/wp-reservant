@@ -1,0 +1,117 @@
+<?php
+declare( strict_types=1 );
+
+namespace Reservant\Infrastructure\Scheduler;
+
+use Reservant\Application\ApproveBooking;
+use Reservant\Application\Dto\BookingSnapshot;
+use Reservant\Application\ExpireHolds;
+use Reservant\Domain\Enum\BookingStatus;
+use Reservant\Infrastructure\Db\BookingRepository;
+use Reservant\Infrastructure\Db\ServiceRepository;
+
+/**
+ * The three Action Scheduler callbacks behind the approval flow (AGENTS.md "Approval holds").
+ *
+ * Every callback re-reads the booking and no-ops unless it is still `awaiting_approval` - the
+ * scheduled timestamp and the moment the queue runner actually fires can be minutes apart, and a
+ * human (or another job) may have decided the booking in between. That race is not an error: it is
+ * the expected, benign outcome the brief calls out explicitly for `TIMEOUT` and `NAG` alike.
+ */
+final class Jobs {
+
+	public const NAG     = 'reservant/job/approval_nag';
+	public const TIMEOUT = 'reservant/job/approval_timeout';
+	public const SWEEP   = 'reservant/job/expire_holds';
+
+	public static function register(): void {
+		add_action( self::NAG, array( self::class, 'nag' ), 10, 2 );
+		add_action( self::TIMEOUT, array( self::class, 'timeout' ), 10, 1 );
+		add_action( self::SWEEP, array( self::class, 'sweep' ), 10, 0 );
+	}
+
+	/**
+	 * Fires `reservant/approval/nag` with the current snapshot - Task 9 attaches the mailer there.
+	 * No state changes here at all; a nag either reaches a listener or it does not.
+	 */
+	public static function nag( string $uuid, int $percent ): void {
+		global $wpdb;
+		$booking = ( new BookingRepository( $wpdb ) )->findByUuid( $uuid );
+		if ( null === $booking || BookingStatus::AwaitingApproval->value !== $booking['status'] ) {
+			return;
+		}
+		do_action( 'reservant/approval/nag', BookingSnapshot::fromArray( $booking ), $percent );
+	}
+
+	/**
+	 * The owner's decision window closed without a human answering it. `on_approval_timeout`
+	 * decides what happens next, and it is read from the *first approval-requiring segment* of the
+	 * chain, not blindly from item 0: a chain is approval-gated the moment any one segment demands
+	 * it (AGENTS.md section 2.3), so that segment's service is the one whose policy governs the
+	 * container as a whole. The job payload carries only `uuid` (brief-mandated shape), so this is
+	 * re-derived here rather than threaded through as a scheduling-time argument.
+	 *
+	 * `expire`: reuse `ExpireHolds`'s own terminal transition for exactly this one booking, rather
+	 * than duplicate the reap/lock/transition sequence.
+	 *
+	 * `auto_approve`: proceed through `ApproveBooking` as `actor = 'system'`, `actorUserId = null`
+	 * (no WP user behind an automatic decision). `ApproveBooking::approvable()` requires
+	 * `hold_expires_at` to be strictly in the future of the instant it is asked about - true for a
+	 * human approving before the deadline, but this job runs *at* the deadline, where the queue
+	 * runner's actual firing time is minutes-to-never predictable versus the scheduled instant. The
+	 * `$nowUtc` handed to `ApproveBooking::execute()` is therefore synthesized as one second before
+	 * the booking's own `hold_expires_at` - "approved at the moment its window closed" - rather than
+	 * read off the wall clock, so the outcome does not depend on how promptly Action Scheduler
+	 * happened to run this callback.
+	 */
+	public static function timeout( string $uuid ): void {
+		global $wpdb;
+		$bookings = new BookingRepository( $wpdb );
+		$booking  = $bookings->findByUuid( $uuid );
+		if ( null === $booking || BookingStatus::AwaitingApproval->value !== $booking['status'] ) {
+			return; // Someone already decided between schedule and fire - a benign no-op.
+		}
+
+		/** @var list<array<string, mixed>> $items */
+		$items     = $booking['items'];
+		$onTimeout = self::onApprovalTimeout( new ServiceRepository( $wpdb ), $items );
+
+		if ( 'auto_approve' === $onTimeout ) {
+			$expiresAt = new \DateTimeImmutable( (string) $booking['hold_expires_at'], new \DateTimeZone( 'UTC' ) );
+			try {
+				ApproveBooking::make( $wpdb )->execute( $uuid, $expiresAt->modify( '-1 second' ), 'system', null );
+			} catch ( \RuntimeException $e ) {
+				if ( 'not_approvable' !== $e->getMessage() ) {
+					throw $e;
+				}
+				// Rejected, cancelled, or already approved by someone else in the meantime.
+			}
+			return;
+		}
+
+		ExpireHolds::make( $wpdb )->expireByUuid( $uuid );
+	}
+
+	public static function sweep(): void {
+		global $wpdb;
+		ExpireHolds::make( $wpdb )->run();
+	}
+
+	/**
+	 * @param list<array<string, mixed>> $items sorted ascending by `sort`
+	 *                                          (`BookingRepository::hydrate()`).
+	 */
+	private static function onApprovalTimeout( ServiceRepository $services, array $items ): string {
+		foreach ( $items as $item ) {
+			$service = $services->find( (int) $item['service_id'] );
+			if ( null !== $service && 1 === (int) $service['requires_approval'] ) {
+				return (string) $service['on_approval_timeout'];
+			}
+		}
+		// Defensive only: a booking cannot be `awaiting_approval` without at least one
+		// approval-requiring segment. Fall back to the first item's service rather than crash if
+		// that invariant is ever violated elsewhere.
+		$service = array() !== $items ? $services->find( (int) $items[0]['service_id'] ) : null;
+		return null !== $service ? (string) $service['on_approval_timeout'] : 'expire';
+	}
+}

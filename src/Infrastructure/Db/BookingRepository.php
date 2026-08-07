@@ -63,6 +63,22 @@ final class BookingRepository {
 		return null === $row ? null : $this->hydrate( $row );
 	}
 
+	/**
+	 * Same shape as `findByUuid()`, but row-locking: the authoritative read for a use case that is
+	 * about to guard a status/expiry check and then transition on it. Call inside a transaction
+	 * only - the lock is released at COMMIT/ROLLBACK.
+	 *
+	 * @return array<string, mixed>|null booking row + 'items' list, ints cast
+	 */
+	public function findByUuidForUpdate( string $uuid ): ?array {
+		$p   = $this->db->prefix;
+		$row = $this->db->get_row(
+			$this->db->prepare( "SELECT * FROM {$p}reservant_bookings WHERE uuid = %s FOR UPDATE", $uuid ), // phpcs:ignore WordPress.DB.PreparedSQL
+			ARRAY_A
+		);
+		return null === $row ? null : $this->hydrate( $row );
+	}
+
 	/** @return array<string, mixed>|null booking row + 'items' list, ints cast */
 	public function findById( int $id ): ?array {
 		$p   = $this->db->prefix;
@@ -71,6 +87,165 @@ final class BookingRepository {
 			ARRAY_A
 		);
 		return null === $row ? null : $this->hydrate( $row );
+	}
+
+	/**
+	 * Admin detail (AGENTS.md Task 10): the same shape as `findByUuid()`, but each item also
+	 * carries its `service_name`/`resource_name` - a plain LEFT JOIN, not a second per-item query.
+	 *
+	 * @return array<string, mixed>|null
+	 */
+	public function findDetailByUuid( string $uuid ): ?array {
+		$booking = $this->findByUuid( $uuid );
+		if ( null === $booking ) {
+			return null;
+		}
+		$booking['items'] = $this->itemsWithNames( (int) $booking['id'] );
+		return $booking;
+	}
+
+	/**
+	 * Admin bookings list (AGENTS.md Task 10) - blocking-agnostic: every status is shown, filtered
+	 * only by whatever the caller actually asked for. `from`/`to` (when given) test overlap against
+	 * an item's customer-facing span, never its buffer-widened block range - buffers are contention,
+	 * not something an admin searching "what's booked this week" should have to reason about.
+	 *
+	 * @param array{from?: string, to?: string, status?: string, resource_id?: int, service_id?: int, search?: string} $filters
+	 * @return array{0: int, 1: list<array<string, mixed>>}
+	 */
+	public function search( array $filters, int $limit, int $offset ): array {
+		$p = $this->db->prefix;
+
+		$needsItemJoin = isset( $filters['from'] ) || isset( $filters['to'] ) || isset( $filters['resource_id'] ) || isset( $filters['service_id'] );
+		$from          = "{$p}reservant_bookings b";
+		if ( $needsItemJoin ) {
+			$from .= " JOIN {$p}reservant_booking_items i ON i.booking_id = b.id";
+		}
+
+		$wheres = array();
+		$args   = array();
+		if ( isset( $filters['from'] ) ) {
+			$wheres[] = 'i.end_utc > %s';
+			$args[]   = $filters['from'];
+		}
+		if ( isset( $filters['to'] ) ) {
+			$wheres[] = 'i.start_utc < %s';
+			$args[]   = $filters['to'];
+		}
+		if ( isset( $filters['status'] ) ) {
+			$wheres[] = 'b.status = %s';
+			$args[]   = $filters['status'];
+		}
+		if ( isset( $filters['resource_id'] ) ) {
+			$wheres[] = 'i.resource_id = %d';
+			$args[]   = $filters['resource_id'];
+		}
+		if ( isset( $filters['service_id'] ) ) {
+			$wheres[] = 'i.service_id = %d';
+			$args[]   = $filters['service_id'];
+		}
+		if ( isset( $filters['search'] ) && '' !== $filters['search'] ) {
+			$like     = '%' . $this->db->esc_like( $filters['search'] ) . '%';
+			$wheres[] = '( b.customer_name LIKE %s OR b.customer_email LIKE %s )';
+			$args[]   = $like;
+			$args[]   = $like;
+		}
+		$where = array() === $wheres ? '1=1' : implode( ' AND ', $wheres );
+
+		$countSql = "SELECT COUNT(DISTINCT b.id) FROM {$from} WHERE {$where}"; // phpcs:ignore WordPress.DB.PreparedSQL
+		$total    = (int) ( array() === $args ? $this->db->get_var( $countSql ) : $this->db->get_var( $this->db->prepare( $countSql, ...$args ) ) ); // phpcs:ignore WordPress.DB.PreparedSQL
+
+		$listSql = "SELECT DISTINCT b.id FROM {$from} WHERE {$where} ORDER BY b.created_at DESC, b.id DESC LIMIT %d OFFSET %d"; // phpcs:ignore WordPress.DB.PreparedSQL
+		$ids     = $this->db->get_col( $this->db->prepare( $listSql, ...array_merge( $args, array( $limit, $offset ) ) ) ); // phpcs:ignore WordPress.DB.PreparedSQL
+
+		$rows = array();
+		foreach ( $ids as $id ) {
+			$row = $this->findById( (int) $id );
+			if ( null !== $row ) {
+				$row['items'] = $this->itemsWithNames( (int) $id );
+				$rows[]       = $row;
+			}
+		}
+		return array( $total, $rows );
+	}
+
+	/**
+	 * Admin calendar (AGENTS.md Task 10) - one row per item, joined with its service/resource
+	 * names, for the bookings that actually darken the calendar in this window: the blocking
+	 * predicate (section 2.1) plus the two "already happened" outcomes, `completed`/`no_show`,
+	 * which are no longer blocking (their hold columns are cleared) but still belong on the
+	 * calendar. `cancelled`/`rejected`/`expired` are excluded, and an expired-but-unreaped hold is
+	 * excluded too - correctness never depends on the sweeper having run (section 2.1).
+	 *
+	 * @return list<array<string, mixed>> one row per booking item, `resource_id` null = event item
+	 */
+	public function calendarRows( string $fromUtc, string $toUtc, ?int $resourceId ): array {
+		$p      = $this->db->prefix;
+		$wheres = array(
+			'i.start_utc < %s',
+			'i.end_utc > %s',
+			'( ' . self::BLOCKING_SQL . " OR b.status IN ('completed','no_show') )",
+		);
+		$args   = array( $toUtc, $fromUtc );
+		if ( null !== $resourceId ) {
+			$wheres[] = 'i.resource_id = %d';
+			$args[]   = $resourceId;
+		}
+		$where = implode( ' AND ', $wheres );
+
+		$rows = $this->db->get_results(
+			$this->db->prepare(
+				"SELECT b.uuid, b.status, b.customer_name, b.customer_email, b.customer_phone,
+				        i.service_id, s.name AS service_name, i.resource_id, r.name AS resource_name,
+				        i.start_utc, i.end_utc, i.block_start_utc, i.block_end_utc, i.processing_ends_utc
+				 FROM {$p}reservant_bookings b
+				 JOIN {$p}reservant_booking_items i ON i.booking_id = b.id
+				 LEFT JOIN {$p}reservant_services s ON s.id = i.service_id
+				 LEFT JOIN {$p}reservant_resources r ON r.id = i.resource_id
+				 WHERE {$where}
+				 ORDER BY b.id ASC, i.sort ASC", // phpcs:ignore WordPress.DB.PreparedSQL
+				...$args
+			),
+			ARRAY_A
+		);
+		foreach ( $rows as &$row ) {
+			$row['service_id']  = (int) $row['service_id'];
+			$row['resource_id'] = null === $row['resource_id'] ? null : (int) $row['resource_id'];
+		}
+		unset( $row );
+		return $rows;
+	}
+
+	/**
+	 * `booking_items` joined to their service/resource names - one query, not one per item.
+	 *
+	 * @return list<array<string, mixed>>
+	 */
+	private function itemsWithNames( int $bookingId ): array {
+		$p    = $this->db->prefix;
+		$rows = $this->db->get_results(
+			$this->db->prepare(
+				"SELECT i.*, s.name AS service_name, r.name AS resource_name
+				 FROM {$p}reservant_booking_items i
+				 LEFT JOIN {$p}reservant_services s ON s.id = i.service_id
+				 LEFT JOIN {$p}reservant_resources r ON r.id = i.resource_id
+				 WHERE i.booking_id = %d
+				 ORDER BY i.sort ASC", // phpcs:ignore WordPress.DB.PreparedSQL
+				$bookingId
+			),
+			ARRAY_A
+		);
+		return array_map(
+			static function ( array $item ): array {
+				foreach ( self::ITEM_INT_COLUMNS as $column ) {
+					if ( null !== $item[ $column ] ) {
+						$item[ $column ] = (int) $item[ $column ];
+					}
+				}
+				return $item;
+			},
+			$rows
+		);
 	}
 
 	/**

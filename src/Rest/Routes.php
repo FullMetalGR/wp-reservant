@@ -152,6 +152,8 @@ final class Routes {
 				'args'                => self::tokenArgs(),
 			)
 		);
+
+		( new Admin\AdminRoutes( $this->db ) )->register();
 	}
 
 	/**

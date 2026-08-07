@@ -2,10 +2,32 @@
   "name": "reservant",
   "private": true,
   "devDependencies": {
+    "@playwright/test": "^1.46",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@types/jest": "^29.5.14",
+    "@types/react": "^18.3.31",
+    "@types/react-big-calendar": "^1.16.3",
     "@wordpress/env": "^10.0",
-    "fallow": "^3.14.0"
+    "@wordpress/scripts": "^30.27.0",
+    "fallow": "^3.14.0",
+    "typescript": "^5.9.3"
   },
   "scripts": {
-    "wp-env": "wp-env"
+    "wp-env": "wp-env",
+    "build": "wp-scripts build admin=assets/src/admin/index.tsx --output-path=build",
+    "start": "wp-scripts start admin=assets/src/admin/index.tsx --output-path=build",
+    "test:js": "wp-scripts test-unit-js",
+    "test:e2e": "playwright test",
+    "tsc": "tsc --noEmit",
+    "fallow": "fallow --ci --output-file .fallow-report.sarif && node bin/fallow-gate.mjs .fallow-report.sarif"
+  },
+  "dependencies": {
+    "@tanstack/react-query": "^5.101.4",
+    "@wordpress/components": "^28.13.0",
+    "@wordpress/element": "^6.46.0",
+    "@wordpress/i18n": "^5.26.0",
+    "date-fns": "^3.6.0",
+    "react-big-calendar": "^1.20.0"
   }
 }

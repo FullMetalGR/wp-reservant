@@ -15,6 +15,7 @@ use Reservant\Infrastructure\Db\AvailabilityRepository;
 use Reservant\Infrastructure\Db\OccurrenceRepository;
 use Reservant\Infrastructure\Db\ResourceRepository;
 use Reservant\Infrastructure\Db\ServiceRepository;
+use Reservant\Settings;
 use Reservant\Tests\Integration\ReservantTestCase;
 
 final class HoldBookingTest extends ReservantTestCase {
@@ -179,5 +180,47 @@ final class HoldBookingTest extends ReservantTestCase {
 		);
 		self::assertSame( 'awaiting_approval', $booking['status'] );
 		self::assertSame( 'approval', $booking['hold_class'] );
+	}
+
+	/**
+	 * A service that stores no approval window of its own falls back to the site-wide
+	 * `approval_ttl_hours` setting, not to a constant.
+	 *
+	 * `Settings::approvalTtlHours()` shipped with no caller at all: the settings screen offered the
+	 * field, the controller validated it, the option stored it, and `holdExpiresAt()` then used a
+	 * hardcoded 48 regardless. They are the same quantity (AGENTS.md section 2.3), so the setting is
+	 * now the fallback - and this is the test that says so. The value chosen here is 3, which is
+	 * neither the setting's default nor the schema column's, so nothing can pass by coincidence.
+	 *
+	 * The clock is the wall clock, not this suite's week-ahead fixture instant, because the TTL is
+	 * anchored to `max(injected now, wall clock)`; anything else would make the expected expiry a
+	 * week out and the assertion meaningless.
+	 */
+	public function test_a_service_with_no_approval_window_of_its_own_uses_the_site_setting(): void {
+		global $wpdb;
+		Settings::make()->update( array( 'approval_ttl_hours' => 3 ) );
+
+		$services = new ServiceRepository( $wpdb );
+		$consult  = $services->insert(
+			array(
+				'name'                => 'Consult',
+				'type'                => 'appointment',
+				'duration_min'        => 30,
+				'requires_approval'   => 1,
+				'approval_hold_hours' => 0,
+				'payment_mode'        => 'free',
+			)
+		);
+		( new ResourceRepository( $wpdb ) )->linkService( $consult, $this->staffA );
+
+		$now     = new \DateTimeImmutable( 'now', new \DateTimeZone( 'UTC' ) );
+		$booking = HoldBooking::make( $wpdb )->execute(
+			new HoldRequest( $this->customer(), new AppointmentRequest( $this->utc( 3, '11:00' ), array( new SegmentChoice( $consult ) ) ) ),
+			$now
+		);
+
+		self::assertSame( 'awaiting_approval', $booking['status'] );
+		$expires = ( new \DateTimeImmutable( (string) $booking['hold_expires_at'], new \DateTimeZone( 'UTC' ) ) )->getTimestamp();
+		self::assertEqualsWithDelta( $now->getTimestamp() + ( 3 * HOUR_IN_SECONDS ), $expires, 5 );
 	}
 }
