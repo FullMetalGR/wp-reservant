@@ -34,6 +34,16 @@ declare( strict_types=1 );
  * for the ordinary reason, and the run would prove nothing. That outcome fails the scenario as
  * `inconclusive` instead of passing quietly.
  *
+ * The hold's own outcome is asserted too, not just reported (the anti-pattern
+ * bin/concurrency-chains.php's header names, and the same discipline bin/concurrency-holds.php
+ * applies to its losers' reason slugs): once raced, this scenario is deterministic - 8 already-
+ * blocking seats plus a 20-seat hold exceed the admin's capacity-10 write, so with the occurrence
+ * mutex in place the hold MUST come back 409 `capacity`, never merely "not 201". A bare
+ * `blocking <= capacity` check on the final row is not enough on its own: if the hold curl call
+ * failed for a reason that has nothing to do with the race (connection refused, the 60s timeout, a
+ * 500), `blocking` would simply stay at the seeded 8, `8 <= 10` would still hold, and the scenario
+ * would report PASS having proven nothing about locking at all.
+ *
  * Usage: php bin/concurrency-occurrence.php <base_url> <event_service_id> [cli_container]
  */
 
@@ -141,6 +151,32 @@ function build_paused_put_eval( int $occurrenceId, float $resumeAt ): string {
 		$occurrenceId,
 		$resumeAt
 	);
+}
+
+/**
+ * The machine-readable reason slug out of a `/holds` REST error body - the same extraction
+ * bin/concurrency-holds.php uses and for the same reason (see that file's `extract_reason()`):
+ * `Errors::conflict()` puts the `SlotConflict` reason on the `\WP_Error` message, which
+ * `WP_REST_Server::error_to_response()` surfaces as the response body's top-level `message` key.
+ *
+ * @param mixed $decoded json_decode() of the response body, or null/scalar if it did not decode.
+ */
+function extract_reason( mixed $decoded ): ?string {
+	if ( ! is_array( $decoded ) ) {
+		return null;
+	}
+	$data = is_array( $decoded['data'] ?? null ) ? $decoded['data'] : array();
+	if ( is_string( $data['reason'] ?? null ) ) {
+		return $data['reason'];
+	}
+	if ( is_string( $decoded['message'] ?? null ) ) {
+		return $decoded['message'];
+	}
+	$code = $decoded['code'] ?? null;
+	if ( is_string( $code ) && str_starts_with( $code, 'reservant_' ) ) {
+		return substr( $code, strlen( 'reservant_' ) );
+	}
+	return null;
 }
 
 /** Final state of the contested occurrence, read fresh after both sides have finished. */
@@ -259,20 +295,25 @@ $blocking = is_array( $final ) ? (int) ( $final['blocking'] ?? 0 ) : 0;
 
 // The child must have been sitting in the window when the hold fired, or the race never happened
 // and a "pass" would mean nothing.
-$raced = ( (float) ( $put['paused_at'] ?? 0.0 ) ) > 0.0 && ( (float) $put['paused_at'] ) <= (float) $target;
-$pass  = $raced && $capacity > 0 && $blocking <= $capacity;
+$raced      = ( (float) ( $put['paused_at'] ?? 0.0 ) ) > 0.0 && ( (float) $put['paused_at'] ) <= (float) $target;
+$holdReason = extract_reason( json_decode( $holdBody, true ) );
+// Deterministic once raced: 8 seeded + 20 requested exceeds the admin's capacity-10 write, so the
+// hold must be refused `capacity` specifically - a 409 with any other reason (or no 409 at all)
+// means the scenario did not prove what it claims to.
+$pass = $raced && $capacity > 0 && $blocking <= $capacity && 409 === $holdCode && 'capacity' === $holdReason;
 
 echo json_encode(
 	array(
-		'test'       => 'occurrence_edit',
-		'occurrence' => $occurrenceId,
-		'put'        => $put,
-		'hold_code'  => $holdCode,
-		'hold_body'  => $holdBody,
-		'capacity'   => $capacity,
-		'blocking'   => $blocking,
-		'raced'      => $raced,
-		'pass'       => $pass,
+		'test'        => 'occurrence_edit',
+		'occurrence'  => $occurrenceId,
+		'put'         => $put,
+		'hold_code'   => $holdCode,
+		'hold_body'   => $holdBody,
+		'hold_reason' => $holdReason,
+		'capacity'    => $capacity,
+		'blocking'    => $blocking,
+		'raced'       => $raced,
+		'pass'        => $pass,
 	)
 ), PHP_EOL;
 exit( $pass ? 0 : 1 );

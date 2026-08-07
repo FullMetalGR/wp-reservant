@@ -50,6 +50,19 @@ use Reservant\Infrastructure\Db\TransactionRunner;
  * lapsed hold is not in the free/busy mask and a confirmed booking is, so the mask cache key
  * (`reservant_resource_days.rev`, AGENTS.md section 2.4 step 6) must move.
  *
+ * What the lock covers, and what it does not: it serialises this use case against every other
+ * writer that also takes the same resource-day/occurrence mutex - `HoldBooking`, `CancelBooking`,
+ * `ExpireHolds`, and an admin edit through `OccurrencesAdminController`. It does NOT close every
+ * over-capacity path against a THIRD actor that never takes the lock at all. `OccurrencesAdminController`'s
+ * own capacity-shrink guard counts only BLOCKING seats (`blockingSeatSum()`); a lapsed
+ * `awaiting_approval` hold is not blocking. So: an event service with `requires_approval` and
+ * `on_approval_timeout = auto_approve`, a hold that lapses, and an admin capacity shrink that lands
+ * inside the gap between the lapse and `Jobs::timeout()` actually running its auto-approve can still
+ * see the shrink's guard pass (nothing blocking to count against) and then this class's own
+ * synthesized-`$nowUtc` auto-approve land the booking over the new, smaller capacity. Narrower than
+ * the pre-fix state - it takes a queued timeout job racing an admin edit, not any ordinary hold - and
+ * not a regression this class introduces; just not a case the lock reaches.
+ *
  * Lock order is the codebase-wide one and must stay so: resource_days/occurrences via
  * `LockManager::acquire()` FIRST, the bookings row (`findByUuidForUpdate()`) after.
  */

@@ -191,14 +191,15 @@ describe( 'SeatMapsScreen - keyboard-operable row selection', () => {
 		expect( mainHall ).toHaveFocus();
 	} );
 
-	it( 'selects the map from the keyboard alone', async () => {
+	it( 'selects the map via its focusable button, marking it aria-current', async () => {
 		renderWithClient( <SeatMapsScreen /> );
 
 		const balcony = await screen.findByRole( 'button', { name: 'Balcony' } );
 		balcony.focus();
-		// A native <button> activates on Enter/Space by dispatching a click - which is exactly what
-		// a bare `<tr onClick>` never did.
-		fireEvent.keyDown( balcony, { key: 'Enter', code: 'Enter' } );
+		// Enter/Space activation on a real <button> is the browser's own behaviour - it dispatches a
+		// click, which jsdom does not synthesize from a bare keyDown. Asserting that would test the
+		// browser, not this codebase, so `click` stands in for "the focused control gets activated",
+		// same as the previous test already proves the row IS that focusable, accessibly-named control.
 		fireEvent.click( balcony );
 
 		await waitFor( () => expect( screen.getByLabelText( 'Spec' ) ).toHaveValue( 'rows A-A, 2 per row' ) );
