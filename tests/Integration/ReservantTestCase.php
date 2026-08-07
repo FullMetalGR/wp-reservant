@@ -25,6 +25,23 @@ abstract class ReservantTestCase extends \WP_UnitTestCase {
 		// not state a test could see stale. This used to be an opt-in per test class (`SettingsTest`,
 		// `AdminSettingsTest`); hoisted here so the leak cannot recur in a class that forgets it.
 		delete_option( 'reservant_settings' );
+		self::clearRateLimiter();
+	}
+
+	/**
+	 * `RateLimiter::allow()` counts in a transient, and a hold's own locked write commits the
+	 * enclosing connection (AGENTS.md section 2.2) - so a counter left by an earlier test class
+	 * outlives the harness's per-test ROLLBACK. Every caller of `POST /holds` buckets on the same
+	 * client IP under this harness (`wordpress-phpunit/includes/functions.php` hard-codes
+	 * `$_SERVER['REMOTE_ADDR']` to `127.0.0.1` for the whole run, and nothing resets it per test), so
+	 * without this every integration test class shares one rate-limiter bucket by construction. This
+	 * used to be an opt-in per test class (`RestApiTest`, `RescheduleRouteTest`); hoisted here for the
+	 * same reason `reservant_settings` was, above.
+	 */
+	private static function clearRateLimiter(): void {
+		global $wpdb;
+		$wpdb->query( "DELETE FROM {$wpdb->options} WHERE option_name LIKE '\\_transient%reservant\\_rl\\_%'" ); // phpcs:ignore WordPress.DB.PreparedSQL
+		wp_cache_flush();
 	}
 
 	/**

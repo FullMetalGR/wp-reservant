@@ -29,15 +29,8 @@ final class RescheduleRouteTest extends ReservantTestCase {
 	private int $staffB;
 
 	public function set_up(): void {
-		parent::set_up();
+		parent::set_up(); // Clears the shared rate-limiter bucket too (ReservantTestCase::set_up()).
 		global $wpdb;
-
-		// The rate limiter counts in transients, and a hold COMMITs the connection - so a counter
-		// left by an earlier test class outlives the harness rollback and would 429 an unrelated one.
-		// This file issues several holds per test (the fixture for every reschedule), so it needs the
-		// same reset RestApiTest's own set_up already does for the same reason.
-		$wpdb->query( "DELETE FROM {$wpdb->options} WHERE option_name LIKE '\\_transient%reservant\\_rl\\_%'" ); // phpcs:ignore
-		wp_cache_flush();
 
 		$services  = new ServiceRepository( $wpdb );
 		$resources = new ResourceRepository( $wpdb );
