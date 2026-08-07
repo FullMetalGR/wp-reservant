@@ -73,9 +73,22 @@ final class BookingRepository {
 	 * booking row itself: this frees capacity, and every capacity write in this codebase happens
 	 * under the mutex governing that slot. The container row is untouched, so a booking is never
 	 * left itemless outside the transaction that immediately re-inserts them.
+	 *
+	 * **The return value is checked, exactly as `insertItems()` checks its own.** `$wpdb->delete()`
+	 * answers `false` on a DB-level failure - a deadlock (1213, which rolls the whole transaction
+	 * back) or a lock-wait timeout (1205, which rolls back only the statement) - and swallowing that
+	 * is the one way the reschedule's all-or-nothing contract can be broken and still COMMIT: the
+	 * caller would carry on, find the target free because the survivors do not overlap it, insert the
+	 * new rows on top of the old ones, and leave the booking holding both placements at once.
+	 * Deleting nothing is not a failure (`0` rows is an honest answer for an itemless booking); only
+	 * `false` is.
 	 */
 	public function deleteItems( int $bookingId ): void {
-		$this->db->delete( $this->db->prefix . 'reservant_booking_items', array( 'booking_id' => $bookingId ) );
+		$ok = $this->db->delete( $this->db->prefix . 'reservant_booking_items', array( 'booking_id' => $bookingId ) );
+		if ( false === $ok ) {
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped
+			throw new \RuntimeException( 'booking_item_delete_failed: ' . $this->db->last_error );
+		}
 	}
 
 	/** @return array<string, mixed>|null booking row + 'items' list, ints cast */

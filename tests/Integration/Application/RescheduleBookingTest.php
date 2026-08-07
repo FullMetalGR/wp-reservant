@@ -20,15 +20,21 @@ use Reservant\Infrastructure\Db\BookingRepository;
 use Reservant\Infrastructure\Db\OccurrenceRepository;
 use Reservant\Infrastructure\Db\ResourceRepository;
 use Reservant\Infrastructure\Db\ServiceRepository;
-use Reservant\Tests\Integration\ReservantTestCase;
 
 /**
  * The reschedule contract (AGENTS.md section 5): all segments move as one atomic release + re-hold,
- * and partial success is impossible. The second test is the one that matters - a refused move must
- * leave the customer with the booking they already had, so it asserts the ORIGINAL row's status and
- * start time rather than merely that an exception was thrown.
+ * and partial success is impossible. `test_leaves_the_booking_untouched_when_the_target_is_taken` is
+ * the one that matters - a refused move must leave the customer with the booking they already had,
+ * so it asserts the ORIGINAL row's status and start time rather than merely that an exception was
+ * thrown.
+ *
+ * Extends `LockedDecisionTestCase` for the same reason `ApprovalLockingTest` and
+ * `RejectionLockingTest` do: the section-2.2 lock order and the mask-revision bump are properties of
+ * the statement stream and the committed columns, not of the return value, so nothing else in this
+ * file would notice if either were broken. The harness captures wpdb's real `query` filter, so those
+ * tests read the statements the code actually issues.
  */
-final class RescheduleBookingTest extends ReservantTestCase {
+final class RescheduleBookingTest extends LockedDecisionTestCase {
 
 	private int $cutId;
 	private int $colourId;
@@ -60,6 +66,23 @@ final class RescheduleBookingTest extends ReservantTestCase {
 
 	private function customer(): Customer {
 		return new Customer( 'Maria', 'maria@example.com' );
+	}
+
+	/**
+	 * The mask-cache revision of one (resource, UTC day).
+	 *
+	 * `LockedDecisionTestCase::rev()` is pinned to its own fixture staff member and day; a reschedule
+	 * is about two days at once, so it needs to ask about either.
+	 */
+	private function revOn( int $resourceId, \DateTimeImmutable $day ): int {
+		global $wpdb;
+		return (int) $wpdb->get_var(
+			$wpdb->prepare(
+				"SELECT rev FROM {$wpdb->prefix}reservant_resource_days WHERE resource_id = %d AND day_utc = %s", // phpcs:ignore WordPress.DB.PreparedSQL
+				$resourceId,
+				$day->format( 'Y-m-d' )
+			)
+		);
 	}
 
 	/**
@@ -185,12 +208,16 @@ final class RescheduleBookingTest extends ReservantTestCase {
 		$booking = $this->confirmedChain( $this->utc( 3, '09:00' ), array( new SegmentChoice( $trim, $this->staffA ) ) );
 		$now     = $this->utc( 2, '23:00' ); // 10 hours before the start - inside the 24 hour window.
 
+		// Caught into a variable rather than asserted inside the `catch`: PHPUnit's own
+		// `AssertionFailedError` is a `\RuntimeException`, so a `self::fail()` in the `try` of a broad
+		// catch would be swallowed by it and the test would pass having proved nothing.
+		$refusal = null;
 		try {
 			RescheduleBooking::make( $wpdb )->execute( (string) $booking['uuid'], $this->utc( 3, '14:00' ), null, $now );
-			self::fail( 'Expected a window_closed refusal.' );
 		} catch ( \RuntimeException $exception ) {
-			self::assertSame( 'window_closed', $exception->getMessage() );
+			$refusal = $exception->getMessage();
 		}
+		self::assertSame( 'window_closed', $refusal );
 		self::assertSame(
 			$this->sql( 3, '09:00' ),
 			( new BookingRepository( $wpdb ) )->findByUuid( (string) $booking['uuid'] )['items'][0]['start_utc']
@@ -377,6 +404,122 @@ final class RescheduleBookingTest extends ReservantTestCase {
 		self::assertSame( $this->sql( 8, '18:00' ), $moved['items'][0]['start_utc'] );
 		self::assertSame( $this->sql( 8, '20:00' ), $moved['items'][0]['end_utc'] );
 		self::assertSame( 2, $moved['items'][0]['seats'] );
+	}
+
+	/**
+	 * Lock order, AGENTS.md section 2.2: the slot mutexes are taken INSIDE the transaction and BEFORE
+	 * the bookings row. `HoldBooking` locks in exactly that order, so a reschedule that took the
+	 * booking row first would deadlock against an ordinary hold.
+	 *
+	 * This fails if anyone swaps `$this->locks->acquire()` with `findByUuidForUpdate()` - which is
+	 * also the swap that would silently move the consistent-read snapshot back before the mutexes,
+	 * since a locking read does not open one and a plain read does.
+	 */
+	public function test_locks_the_resource_day_before_the_booking_row(): void {
+		global $wpdb;
+		$booking = $this->confirmedChain( $this->utc( 1, '09:00' ), array( new SegmentChoice( $this->cutId, $this->staffA ) ) );
+
+		$this->capture( fn () => RescheduleBooking::make( $wpdb )->execute( (string) $booking['uuid'], $this->utc( 1, '13:00' ), null, $this->utc( 0 ) ) );
+
+		$this->assertOrdered( self::TRANSACTION_START, self::RESOURCE_DAY_LOCK, 'The slot mutex must be taken inside the reschedule transaction.' );
+		$this->assertOrdered( self::RESOURCE_DAY_LOCK, self::BOOKING_LOCK, 'Reschedule must lock the resource-day before the bookings row (deadlock order).' );
+	}
+
+	/** The same ordering on the event path, where the occurrence row is the mutex. */
+	public function test_locks_the_occurrence_before_the_booking_row(): void {
+		global $wpdb;
+		$occurrences = new OccurrenceRepository( $wpdb );
+		$eventId     = ( new ServiceRepository( $wpdb ) )->insert(
+			array( 'name' => 'Workshop', 'type' => 'event', 'price_minor' => 1000, 'payment_mode' => 'onsite' )
+		);
+		$occA    = $occurrences->insert( array( 'service_id' => $eventId, 'start_utc' => $this->sql( 6, '18:00' ), 'end_utc' => $this->sql( 6, '20:00' ), 'capacity' => 5 ) );
+		$occB    = $occurrences->insert( array( 'service_id' => $eventId, 'start_utc' => $this->sql( 7, '18:00' ), 'end_utc' => $this->sql( 7, '20:00' ), 'capacity' => 5 ) );
+		$held    = HoldBooking::make( $wpdb )->execute( new HoldRequest( $this->customer(), null, new EventRequest( $occA, 1 ) ), $this->utc( 0 ) );
+		$booking = ConfirmBooking::make( $wpdb )->execute( (string) $held['uuid'], $this->utc( 0, '00:05' ) );
+
+		$this->capture( fn () => RescheduleBooking::make( $wpdb )->execute( (string) $booking['uuid'], $this->utc( 7, '18:00' ), $occB, $this->utc( 0 ) ) );
+
+		$this->assertOrdered( self::TRANSACTION_START, self::OCCURRENCE_LOCK, 'The occurrence mutex must be taken inside the reschedule transaction.' );
+		$this->assertOrdered( self::OCCURRENCE_LOCK, self::BOOKING_LOCK, 'Reschedule must lock the occurrence before the bookings row (deadlock order).' );
+	}
+
+	/**
+	 * A move across a UTC-day boundary - the only shape that exercises the union at its full width.
+	 *
+	 * Every other successful move in this file starts and lands on one day, where the old key and the
+	 * new key collapse to one under `LockKey::sorted()`'s deduplication. Here they do not: two
+	 * resource-day rows are locked and BOTH revisions must move, because after the move day 1 has a
+	 * minute free that was not and day 2 has one taken that was not. A one-sided bump would leave one
+	 * of the two masks selling or hiding the wrong slot, which is a silent overbooking either way.
+	 *
+	 * This fails if `bumpRev()` is deleted, and it fails if the bump is narrowed to the new day only.
+	 */
+	public function test_a_cross_day_move_bumps_the_revision_on_both_days(): void {
+		global $wpdb;
+		$booking = $this->confirmedChain( $this->utc( 1, '09:00' ), array( new SegmentChoice( $this->cutId, $this->staffA ) ) );
+		$before1 = $this->revOn( $this->staffA, $this->utc( 1 ) );
+		$before2 = $this->revOn( $this->staffA, $this->utc( 2 ) );
+
+		$moved = RescheduleBooking::make( $wpdb )->execute( (string) $booking['uuid'], $this->utc( 2, '09:00' ), null, $this->utc( 0 ) );
+
+		self::assertSame( $this->sql( 2, '09:00' ), $moved['items'][0]['start_utc'] );
+		self::assertSame( $this->sql( 2, '09:30' ), $moved['items'][0]['end_utc'] );
+		self::assertSame( $this->staffA, $moved['items'][0]['resource_id'] );
+		self::assertSame( $before1 + 1, $this->revOn( $this->staffA, $this->utc( 1 ) ), 'The day being vacated must have its mask revision bumped.' );
+		self::assertSame( $before2 + 1, $this->revOn( $this->staffA, $this->utc( 2 ) ), 'The day being taken must have its mask revision bumped.' );
+
+		// The slot really is free again on day 1, and really is taken on day 2.
+		self::assertSame( 'pending', $this->hold( $this->utc( 1, '09:00' ), array( new SegmentChoice( $this->cutId, $this->staffA ) ) )['status'] );
+		try {
+			$this->hold( $this->utc( 2, '09:00' ), array( new SegmentChoice( $this->cutId, $this->staffA ) ) );
+			self::fail( 'Expected the moved-to slot to be taken.' );
+		} catch ( SlotConflict $exception ) {
+			self::assertSame( 'overlap', $exception->reason );
+		}
+	}
+
+	/**
+	 * A failed release must abort the move, not be walked past.
+	 *
+	 * `$wpdb->delete()` answers `false` on a DB-level failure - a deadlock (1213) or a lock-wait
+	 * timeout (1205). Swallowing that is the one way this use case's all-or-nothing contract can be
+	 * broken and still COMMIT: the old rows survive, `assertTargetIsFree()` passes because they do not
+	 * overlap the target, the new rows are inserted on top of them, and the booking ends up holding
+	 * BOTH placements - capacity consumed twice, with an audit trail that looks perfectly normal.
+	 *
+	 * The sabotage is a `query` filter that rewrites the item DELETE to hit a table that does not
+	 * exist, which is the same class of failure a deadlock produces: `false` back from wpdb with
+	 * `last_error` set. So this asserts more than PHP control flow - it asserts the committed row set.
+	 */
+	public function test_a_failed_release_aborts_the_move_instead_of_doubling_the_booking(): void {
+		global $wpdb;
+		$booking  = $this->confirmedChain( $this->utc( 1, '09:00' ), array( new SegmentChoice( $this->cutId, $this->staffA ) ) );
+		$sabotage = static function ( $query ) {
+			return 1 === preg_match( '/^\s*DELETE\s+FROM\s+\S*reservant_booking_items/i', (string) $query )
+				? 'DELETE FROM reservant_no_such_table WHERE 1 = 1'
+				: $query;
+		};
+
+		// See the note in `test_refuses_outside_the_policy_window_unless_forced`: a `self::fail()` here
+		// would be caught by the broad `\RuntimeException` arm, so the refusal is asserted afterwards.
+		$refusal    = null;
+		$suppressed = $wpdb->suppress_errors( true );
+		add_filter( 'query', $sabotage );
+		try {
+			RescheduleBooking::make( $wpdb )->execute( (string) $booking['uuid'], $this->utc( 1, '15:00' ), null, $this->utc( 0 ) );
+		} catch ( \RuntimeException $exception ) {
+			$refusal = $exception->getMessage();
+		} finally {
+			remove_filter( 'query', $sabotage );
+			$wpdb->suppress_errors( $suppressed );
+		}
+		self::assertStringStartsWith( 'booking_item_delete_failed', (string) $refusal, 'A failed release must abort the move.' );
+
+		$after = ( new BookingRepository( $wpdb ) )->findByUuid( (string) $booking['uuid'] );
+		self::assertNotNull( $after );
+		self::assertSame( 'confirmed', $after['status'] );
+		self::assertCount( 1, $after['items'], 'A booking must never hold both its old and its new placement.' );
+		self::assertSame( $this->sql( 1, '09:00' ), $after['items'][0]['start_utc'] );
 	}
 
 	public function test_writes_one_audit_entry_describing_the_move(): void {
