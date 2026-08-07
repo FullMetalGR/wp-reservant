@@ -92,17 +92,40 @@ export function useCalendar( range: CalendarRange, resourceId?: number ): UseQue
 	} );
 }
 
+/**
+ * `GET /admin/services` and `GET /admin/resources` BOTH ask for the full catalog, inactive rows
+ * included (`include_inactive=1`).
+ *
+ * They used to send nothing, and `AdminRoutes`' own `include_inactive` arg defaults to `false`, so
+ * `ServiceRepository`/`ResourceRepository` appended `WHERE status <> 'inactive'` and the SPA could
+ * never see an inactive row at all. That made deactivation a one-way door: both catalog screens
+ * offer an "Inactive" status option (and `ServicesScreen` actively steers the admin into it - a 409
+ * `referenced` delete answers with "Deactivate it instead"), but the row it produced then vanished
+ * from the only table it could ever have been selected and reactivated from. It also silently broke
+ * `BookingsScreen`'s staff/service filters, which are built off these same lists: a booking taken by
+ * a since-departed staff member could not be filtered for.
+ *
+ * One query key, one request, complete data - rather than a boolean-parameterised key per screen:
+ * these catalogs are small (tens of rows), every consumer already renders a filtered VIEW of them,
+ * and a single cached copy means a status change made on one screen is reflected everywhere on the
+ * next invalidation instead of only in whichever variant happened to be cached. Consumers that must
+ * not offer an inactive row - `CalendarScreen`'s staff picker and `ManualBookingDrawer`'s
+ * service/staff selects, which feed NEW bookings - filter on `status` themselves, and those filters
+ * are load-bearing precisely because of this.
+ */
+const FULL_CATALOG = { include_inactive: 1 };
+
 export function useServices(): UseQueryResult< Service[], Error > {
 	return useQuery( {
 		queryKey: [ 'services' ],
-		queryFn: async () => ( await apiFetch< ServicesResponse >( '/admin/services' ) ).services,
+		queryFn: async () => ( await apiFetch< ServicesResponse >( `/admin/services${ toQueryString( FULL_CATALOG ) }` ) ).services,
 	} );
 }
 
 export function useResources(): UseQueryResult< Resource[], Error > {
 	return useQuery( {
 		queryKey: [ 'resources' ],
-		queryFn: async () => ( await apiFetch< ResourcesResponse >( '/admin/resources' ) ).resources,
+		queryFn: async () => ( await apiFetch< ResourcesResponse >( `/admin/resources${ toQueryString( FULL_CATALOG ) }` ) ).resources,
 	} );
 }
 
@@ -263,12 +286,15 @@ function exceptionPath( resourceId: number | null ): string {
 	return null === resourceId ? '/admin/exceptions' : `/admin/resources/${ resourceId }/exceptions`;
 }
 
-/** Both mutations below invalidate the `useExceptions()` cache entry the change actually affects, plus `['resources']` for a resource-scoped change - the wire's own resource row still carries an `exceptions` association (`ResourcesAdminController::attachAssociations()`), even though the `Resource` TS type no longer declares it since nothing reads it off a cached resource any more. */
+/**
+ * Both mutations below invalidate the `useExceptions()` cache entry the change actually affects.
+ * `['resources']` is NOT invalidated: a resource row no longer carries an `exceptions` association
+ * at all (`ResourcesAdminController::attachAssociations()` attaches only `service_ids`/`rules`, and
+ * the `Resource` TS type declares only those), so adding or removing a blackout date cannot make a
+ * cached resource stale - refetching the whole catalog on every blackout edit would be pure waste.
+ */
 function invalidateExceptionCaches( queryClient: ReturnType< typeof useQueryClient >, resourceId: number | null ): void {
 	void queryClient.invalidateQueries( { queryKey: [ 'exceptions', resourceId ?? 'business' ] } );
-	if ( null !== resourceId ) {
-		void queryClient.invalidateQueries( { queryKey: [ 'resources' ] } );
-	}
 }
 
 export function useAddException(): UseMutationResult< AvailabilityException, Error, ExceptionInput > {

@@ -304,6 +304,60 @@ final class AdminCatalogTest extends ReservantTestCase {
 	}
 
 	/**
+	 * Final-review finding: deactivating a staff member was a one-way door in the SPA, because
+	 * `useResources()` never sent `include_inactive` and the parameter defaults to `false` - the row
+	 * left the only table it could ever have been selected and reactivated from. The SPA now always
+	 * asks for the full catalog, so this pins the server contract that makes that possible: an
+	 * inactive resource is absent by default and present with `include_inactive=1`, and it still
+	 * carries the same associations every other row does (the staff screen has to be able to edit
+	 * it, not merely see the name).
+	 */
+	public function test_inactive_resources_are_listed_only_when_include_inactive_is_asked_for(): void {
+		$this->asAdmin();
+		$service = $this->createService();
+
+		$created = $this->jsonRequest(
+			'POST',
+			'/reservant/v1/admin/resources',
+			array(
+				'name'        => 'Departed',
+				'service_ids' => array( $service['id'] ),
+				'rules'       => array( array( 'weekday' => 1, 'start_time' => '09:00', 'end_time' => '17:00' ) ),
+			)
+		);
+		self::assertSame( 201, $created->get_status(), (string) wp_json_encode( $created->get_data() ) );
+		$id = (int) $created->get_data()['id'];
+
+		$deactivated = $this->jsonRequest( 'PUT', "/reservant/v1/admin/resources/{$id}", array( 'status' => 'inactive' ) );
+		self::assertSame( 200, $deactivated->get_status(), (string) wp_json_encode( $deactivated->get_data() ) );
+		self::assertSame( 'inactive', $deactivated->get_data()['status'] );
+
+		$defaultList = $this->request( 'GET', '/reservant/v1/admin/resources' );
+		self::assertSame( 200, $defaultList->get_status() );
+		self::assertNotContains( $id, array_column( $defaultList->get_data()['resources'], 'id' ) );
+
+		$fullList = $this->request( 'GET', '/reservant/v1/admin/resources', array( 'include_inactive' => '1' ) );
+		self::assertSame( 200, $fullList->get_status() );
+		/** @var list<array<string, mixed>> $rows */
+		$rows    = $fullList->get_data()['resources'];
+		$departed = null;
+		foreach ( $rows as $row ) {
+			if ( $id === (int) $row['id'] ) {
+				$departed = $row;
+			}
+		}
+		self::assertNotNull( $departed, 'include_inactive=1 must list the deactivated resource' );
+		self::assertSame( array( (int) $service['id'] ), $departed['service_ids'] );
+		self::assertCount( 1, $departed['rules'] );
+
+		// And it can be put back - the whole point of being able to see it.
+		$reactivated = $this->jsonRequest( 'PUT', "/reservant/v1/admin/resources/{$id}", array( 'status' => 'active' ) );
+		self::assertSame( 200, $reactivated->get_status() );
+		self::assertSame( 'active', $reactivated->get_data()['status'] );
+		self::assertContains( $id, array_column( $this->request( 'GET', '/reservant/v1/admin/resources' )->get_data()['resources'], 'id' ) );
+	}
+
+	/**
 	 * Final-review finding (critical), and the identical `index()`-vs-`present()` drift the test
 	 * below this one covers for resources: `GET /admin/seat-maps` returned `SeatMapRepository::all()`
 	 * verbatim - `id`/`name`/`spec`, no `seats` - while `GET /admin/seat-maps/{id}` went through
@@ -369,14 +423,20 @@ final class AdminCatalogTest extends ReservantTestCase {
 	/**
 	 * Task 17 finding: `GET /admin/resources` (the list every catalog screen loads through -
 	 * `useResources()`) used to return bare `reservant_resources` columns, never the
-	 * `service_ids`/`rules`/`exceptions` associations `GET /admin/resources/{id}` attaches via
-	 * `present()`. The `Resource` TypeScript type declares all three non-optional and several
+	 * `service_ids`/`rules` associations `GET /admin/resources/{id}` attaches via `present()`. The
+	 * `Resource` TypeScript type declares both non-optional and several
 	 * screens dereference them unconditionally the moment a resource loads - `ManualBookingDrawer`'s
 	 * `staffOptionsForService()` (`resource.service_ids.includes(...)`) crashed the whole admin SPA
 	 * the instant the "New booking" drawer opened with any real resource in the list. The admin
 	 * smoke e2e spec (`tests/e2e/admin-smoke.spec.ts`) is what surfaced this - every existing
 	 * integration test that reaches this route only asserted its HTTP status
 	 * (`test_permission_matrix_for_catalog_routes`), never the shape of a resource row inside it.
+	 *
+	 * The `exceptions` assertion is now the opposite of what it was: that association is gone from
+	 * the resource shape entirely (final-review finding - no client has read it since `StaffScreen`
+	 * moved to `GET /admin/exceptions`, yet since `index()` began attaching associations to every
+	 * row it cost a third query per resource and shipped every blackout date of every staff member
+	 * on every catalog load).
 	 */
 	public function test_resource_list_carries_service_ids_and_rules_like_the_single_resource_shape(): void {
 		$this->asAdmin();
@@ -407,7 +467,13 @@ final class AdminCatalogTest extends ReservantTestCase {
 		self::assertNotNull( $alex, 'the created resource must appear in the list' );
 		self::assertSame( array( (int) $service['id'] ), $alex['service_ids'] );
 		self::assertCount( 1, $alex['rules'] );
-		self::assertSame( array(), $alex['exceptions'] );
+		self::assertArrayNotHasKey( 'exceptions', $alex, 'no client reads it; attaching it costs a query per row' );
+
+		// The single-resource route answers the same shape - including not carrying `exceptions`.
+		$single = $this->request( 'GET', "/reservant/v1/admin/resources/{$alex['id']}" );
+		self::assertSame( 200, $single->get_status() );
+		self::assertArrayNotHasKey( 'exceptions', $single->get_data() );
+		self::assertSame( $single->get_data(), $alex );
 	}
 
 	public function test_resource_save_replaces_rules_atomically(): void {

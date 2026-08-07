@@ -1,15 +1,12 @@
 import { useState } from '@wordpress/element';
-import { __ } from '@wordpress/i18n';
+import { __, sprintf } from '@wordpress/i18n';
 import { Button, CheckboxControl, Modal, Notice, SelectControl, Spinner, TextControl } from '@wordpress/components';
 import { bootConfig } from '../boot';
-import { isReferencedConflict } from '../api/client';
+import { errorMessage, isReferencedConflict } from '../api/client';
 import { useDeleteService, useSaveService, useSeatMaps, useServices } from '../api/queries';
 import type { ApprovalTimeout, PaymentMode, Service, ServiceType } from '../api/types';
+import { RowSelectButton } from '../components/RowSelectButton';
 import { useToasts } from '../components/Toasts';
-
-function errorMessage( error: unknown ): string {
-	return error instanceof Error ? error.message : __( 'Something went wrong.', 'reservant' );
-}
 
 const TYPE_OPTIONS: { value: ServiceType; label: string }[] = [
 	{ value: 'appointment', label: __( 'Appointment', 'reservant' ) },
@@ -157,7 +154,13 @@ function ServicesTable( { services, selectedId, onSelect }: ServicesTableProps )
 						}
 						onClick={ () => onSelect( service ) }
 					>
-						<td>{ service.name }</td>
+						<td>
+							<RowSelectButton
+								label={ service.name }
+								isSelected={ service.id === selectedId }
+								onSelect={ () => onSelect( service ) }
+							/>
+						</td>
 						<td>{ 'appointment' === service.type ? __( 'Appointment', 'reservant' ) : __( 'Event', 'reservant' ) }</td>
 						<td>{ 'appointment' === service.type ? `${ service.duration_min } min` : service.capacity }</td>
 						<td>{ 'active' === service.status ? __( 'Active', 'reservant' ) : __( 'Inactive', 'reservant' ) }</td>
@@ -177,6 +180,12 @@ function ServicesTable( { services, selectedId, onSelect }: ServicesTableProps )
  * delete-or-deactivate flow: deleting a service the booking history still references answers 409
  * `referenced`, rendered here as an inline suggestion to deactivate instead (`PUT {status:
  * 'inactive'}`, which the guard never blocks).
+ *
+ * "Show inactive services" is what keeps that suggestion from being a one-way door. The table shows
+ * active rows by default (the working set), but the list itself is the full catalog - so a
+ * deactivated service can be listed, selected, and flipped back to Active through the same Status
+ * select that deactivated it. Without the toggle the row was simply gone: no filter, no affordance,
+ * and the Status select is only rendered for a row that has been selected from this very table.
  */
 export function ServicesScreen() {
 	const { currency, granularityMin } = bootConfig();
@@ -190,8 +199,18 @@ export function ServicesScreen() {
 	const [ form, setForm ] = useState< ServiceFormState >( blankForm( currency ) );
 	const [ deleteConflictId, setDeleteConflictId ] = useState< number | null >( null );
 	const [ confirmDeleteOpen, setConfirmDeleteOpen ] = useState( false );
+	const [ showInactive, setShowInactive ] = useState( false );
 
-	const services = servicesQuery.data ?? [];
+	const allServices = servicesQuery.data ?? [];
+	// `useServices()` returns the full catalog, inactive rows included - this is a VIEW filter, not a
+	// fetch filter, which is what makes "Show inactive" instant and what makes a deactivated service
+	// reachable (and so reactivatable) at all. The currently selected row is always kept visible even
+	// when the toggle is off: deactivating the row you are editing must not make it disappear out
+	// from under the open form.
+	const services = allServices.filter(
+		( service ) => showInactive || 'active' === service.status || service.id === selectedId
+	);
+	const inactiveCount = allServices.filter( ( service ) => 'inactive' === service.status ).length;
 
 	function patchForm( fields: Partial< ServiceFormState > ): void {
 		setForm( ( current ) => ( { ...current, ...fields } ) );
@@ -252,7 +271,7 @@ export function ServicesScreen() {
 			{ id: selectedId, status: 'inactive' },
 			{
 				onSuccess: ( saved ) => {
-					addToast( __( 'Service deactivated.', 'reservant' ) );
+					addToast( __( 'Service deactivated. It stays listed under "Show inactive services".', 'reservant' ) );
 					setForm( formFromService( saved ) );
 					setDeleteConflictId( null );
 				},
@@ -275,6 +294,17 @@ export function ServicesScreen() {
 			<Button variant="primary" onClick={ startNew }>
 				{ __( 'New service', 'reservant' ) }
 			</Button>
+
+			<CheckboxControl
+				__nextHasNoMarginBottom
+				label={ sprintf(
+					/* translators: %d: how many inactive services exist. */
+					__( 'Show inactive services (%d)', 'reservant' ),
+					inactiveCount
+				) }
+				checked={ showInactive }
+				onChange={ setShowInactive }
+			/>
 
 			<ServicesTable services={ services } selectedId={ selectedId } onSelect={ selectService } />
 

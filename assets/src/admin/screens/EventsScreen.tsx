@@ -1,22 +1,34 @@
 import { useState } from '@wordpress/element';
-import { __ } from '@wordpress/i18n';
+import { __, sprintf } from '@wordpress/i18n';
 import { Button, Modal, Notice, SelectControl, Spinner, TextControl } from '@wordpress/components';
 import { bootConfig } from '../boot';
-import { isReferencedConflict } from '../api/client';
+import { errorMessage, isReferencedConflict } from '../api/client';
 import { useCancelOccurrence, useOccurrences, useSaveOccurrence, useServices } from '../api/queries';
 import type { Occurrence, Service } from '../api/types';
 import { siteToUtc, utcToSite } from '../calendar/adapter';
 import { useToasts } from '../components/Toasts';
 
-function errorMessage( error: unknown ): string {
-	return error instanceof Error ? error.message : __( 'Something went wrong.', 'reservant' );
-}
-
-/** Event services only - an occurrence has no meaning for an appointment service. */
+/**
+ * Event services only - an occurrence has no meaning for an appointment service. Inactive event
+ * services are offered too, marked as such: their existing occurrences still exist and may still
+ * need cancelling, which this screen is the only place to do.
+ */
 function eventServiceOptions( services: Service[] ): { label: string; value: string }[] {
 	return [
 		{ label: __( 'Select an event', 'reservant' ), value: '0' },
-		...services.filter( ( service ) => 'event' === service.type ).map( ( service ) => ( { label: service.name, value: String( service.id ) } ) ),
+		...services
+			.filter( ( service ) => 'event' === service.type )
+			.map( ( service ) => ( {
+				label:
+					'inactive' === service.status
+						? sprintf(
+								/* translators: %s: service name. */
+								__( '%s (inactive)', 'reservant' ),
+								service.name
+						  )
+						: service.name,
+				value: String( service.id ),
+			} ) ),
 	];
 }
 

@@ -30,9 +30,11 @@ use Reservant\Rest\Input;
  * compatibility but not persisted - the schema carries no such column.
  *
  * `GET /admin/exceptions` (Task 16b gap-filler: Task 11 shipped POST|DELETE here but no listing, so
- * the admin blackouts panel could not reload what it had already added) reads through the same
- * `AvailabilityRepository::exceptionsForResource()` used by `present()` - business-wide rows only
- * when `resource_id` is absent/0, one resource's own rows when given. Never a merge of the two,
+ * the admin blackouts panel could not reload what it had already added) reads through
+ * `AvailabilityRepository::exceptionsForResource()` - business-wide rows only
+ * when `resource_id` is absent/0, one resource's own rows when given. It is now the ONLY way a
+ * client reads exceptions: `present()`/`attachAssociations()` no longer attach them to a resource
+ * row (see `attachAssociations()`'s own docblock). Never a merge of the two,
  * unlike `exceptionsForResources()` (the availability-math read). `date_local`/`closed` are
  * presented as `date`/(`start_time`,`end_time` both null for an all-day closure) to match the shape
  * `POST` already accepts on input; `reason` echoes the same "accepted, never persisted" placeholder.
@@ -44,12 +46,17 @@ final class ResourcesAdminController {
 	public function __construct( private readonly \wpdb $db ) {}
 
 	/**
-	 * GET /admin/resources - every row carries `service_ids`/`rules`/`exceptions` too (the same
-	 * associations `show()` attaches via `present()`/`attachAssociations()`), not just the bare
+	 * GET /admin/resources - every row carries `service_ids`/`rules` too (the same associations
+	 * `show()` attaches via `present()`/`attachAssociations()`), not just the bare
 	 * `reservant_resources` columns: the `Resource` shape the SPA's `useResources()` (and every
 	 * screen built on it - the manual-booking drawer's staff-per-service filter, the staff
-	 * screen's own edit form) is typed against declares all three as always-present, non-optional
+	 * screen's own edit form) is typed against declares both as always-present, non-optional
 	 * fields, and reads them unconditionally the moment a resource loads through this list.
+	 *
+	 * `include_inactive` is what the SPA always sends (`api/queries.ts`'s `FULL_CATALOG`): the
+	 * catalog screen cannot offer to reactivate a staff member it can never list, and the bookings
+	 * screen must be able to filter history by a since-departed one. The parameter still defaults to
+	 * `false` (`AdminRoutes::includeInactiveArgs()`) for any other caller.
 	 */
 	public function index( \WP_REST_Request $request ): \WP_REST_Response {
 		$includeInactive = (bool) $request->get_param( 'include_inactive' );
@@ -487,10 +494,18 @@ final class ResourcesAdminController {
 	}
 
 	/**
-	 * `service_ids`/`rules`/`exceptions` for one resource row, shared by `present()` (single
-	 * resource) and `index()` (the list) so both ever answer the same `Resource` shape - a row
-	 * missing any of the three is exactly the bug this method exists to make impossible to
-	 * reintroduce one call site at a time.
+	 * `service_ids`/`rules` for one resource row, shared by `present()` (single resource) and
+	 * `index()` (the list) so both ever answer the same `Resource` shape - a row missing either is
+	 * exactly the bug this method exists to make impossible to reintroduce one call site at a time.
+	 *
+	 * `exceptions` was a third association here and is deliberately gone (Task 17's dead-type polish,
+	 * completed): no client reads it. `StaffScreen`'s blackout panels load through `GET
+	 * /admin/exceptions` (`indexExceptions()`) instead - a request scoped to exactly the rows being
+	 * shown and invalidated on its own - and the `Resource` TypeScript type dropped the field to
+	 * match. Since `index()` began running EVERY row through this helper, keeping it meant a third
+	 * query per resource on every catalog list request, shipping every blackout date of every staff
+	 * member to a screen that ignores them. Anything that genuinely needs a resource's exceptions
+	 * asks the endpoint that exists for it.
 	 *
 	 * @param array<string, mixed> $row
 	 * @return array<string, mixed>
@@ -502,7 +517,6 @@ final class ResourcesAdminController {
 
 		$row['service_ids'] = $repo->serviceIdsForResource( $id );
 		$row['rules']       = $availability->rulesForResource( $id );
-		$row['exceptions']  = $availability->exceptionsForResource( $id );
 		return $row;
 	}
 }

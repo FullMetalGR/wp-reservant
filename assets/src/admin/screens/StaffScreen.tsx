@@ -1,6 +1,7 @@
 import { useState } from '@wordpress/element';
-import { __ } from '@wordpress/i18n';
+import { __, sprintf } from '@wordpress/i18n';
 import { Button, CheckboxControl, ComboboxControl, Notice, SelectControl, Spinner, TextControl } from '@wordpress/components';
+import { errorMessage } from '../api/client';
 import {
 	useAddException,
 	useExceptions,
@@ -13,11 +14,8 @@ import {
 	type ExceptionInput,
 } from '../api/queries';
 import type { AvailabilityExceptionListItem, Resource, Service } from '../api/types';
+import { RowSelectButton } from '../components/RowSelectButton';
 import { useToasts } from '../components/Toasts';
-
-function errorMessage( error: unknown ): string {
-	return error instanceof Error ? error.message : __( 'Something went wrong.', 'reservant' );
-}
 
 /** ISO-8601: 1 = Monday .. 7 = Sunday (`AvailabilityRule`'s own convention). */
 const WEEKDAYS: { value: number; label: string }[] = [
@@ -105,6 +103,21 @@ interface ServicesChecklistProps {
 	onToggle: ( serviceId: number, checked: boolean ) => void;
 }
 
+/**
+ * Inactive services are listed here too, marked as such, rather than hidden: `service_ids` is
+ * replace-all-per-save, so a link to a service that happens to be deactivated is still a link the
+ * admin must be able to SEE before deciding whether to keep or drop it.
+ */
+function serviceChecklistLabel( service: Service ): string {
+	return 'inactive' === service.status
+		? sprintf(
+				/* translators: %s: service name. */
+				__( '%s (inactive)', 'reservant' ),
+				service.name
+		  )
+		: service.name;
+}
+
 function ServicesChecklist( { services, selectedIds, onToggle }: ServicesChecklistProps ) {
 	return (
 		<div className="reservant-staff-screen__services">
@@ -112,7 +125,7 @@ function ServicesChecklist( { services, selectedIds, onToggle }: ServicesCheckli
 				<CheckboxControl
 					__nextHasNoMarginBottom
 					key={ service.id }
-					label={ service.name }
+					label={ serviceChecklistLabel( service ) }
 					checked={ selectedIds.includes( service.id ) }
 					onChange={ ( checked ) => onToggle( service.id, checked ) }
 				/>
@@ -288,7 +301,13 @@ function StaffTable( { resources, selectedId, onSelect }: StaffTableProps ) {
 						}
 						onClick={ () => onSelect( resource ) }
 					>
-						<td>{ resource.name }</td>
+						<td>
+							<RowSelectButton
+								label={ resource.name }
+								isSelected={ resource.id === selectedId }
+								onSelect={ () => onSelect( resource ) }
+							/>
+						</td>
 						<td>{ resource.email ?? '' }</td>
 						<td>{ 'active' === resource.status ? __( 'Active', 'reservant' ) : __( 'Inactive', 'reservant' ) }</td>
 					</tr>
@@ -326,6 +345,7 @@ export function StaffScreen() {
 	const [ rules, setRules ] = useState< RuleRow[] >( [] );
 	const [ exceptionForm, setExceptionForm ] = useState< BlackoutFormState >( blankBlackoutForm() );
 	const [ businessForm, setBusinessForm ] = useState< BlackoutFormState >( blankBlackoutForm() );
+	const [ showInactive, setShowInactive ] = useState( false );
 
 	const businessExceptionsQuery = useExceptions();
 	// `selectedId ?? undefined` falls back to the business-wide query when nothing is selected - the
@@ -335,6 +355,15 @@ export function StaffScreen() {
 	const resourceExceptionsQuery = useExceptions( selectedId ?? undefined );
 
 	const resources = resourcesQuery.data ?? [];
+	// A VIEW filter over the full catalog `useResources()` returns (inactive rows included), not a
+	// fetch filter - the same shape `ServicesScreen` uses, and for the same reason: without it a
+	// deactivated staff member is unreachable, so the Status select that deactivated them (rendered
+	// only for a row selected from this table) can never put them back. The selected row always stays
+	// visible so deactivating the row being edited does not make it vanish under the open form.
+	const visibleResources = resources.filter(
+		( resource ) => showInactive || 'active' === resource.status || resource.id === selectedId
+	);
+	const inactiveCount = resources.filter( ( resource ) => 'inactive' === resource.status ).length;
 	// Deliberately NOT kept in sync with `resourcesQuery.data` via an effect: react-query refetches
 	// this list in the background (e.g. `refetchOnWindowFocus`), and an effect keyed on the selected
 	// row would silently overwrite unsaved local edits (rules mid-build, a service just ticked) the
@@ -477,7 +506,18 @@ export function StaffScreen() {
 				{ __( 'New staff member', 'reservant' ) }
 			</Button>
 
-			<StaffTable resources={ resources } selectedId={ selectedId } onSelect={ selectResource } />
+			<CheckboxControl
+				__nextHasNoMarginBottom
+				label={ sprintf(
+					/* translators: %d: how many inactive staff members exist. */
+					__( 'Show inactive staff (%d)', 'reservant' ),
+					inactiveCount
+				) }
+				checked={ showInactive }
+				onChange={ setShowInactive }
+			/>
+
+			<StaffTable resources={ visibleResources } selectedId={ selectedId } onSelect={ selectResource } />
 
 			<div className="reservant-staff-screen__editor">
 				<h2>{ null === selectedId ? __( 'New staff member', 'reservant' ) : __( 'Edit staff member', 'reservant' ) }</h2>

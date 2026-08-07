@@ -3,8 +3,9 @@ import { __, sprintf } from '@wordpress/i18n';
 import { Button, ButtonGroup, Notice, SelectControl, Spinner, TextControl } from '@wordpress/components';
 import { bootConfig } from '../boot';
 import { useBookings, useResources, useServices } from '../api/queries';
-import type { BookingFilters, BookingListResponse, BookingSummary, Resource, Service } from '../api/types';
+import type { ActiveStatus, BookingFilters, BookingListResponse, BookingSummary, Resource, Service } from '../api/types';
 import { utcToSite } from '../calendar/adapter';
+import { RowSelectButton } from '../components/RowSelectButton';
 import { BookingDrawer, formatMoney, statusLabel } from './BookingDrawer';
 
 const PER_PAGE = 20;
@@ -54,6 +55,23 @@ interface FilterBarProps {
 	onApprovalInbox: () => void;
 }
 
+/**
+ * Both catalog filters below list INACTIVE rows too (marked as such), and deliberately so: this
+ * filters booking HISTORY, and a booking taken by a since-departed staff member - or for a service
+ * that has since been retired - is exactly the booking an admin needs to be able to isolate. That
+ * is the opposite call from `CalendarScreen`/`ManualBookingDrawer`, which filter these same lists
+ * down to active rows because they feed NEW bookings.
+ */
+function catalogFilterLabel( name: string, status: ActiveStatus ): string {
+	return 'inactive' === status
+		? sprintf(
+				/* translators: %s: service or staff member name. */
+				__( '%s (inactive)', 'reservant' ),
+				name
+		  )
+		: name;
+}
+
 /** The date range, status, staff, service and search filters, plus the "Approval inbox" preset. */
 function BookingsFilterBar( { state, resources = [], services = [], onChange, onApprovalInbox }: FilterBarProps ) {
 	return (
@@ -89,7 +107,10 @@ function BookingsFilterBar( { state, resources = [], services = [], onChange, on
 				value={ String( state.resourceId ) }
 				options={ [
 					{ label: __( 'All staff', 'reservant' ), value: '0' },
-					...resources.map( ( resource ) => ( { label: resource.name, value: String( resource.id ) } ) ),
+					...resources.map( ( resource ) => ( {
+						label: catalogFilterLabel( resource.name, resource.status ),
+						value: String( resource.id ),
+					} ) ),
 				] }
 				onChange={ ( value ) => onChange( { resourceId: Number( value ) } ) }
 			/>
@@ -100,7 +121,10 @@ function BookingsFilterBar( { state, resources = [], services = [], onChange, on
 				value={ String( state.serviceId ) }
 				options={ [
 					{ label: __( 'All services', 'reservant' ), value: '0' },
-					...services.map( ( service ) => ( { label: service.name, value: String( service.id ) } ) ),
+					...services.map( ( service ) => ( {
+						label: catalogFilterLabel( service.name, service.status ),
+						value: String( service.id ),
+					} ) ),
 				] }
 				onChange={ ( value ) => onChange( { serviceId: Number( value ) } ) }
 			/>
@@ -142,7 +166,9 @@ function BookingsTable( { bookings = [], timezone, onRowClick }: BookingsTablePr
 					const start = summaryStart( booking );
 					return (
 						<tr key={ booking.uuid } className="reservant-bookings-table__row" onClick={ () => onRowClick( booking.uuid ) }>
-							<td>{ booking.customer_name }</td>
+							<td>
+								<RowSelectButton label={ booking.customer_name } onSelect={ () => onRowClick( booking.uuid ) } />
+							</td>
 							<td>{ statusLabel( booking.status ) }</td>
 							<td>{ null === start ? '' : utcToSite( start, timezone ).toLocaleString() }</td>
 							<td>{ formatMoney( booking.total_minor, booking.currency ) }</td>
