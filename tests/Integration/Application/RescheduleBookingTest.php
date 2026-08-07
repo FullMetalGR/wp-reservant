@@ -522,6 +522,60 @@ final class RescheduleBookingTest extends LockedDecisionTestCase {
 		self::assertSame( $this->sql( 1, '09:00' ), $after['items'][0]['start_utc'] );
 	}
 
+	/**
+	 * A lock that could not actually be taken must refuse the request, not be written past.
+	 *
+	 * `LockManager::acquire()` issues `SELECT ... FOR UPDATE`, and wpdb answers `false` on a DB-level
+	 * failure without throwing or surfacing anything while `WP_DEBUG` is off. The two failures that
+	 * matter are the two `deleteItems()` already names:
+	 *
+	 *  - **1205, lock-wait timeout.** `innodb_rollback_on_timeout` is OFF by default, so only the
+	 *    STATEMENT rolls back. The transaction stays open WITHOUT the lock and, unguarded, walks
+	 *    straight through the re-read, the release, the capacity checks and COMMIT - a committed
+	 *    capacity write outside the mutex, which is precisely what AGENTS.md section 2.2 exists to
+	 *    prevent.
+	 *  - **1213, deadlock.** The server rolls the whole transaction back, so every later statement runs
+	 *    under restored autocommit and commits INDIVIDUALLY - the item DELETE alone, then the INSERT
+	 *    alone - and `TransactionRunner`'s eventual ROLLBACK is a no-op. "Atomic release + re-hold;
+	 *    partial success is impossible" would be a promise this class could not keep.
+	 *
+	 * The sabotage is the one `test_a_failed_release_aborts_the_move_instead_of_doubling_the_booking`
+	 * uses, aimed at the lock statement instead of the release: a `query` filter rewriting it to a table
+	 * that does not exist, which produces exactly the `false`-with-`last_error` shape a 1205 produces.
+	 * The committed row set is what is asserted, not merely the exception - unguarded, this move
+	 * COMMITS, and an exception-only test would pass against the very code path this guards.
+	 */
+	public function test_a_lock_that_cannot_be_taken_refuses_the_move_rather_than_writing_without_it(): void {
+		global $wpdb;
+		$booking  = $this->confirmedChain( $this->utc( 2, '09:00' ), array( new SegmentChoice( $this->cutId, $this->staffA ) ) );
+		$sabotage = static function ( $query ) {
+			return 1 === preg_match( '/^\s*SELECT\s+resource_id\s+FROM\s+\S*reservant_resource_days\b.*FOR UPDATE/is', (string) $query )
+				? 'SELECT resource_id FROM reservant_no_such_table WHERE 1 = 1'
+				: $query;
+		};
+
+		// Captured rather than asserted inside the `catch`: PHPUnit's `AssertionFailedError` extends
+		// `\RuntimeException`, so a `self::fail()` in the `try` would be swallowed by the broad arm.
+		$refusal    = null;
+		$suppressed = $wpdb->suppress_errors( true );
+		add_filter( 'query', $sabotage );
+		try {
+			RescheduleBooking::make( $wpdb )->execute( (string) $booking['uuid'], $this->utc( 2, '15:00' ), null, $this->utc( 0 ) );
+		} catch ( \RuntimeException $exception ) {
+			$refusal = $exception->getMessage();
+		} finally {
+			remove_filter( 'query', $sabotage );
+			$wpdb->suppress_errors( $suppressed );
+		}
+		self::assertSame( 'stale_state', $refusal, 'A lock that could not be taken must refuse the request.' );
+
+		$after = ( new BookingRepository( $wpdb ) )->findByUuid( (string) $booking['uuid'] );
+		self::assertNotNull( $after );
+		self::assertSame( 'confirmed', $after['status'] );
+		self::assertCount( 1, $after['items'] );
+		self::assertSame( $this->sql( 2, '09:00' ), $after['items'][0]['start_utc'], 'A move made without the mutex must never commit.' );
+	}
+
 	public function test_writes_one_audit_entry_describing_the_move(): void {
 		global $wpdb;
 		$booking = $this->confirmedChain( $this->utc( 9, '09:00' ), array( new SegmentChoice( $this->cutId, $this->staffA ) ) );
