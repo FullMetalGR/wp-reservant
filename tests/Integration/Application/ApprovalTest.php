@@ -164,12 +164,16 @@ final class ApprovalTest extends ReservantTestCase {
 		$booking = $this->holdAwaitingApproval();
 		$wpdb->update( $wpdb->prefix . 'reservant_bookings', array( 'hold_expires_at' => '2020-01-01 00:00:00' ), array( 'uuid' => $booking['uuid'] ) );
 
+		// Captured into a variable rather than asserted inside the `catch`: PHPUnit's own
+		// `AssertionFailedError` is a `\RuntimeException`, so a `self::fail()` in the `try` of a broad
+		// catch would be swallowed by it and the test would pass having proved nothing.
+		$refusal = null;
 		try {
 			ApproveBooking::make( $wpdb )->execute( $booking['uuid'], $this->utc( 0, '01:00' ), '7' );
-			self::fail( 'Expected not_approvable.' );
 		} catch ( \RuntimeException $e ) {
-			self::assertSame( 'not_approvable', $e->getMessage() );
+			$refusal = $e->getMessage();
 		}
+		self::assertSame( 'not_approvable', $refusal );
 		self::assertSame( 'awaiting_approval', ( new BookingRepository( $wpdb ) )->findByUuid( $booking['uuid'] )['status'] );
 	}
 
@@ -258,12 +262,15 @@ final class ApprovalTest extends ReservantTestCase {
 	public function testOutcomeOnlyFromConfirmed(): void {
 		global $wpdb;
 		$pending = $this->holdPending();
+		// See the note in `testApproveExpiredWindowRefuses`: a `self::fail()` here would be caught by
+		// the broad `\RuntimeException` arm, so the refusal is asserted afterwards.
+		$refusal = null;
 		try {
 			MarkBookingOutcome::make( $wpdb )->execute( $pending['uuid'], 'completed', 'admin' );
-			self::fail( 'Expected stale_state.' );
 		} catch ( \RuntimeException $e ) {
-			self::assertSame( 'stale_state', $e->getMessage() );
+			$refusal = $e->getMessage();
 		}
+		self::assertSame( 'stale_state', $refusal );
 
 		$confirmed = ConfirmBooking::make( $wpdb )->execute( $pending['uuid'], $this->utc( 0, '00:05' ) );
 		self::assertSame( 'confirmed', $confirmed['status'] );
@@ -298,12 +305,15 @@ final class ApprovalTest extends ReservantTestCase {
 		$confirmed = ConfirmBooking::make( $wpdb )->execute( $pending['uuid'], $this->utc( 0, '00:05' ) );
 		self::assertSame( 'confirmed', $confirmed['status'] );
 
+		// See the note in `testApproveExpiredWindowRefuses`: a `self::fail()` here would be caught by
+		// the broad `\RuntimeException` arm, so the refusal is asserted afterwards.
+		$refusal = null;
 		try {
 			MarkBookingOutcome::make( $wpdb )->execute( $pending['uuid'], 'bogus', 'admin' );
-			self::fail( 'Expected bad_outcome.' );
 		} catch ( \RuntimeException $e ) {
-			self::assertSame( 'bad_outcome', $e->getMessage() );
+			$refusal = $e->getMessage();
 		}
+		self::assertSame( 'bad_outcome', $refusal );
 	}
 
 	public function testMarkBookingOutcomeNoShow(): void {

@@ -60,12 +60,16 @@ final class LifecycleTest extends ReservantTestCase {
 		$booking = $this->holdOne( '09:00' );
 		ConfirmBooking::make( $wpdb )->execute( $booking['uuid'], $this->utc( 0, '00:05' ) );
 		$cancel = CancelBooking::make( $wpdb );
+		// Captured into a variable rather than asserted inside the `catch`: PHPUnit's own
+		// `AssertionFailedError` is a `\RuntimeException`, so a `self::fail()` in the `try` of a broad
+		// catch would be swallowed by it and the test would pass having proved nothing.
+		$refusal = null;
 		try {
 			$cancel->execute( $booking['uuid'], $this->utc( 1, '08:00' ) ); // inside 24h window
-			self::fail( 'Expected window_closed.' );
 		} catch ( \RuntimeException $e ) {
-			self::assertSame( 'window_closed', $e->getMessage() );
+			$refusal = $e->getMessage();
 		}
+		self::assertSame( 'window_closed', $refusal );
 		$cancelled = $cancel->execute( $booking['uuid'], $this->utc( 1, '08:00' ), true ); // admin force
 		self::assertSame( 'cancelled', $cancelled['status'] );
 	}
@@ -85,12 +89,15 @@ final class LifecycleTest extends ReservantTestCase {
 		$booking = $this->holdOne( '09:00' );
 		ConfirmBooking::make( $wpdb )->execute( $booking['uuid'], $this->utc( 0, '00:05' ) );
 
+		// See the note in `test_cancel_respects_window_and_force_overrides`: a `self::fail()` here
+		// would be caught by the broad `\RuntimeException` arm, so the refusal is asserted afterwards.
+		$refusal = null;
 		try {
 			CancelBooking::make( $wpdb )->execute( $booking['uuid'], $this->utc( 0, '00:06' ), true, BookingStatus::heldStatuses() );
-			self::fail( 'Expected not_held.' );
 		} catch ( \RuntimeException $exception ) {
-			self::assertSame( 'not_held', $exception->getMessage() );
+			$refusal = $exception->getMessage();
 		}
+		self::assertSame( 'not_held', $refusal );
 		self::assertSame( 'confirmed', ( new BookingRepository( $wpdb ) )->findByUuid( $booking['uuid'] )['status'] );
 
 		// The unrestricted call is the manager's force-cancel and still goes through, so the refusal

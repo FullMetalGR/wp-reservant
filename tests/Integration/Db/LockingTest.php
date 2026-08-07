@@ -21,15 +21,19 @@ final class LockingTest extends ReservantTestCase {
 		} );
 		self::assertSame( '1', $wpdb->get_var( "SELECT COUNT(*) FROM {$wpdb->prefix}reservant_resource_days" ) ); // phpcs:ignore WordPress.DB.PreparedSQL
 
+		// Captured into a variable rather than asserted inside the `catch`: PHPUnit's own
+		// `AssertionFailedError` is a `\RuntimeException`, so a `self::fail()` in the `try` of a broad
+		// catch would be swallowed by it and the test would pass having proved nothing.
+		$refusal = null;
 		try {
 			$runner->run( static function () use ( $days ): void {
 				$days->ensure( array( LockKey::resourceDay( 2, '2026-01-15' ) ) );
 				throw new \RuntimeException( 'boom' );
 			} );
-			self::fail( 'Expected exception.' );
 		} catch ( \RuntimeException $e ) {
-			self::assertSame( 'boom', $e->getMessage() );
+			$refusal = $e->getMessage();
 		}
+		self::assertSame( 'boom', $refusal );
 		self::assertSame( '1', $wpdb->get_var( "SELECT COUNT(*) FROM {$wpdb->prefix}reservant_resource_days" ) ); // phpcs:ignore WordPress.DB.PreparedSQL
 	}
 
