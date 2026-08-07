@@ -284,7 +284,13 @@ export interface Seat {
 	kind: SeatKind;
 }
 
-/** `SeatMapsAdminController::present()`. */
+/**
+ * `SeatMapsAdminController::present()` - the one shape every seat-map route answers with, the LIST
+ * (`GET /admin/seat-maps`) included: `index()` maps every row through that same presenter, so
+ * `seats` is genuinely always present and this type is safe to declare it non-optional. It was not
+ * always so - `index()` used to return bare `reservant_seat_maps` rows, and `SeatMapsScreen`'s
+ * `map.seats.length` threw on the first render.
+ */
 export interface SeatMap {
 	id: number;
 	name: string;

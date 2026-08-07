@@ -304,6 +304,69 @@ final class AdminCatalogTest extends ReservantTestCase {
 	}
 
 	/**
+	 * Final-review finding (critical), and the identical `index()`-vs-`present()` drift the test
+	 * below this one covers for resources: `GET /admin/seat-maps` returned `SeatMapRepository::all()`
+	 * verbatim - `id`/`name`/`spec`, no `seats` - while `GET /admin/seat-maps/{id}` went through
+	 * `present()` and did attach them. The `SeatMap` TypeScript type declares `seats` non-optional
+	 * and `SeatMapsScreen` renders `map.seats.length` for every row of this list, so the whole admin
+	 * SPA threw and unmounted the moment the Seat Maps screen was opened - the feature was
+	 * unreachable, and the dashboard showed nothing but wp-admin chrome.
+	 *
+	 * This is the server half of the pair; the client half is
+	 * `assets/src/admin/screens/__tests__/seatMapsScreen.test.tsx`, which mounts the screen against
+	 * exactly this payload. Asserting the wire shape HERE, against a real request, is what stops that
+	 * fixture from being a hand-written approximation confirming the type against itself.
+	 */
+	public function test_seat_map_list_carries_seats_like_the_single_seat_map_shape(): void {
+		$this->asAdmin();
+
+		$created = $this->jsonRequest(
+			'POST',
+			'/reservant/v1/admin/seat-maps',
+			array( 'name' => 'Main Hall', 'spec' => 'rows A-B, 2 per row, aisle after 1' )
+		);
+		self::assertSame( 201, $created->get_status(), (string) wp_json_encode( $created->get_data() ) );
+		/** @var array<string, mixed> $createdMap */
+		$createdMap = $created->get_data();
+
+		$listed = $this->request( 'GET', '/reservant/v1/admin/seat-maps' );
+		self::assertSame( 200, $listed->get_status() );
+		/** @var list<array<string, mixed>> $maps */
+		$maps = $listed->get_data()['seat_maps'];
+		self::assertNotSame( array(), $maps );
+
+		$hall = null;
+		foreach ( $maps as $row ) {
+			if ( 'Main Hall' === $row['name'] ) {
+				$hall = $row;
+			}
+		}
+		self::assertNotNull( $hall, 'the created seat map must appear in the list' );
+
+		// The whole point: `seats` is present on a LIST row, not only on the single-map response.
+		self::assertArrayHasKey( 'seats', $hall );
+		self::assertIsArray( $hall['seats'] );
+		// 2 rows x (2 seats + 1 aisle) - aisles are stored too, they are geometry the grid draws.
+		self::assertCount( 6, $hall['seats'] );
+
+		// And it is the SAME shape the single-map route answers with, field for field.
+		$single = $this->request( 'GET', "/reservant/v1/admin/seat-maps/{$createdMap['id']}" );
+		self::assertSame( 200, $single->get_status() );
+		self::assertSame( $single->get_data(), $hall );
+
+		// Every seat carries the columns `SeatMapRepository::seatsForMap()` selects and casts - the
+		// exact fields the `Seat` TypeScript type declares and `SeatMapPreview` reads.
+		/** @var array<string, mixed> $seat */
+		$seat = $hall['seats'][0];
+		foreach ( array( 'id', 'seat_map_id', 'row_label', 'seat_label', 'sort_row', 'sort_col', 'kind' ) as $field ) {
+			self::assertArrayHasKey( $field, $seat );
+		}
+		self::assertIsInt( $seat['id'] );
+		self::assertIsInt( $seat['sort_row'] );
+		self::assertIsInt( $seat['sort_col'] );
+	}
+
+	/**
 	 * Task 17 finding: `GET /admin/resources` (the list every catalog screen loads through -
 	 * `useResources()`) used to return bare `reservant_resources` columns, never the
 	 * `service_ids`/`rules`/`exceptions` associations `GET /admin/resources/{id}` attaches via

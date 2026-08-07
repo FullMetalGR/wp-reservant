@@ -2,6 +2,7 @@ import { useEffect, useState } from '@wordpress/element';
 import { __ } from '@wordpress/i18n';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { Notice } from '@wordpress/components';
+import { ScreenErrorBoundary } from './ScreenErrorBoundary';
 import { ToastProvider } from './Toasts';
 import { BookingsScreen } from '../screens/BookingsScreen';
 import { CalendarScreen } from '../screens/CalendarScreen';
@@ -123,6 +124,9 @@ export interface AppProps {
  * `ManualBookingDrawer` (Task 15) - it lives in the header rather than any one screen since every
  * caller who can see the button holds `reservant_manage_bookings` regardless of which screen they
  * are currently on.
+ *
+ * The screen itself renders inside a `ScreenErrorBoundary`, so one screen's render error shows as
+ * an inline, detailed failure on that screen alone rather than unmounting the entire dashboard.
  */
 export function App( { screen, caps }: AppProps ) {
 	const hash = useHash();
@@ -148,7 +152,8 @@ export function App( { screen, caps }: AppProps ) {
 							</button>
 						) ) }
 					</div>
-					{ renderScreen( route ) }
+					{ /* Keyed on the route so navigating remounts a fresh boundary - see `ScreenErrorBoundary`. */ }
+					<ScreenErrorBoundary key={ `${ route.screen }:${ route.id ?? '' }` }>{ renderScreen( route ) }</ScreenErrorBoundary>
 					{ manualBookingOpen && <ManualBookingDrawer onClose={ () => setManualBookingOpen( false ) } /> }
 				</div>
 			</ToastProvider>

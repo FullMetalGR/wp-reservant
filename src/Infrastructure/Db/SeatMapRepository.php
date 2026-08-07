@@ -79,8 +79,15 @@ final class SeatMapRepository {
 	}
 
 	/**
-	 * The seat map catalog (AGENTS.md Task 12): id/name/spec only - the admin listing shows one row
-	 * per map, not every seat of every map.
+	 * The seat map catalog (AGENTS.md Task 12): the `reservant_seat_maps` columns only - id, name
+	 * and the spec text.
+	 *
+	 * NOT the wire shape. `SeatMapsAdminController::index()` runs every row returned here through
+	 * the same `present()` the single-map routes use, which attaches that map's own `seatsForMap()`
+	 * grid: `GET /admin/seat-maps` answers rows carrying `seats`, exactly like
+	 * `GET /admin/seat-maps/{id}` does. Nothing may read a row straight out of this method onto the
+	 * wire - that is precisely the drift that shipped a seats-less list and crashed the seat map
+	 * screen (`map.seats.length` on `undefined`).
 	 *
 	 * @return list<array<string, mixed>>
 	 */

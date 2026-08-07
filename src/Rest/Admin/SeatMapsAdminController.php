@@ -45,10 +45,24 @@ final class SeatMapsAdminController {
 
 	public function __construct( private readonly \wpdb $db ) {}
 
-	/** GET /admin/seat-maps */
+	/**
+	 * GET /admin/seat-maps - every row carries its own `seats` grid too (the same association
+	 * `show()` attaches via `present()`), not just the bare `reservant_seat_maps` columns: the
+	 * `SeatMap` shape the SPA's `useSeatMaps()` is typed against declares `seats` as an
+	 * always-present, non-optional field, and `SeatMapsScreen` reads it unconditionally the moment a
+	 * map loads through this list (`map.seats.length` in the catalog table, and the live
+	 * `SeatMapPreview` grid, which is derived from the SELECTED row of this same list).
+	 *
+	 * This is the identical `index()`-vs-`present()` drift already fixed for `GET /admin/resources`
+	 * in `ResourcesAdminController::index()` - both are now expressed as "map every row through the
+	 * one shared presenter", so the list and the single-row shape cannot drift apart again.
+	 */
 	public function index( \WP_REST_Request $request ): \WP_REST_Response { // phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter -- Every admin index handler takes the request for signature consistency, even a paramless one.
-		$rows = ( new SeatMapRepository( $this->db ) )->all();
-		return new \WP_REST_Response( array( 'seat_maps' => $rows ) );
+		$repo = new SeatMapRepository( $this->db );
+		$rows = $repo->all();
+		return new \WP_REST_Response(
+			array( 'seat_maps' => array_map( static fn ( array $row ): array => self::present( $repo, $row ), $rows ) )
+		);
 	}
 
 	/** GET /admin/seat-maps/{id} */
@@ -189,6 +203,12 @@ final class SeatMapsAdminController {
 	}
 
 	/**
+	 * The one `SeatMap` shape every route answers with - the map row plus its own seat grid. Shared
+	 * by `index()` (the list), `show()`, `create()` and `update()` so a row missing `seats` is
+	 * exactly the bug this method exists to make impossible to reintroduce one call site at a time
+	 * (the same rule `ResourcesAdminController::attachAssociations()` states for its own three
+	 * associations).
+	 *
 	 * @param array<string, mixed> $map
 	 * @return array<string, mixed>
 	 */

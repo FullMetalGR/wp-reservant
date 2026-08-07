@@ -131,9 +131,17 @@ export function SeatMapsScreen() {
 	const [ spec, setSpec ] = useState( '' );
 	const [ parseError, setParseError ] = useState< string | null >( null );
 	const [ lockedIds, setLockedIds ] = useState< ReadonlySet< number > >( new Set() );
+	// The map a save just answered with, kept only until another row is selected. `GET
+	// /admin/seat-maps` carries every row's `seats` (`SeatMapsAdminController::index()`), so the
+	// selected row's grid is normally read straight off the list - but a save's own invalidation
+	// refetch is asynchronous, and a re-parsed spec's NEW grid is already in hand before it lands.
+	// Preferring it here is what makes the preview show what was just saved rather than the previous
+	// parse for the width of that refetch.
+	const [ savedMap, setSavedMap ] = useState< SeatMap | null >( null );
 
 	const seatMaps = seatMapsQuery.data ?? [];
-	const selected = seatMaps.find( ( map ) => map.id === selectedId ) ?? null;
+	const listed = seatMaps.find( ( map ) => map.id === selectedId ) ?? null;
+	const selected = null !== savedMap && savedMap.id === selectedId ? savedMap : listed;
 	const isLocked = null !== selectedId && lockedIds.has( selectedId );
 
 	function selectMap( id: number ): void {
@@ -145,6 +153,7 @@ export function SeatMapsScreen() {
 		setName( map.name );
 		setSpec( map.spec );
 		setParseError( null );
+		setSavedMap( null );
 	}
 
 	function startNew(): void {
@@ -152,6 +161,7 @@ export function SeatMapsScreen() {
 		setName( '' );
 		setSpec( '' );
 		setParseError( null );
+		setSavedMap( null );
 	}
 
 	function handleSave(): void {
@@ -162,6 +172,7 @@ export function SeatMapsScreen() {
 				onSuccess: ( saved ) => {
 					addToast( __( 'Seat map saved.', 'reservant' ) );
 					setSelectedId( saved.id );
+					setSavedMap( saved );
 				},
 				onError: ( error ) => {
 					if ( error instanceof ApiError && 400 === error.status ) {
