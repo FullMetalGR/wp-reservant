@@ -26,8 +26,12 @@ use Reservant\Tests\Integration\ReservantTestCase;
  */
 final class JobsTest extends ReservantTestCase {
 
+	/** Deliberately not 48: see `testApprovalTimersLandOnTheServicesOwnWindow()`. */
+	private const SHORT_WINDOW_HOURS = 6;
+
 	private int $expireServiceId;
 	private int $autoApproveServiceId;
+	private int $shortWindowServiceId;
 
 	public function set_up(): void {
 		parent::set_up();
@@ -60,9 +64,22 @@ final class JobsTest extends ReservantTestCase {
 				'on_approval_timeout' => 'auto_approve',
 			)
 		);
+		$this->shortWindowServiceId = $services->insert(
+			array(
+				'name'                => 'Trial',
+				'type'                => 'appointment',
+				'duration_min'        => 30,
+				'price_minor'         => 3000,
+				'payment_mode'        => 'onsite',
+				'requires_approval'   => 1,
+				'approval_hold_hours' => self::SHORT_WINDOW_HOURS,
+				'on_approval_timeout' => 'expire',
+			)
+		);
 		$staff                       = $resources->insert( array( 'name' => 'Alex' ) );
 		$resources->linkService( $this->expireServiceId, $staff );
 		$resources->linkService( $this->autoApproveServiceId, $staff );
+		$resources->linkService( $this->shortWindowServiceId, $staff );
 		foreach ( range( 1, 7 ) as $weekday ) {
 			$avail->insertRule( $staff, new AvailabilityRule( $weekday, '09:00', '17:00' ) );
 		}
@@ -85,14 +102,13 @@ final class JobsTest extends ReservantTestCase {
 	}
 
 	/**
-	 * Args of every scheduled action for a hook (group 'reservant') whose first arg is this uuid -
-	 * scoped to one booking rather than a bare count, since Action Scheduler's tables are not part
-	 * of `ReservantTestCase::set_up()`'s per-test truncation and other tests in this class hold
-	 * their own approval-gated bookings too.
+	 * Every scheduled action for a hook (group 'reservant') whose first arg is this uuid, with the
+	 * instant it is due - scoped to one booking rather than a bare count, since other tests in this
+	 * class hold their own approval-gated bookings too.
 	 *
-	 * @return list<array<int, mixed>>
+	 * @return list<array{ts: int, args: array<int, mixed>}>
 	 */
-	private function scheduledArgsForUuid( string $hook, string $uuid ): array {
+	private function scheduledForUuid( string $hook, string $uuid ): array {
 		/** @var array<int, \ActionScheduler_Action> $actions */
 		$actions = as_get_scheduled_actions(
 			array(
@@ -105,11 +121,24 @@ final class JobsTest extends ReservantTestCase {
 		$matches = array();
 		foreach ( $actions as $action ) {
 			$args = $action->get_args();
-			if ( isset( $args[0] ) && $uuid === $args[0] ) {
-				$matches[] = $args;
+			if ( ! isset( $args[0] ) || $uuid !== $args[0] ) {
+				continue;
 			}
+			$date      = $action->get_schedule()->get_date();
+			$matches[] = array(
+				'ts'   => null === $date ? 0 : $date->getTimestamp(),
+				'args' => $args,
+			);
 		}
 		return $matches;
+	}
+
+	/** @return list<array<int, mixed>> */
+	private function scheduledArgsForUuid( string $hook, string $uuid ): array {
+		return array_map(
+			static fn ( array $row ): array => $row['args'],
+			$this->scheduledForUuid( $hook, $uuid )
+		);
 	}
 
 	/** @return list<int> scheduled action ids for a hook, group 'reservant' */
@@ -138,6 +167,67 @@ final class JobsTest extends ReservantTestCase {
 		sort( $percents );
 		self::assertSame( array( 25, 50, 75 ), $percents );
 		self::assertSame( array( $booking['uuid'] ), $timeoutArgs[0] );
+	}
+
+	/**
+	 * The schedule TIMES, not just how many timers there are.
+	 *
+	 * `HoldBooking::scheduleApprovalTimers()` puts each nag at `created + round(window * pct / 100)`
+	 * and the timeout at `hold_expires_at` exactly. Counting three nags and one timeout says nothing
+	 * about any of that: a regression that scheduled all three nags at `created`, inverted the
+	 * percentage, or fired the timeout an hour late would count identically. Every instant is
+	 * asserted here, against offsets derived from the window rather than from the formula.
+	 *
+	 * The service's window is deliberately 6 hours, not the 48 every other approval fixture in this
+	 * suite uses: 48 is also `Settings`' and the schema column's default and `HoldBooking`'s own
+	 * fallback, so a window that only ever measured 48 hours could not tell "read from the service
+	 * row" apart from "hardcoded". 6 hours can only have come from the service.
+	 *
+	 * The hold is minted against the wall clock rather than this suite's usual week-ahead fixture
+	 * instant, because `holdExpiresAt()` anchors the TTL to `max(injected now, wall clock)` - with a
+	 * week-ahead "now" the window would be a week plus the service's hours, and the derivation would
+	 * be unreadable. The tolerance below absorbs the sub-second gap between that anchor and the
+	 * `created_at` the database stamps a moment later.
+	 */
+	public function testApprovalTimersLandOnTheServicesOwnWindow(): void {
+		global $wpdb;
+		$booking = HoldBooking::make( $wpdb )->execute(
+			new HoldRequest(
+				$this->customer(),
+				new AppointmentRequest( $this->utc( 1, '09:00' ), array( new SegmentChoice( $this->shortWindowServiceId ) ) )
+			),
+			new \DateTimeImmutable( 'now', new \DateTimeZone( 'UTC' ) )
+		);
+
+		$utc     = new \DateTimeZone( 'UTC' );
+		$created = ( new \DateTimeImmutable( (string) $booking['created_at'], $utc ) )->getTimestamp();
+		$expires = ( new \DateTimeImmutable( (string) $booking['hold_expires_at'], $utc ) )->getTimestamp();
+
+		// The window itself came from the service row: 6 hours, not the 48-hour default.
+		self::assertEqualsWithDelta(
+			self::SHORT_WINDOW_HOURS * HOUR_IN_SECONDS,
+			$expires - $created,
+			5,
+			'The approval window must be the service\'s own approval_hold_hours.'
+		);
+
+		$byPercent = array();
+		foreach ( $this->scheduledForUuid( Jobs::NAG, $booking['uuid'] ) as $nag ) {
+			$byPercent[ (int) $nag['args'][1] ] = $nag['ts'];
+		}
+		ksort( $byPercent );
+		self::assertSame( array( 25, 50, 75 ), array_keys( $byPercent ) );
+
+		// A quarter, a half and three quarters of six hours after the request was made.
+		self::assertEqualsWithDelta( $created + ( 90 * MINUTE_IN_SECONDS ), $byPercent[25], 5, 'The 25% nag is not a quarter of the way through the window.' );
+		self::assertEqualsWithDelta( $created + ( 3 * HOUR_IN_SECONDS ), $byPercent[50], 5, 'The 50% nag is not halfway through the window.' );
+		self::assertEqualsWithDelta( $created + ( 270 * MINUTE_IN_SECONDS ), $byPercent[75], 5, 'The 75% nag is not three quarters of the way through the window.' );
+
+		$timeouts = $this->scheduledForUuid( Jobs::TIMEOUT, $booking['uuid'] );
+		self::assertCount( 1, $timeouts );
+		// Exact, not approximate: the timeout fires at the deadline the row itself carries, so that
+		// `ExpireHolds`' own `hold_expires_at <= UTC_NOW()` check is true the moment it runs.
+		self::assertSame( $expires, $timeouts[0]['ts'], 'The timeout must be scheduled at hold_expires_at exactly.' );
 	}
 
 	public function testHoldWithoutApprovalSchedulesNothing(): void {

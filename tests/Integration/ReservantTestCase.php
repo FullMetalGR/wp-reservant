@@ -4,6 +4,7 @@ declare( strict_types=1 );
 namespace Reservant\Tests\Integration;
 
 use Reservant\Infrastructure\Db\Migrations;
+use Reservant\Infrastructure\Scheduler\Jobs;
 
 abstract class ReservantTestCase extends \WP_UnitTestCase {
 
@@ -14,6 +15,7 @@ abstract class ReservantTestCase extends \WP_UnitTestCase {
 		foreach ( Migrations::tables() as $table ) {
 			$wpdb->query( "TRUNCATE TABLE {$wpdb->prefix}{$table}" ); // phpcs:ignore WordPress.DB.PreparedSQL
 		}
+		self::clearScheduledActions();
 		// wp_options is not truncated above (only the plugin's own tables are), and core's
 		// per-test transaction rollback does not clear the object cache - `update_option()` writes
 		// through to both, so a value another test wrote can otherwise survive into this one even
@@ -23,6 +25,40 @@ abstract class ReservantTestCase extends \WP_UnitTestCase {
 		// not state a test could see stale. This used to be an opt-in per test class (`SettingsTest`,
 		// `AdminSettingsTest`); hoisted here so the leak cannot recur in a class that forgets it.
 		delete_option( 'reservant_settings' );
+	}
+
+	/**
+	 * Action Scheduler's tables are outside every isolation mechanism this suite has.
+	 *
+	 * They are not among the plugin tables truncated above, and WordPress's per-test transaction does
+	 * not cover them either: `TransactionRunner`'s own `START TRANSACTION` (AGENTS.md section 2.2)
+	 * implicitly commits the enclosing one, so every approval hold a test mints leaves its three nag
+	 * rows and its timeout row behind - permanently, across whole suite runs, on a wp-env volume that
+	 * is never recreated. Observed at 1422 pending rows, at which point a booking's own three nags
+	 * straddled `as_get_scheduled_actions()`'s page window and `JobsTest` failed with two of them.
+	 * Raising `per_page` would only move the cliff; this removes it.
+	 *
+	 * Scoped to the plugin's own group, and the recurring sweeper is deliberately spared: it is
+	 * created once per process by `Plugin::register()`'s `init` hook, exactly as it is on a live
+	 * site, and deleting it would misrepresent the environment for every later test (and quietly
+	 * gut `JobsTest::testSweepIsAlreadyScheduledByPluginRegistration`). Nothing else in the group
+	 * belongs to a test that has finished.
+	 */
+	private static function clearScheduledActions(): void {
+		global $wpdb;
+		if ( ! function_exists( 'as_get_scheduled_actions' ) ) {
+			return;
+		}
+		$wpdb->query(
+			$wpdb->prepare(
+				"DELETE a, l FROM {$wpdb->prefix}actionscheduler_actions a
+				 INNER JOIN {$wpdb->prefix}actionscheduler_groups g ON g.group_id = a.group_id
+				 LEFT JOIN {$wpdb->prefix}actionscheduler_logs l ON l.action_id = a.action_id
+				 WHERE g.slug = %s AND a.hook <> %s", // phpcs:ignore WordPress.DB.PreparedSQL
+				'reservant',
+				Jobs::SWEEP
+			)
+		);
 	}
 
 	/**
