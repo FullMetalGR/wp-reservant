@@ -2,11 +2,10 @@ import { __ } from '@wordpress/i18n';
 import { Button, Modal, Notice, Spinner } from '@wordpress/components';
 import type { UseMutationResult } from '@tanstack/react-query';
 import { bootConfig } from '../boot';
-import { errorMessage } from '../api/client';
 import { useApprove, useBooking, useCancelBooking, useOutcome, useReject } from '../api/queries';
 import type { BookingDetail, BookingStatus, BookingSummary } from '../api/types';
-import { utcToSite } from '../calendar/adapter';
 import { useToasts } from '../components/Toasts';
+import { errorMessage, utcToSite } from '../../shared';
 
 /** Every booking hold class (AGENTS.md section 2.3) plus `confirmed` - Cancel is offered on all four. */
 const CANCELLABLE_STATUSES: readonly BookingStatus[] = [ 'pending', 'awaiting_approval', 'awaiting_payment', 'confirmed' ];
@@ -34,7 +33,7 @@ function canMarkOutcome( caps: string[], status: BookingStatus, started: boolean
 /**
  * `*_utc` fields are a `DATETIME` column, always `Y-m-d H:i:s` (occasionally `Y-m-dTH:i:s` on a
  * hand-built fixture) - never a bare `Date(str)` parse (the space-separated MySQL form is not part
- * of the ECMAScript-guaranteed grammar, `adapter.ts`'s own `parseUtc` docblock explains why), but
+ * of the ECMAScript-guaranteed grammar, `shared/time.ts`'s own `parseUtc` docblock explains why), but
  * once normalized to `Y-m-dTH:i:sZ` it is exactly that grammar, so every engine parses it alike.
  */
 function parseUtcInstant( value: string ): number {

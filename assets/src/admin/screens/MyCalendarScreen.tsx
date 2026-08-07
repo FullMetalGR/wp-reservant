@@ -5,8 +5,9 @@ import { addDays } from 'date-fns';
 import { bootConfig } from '../boot';
 import { useCalendar } from '../api/queries';
 import { toEvents, type CalEvent } from '../calendar/adapter';
-import { CalendarNav, rangeFor, siteNow, type CalView } from '../calendar/navigation';
+import { CalendarNav, rangeFor, type CalView } from '../calendar/navigation';
 import { ReservantCalendar } from '../calendar/ReservantCalendar';
+import { siteNow } from '../../shared';
 
 /**
  * A staff member's own schedule (Task 14 brief): the same week/day grid as `CalendarScreen`, but

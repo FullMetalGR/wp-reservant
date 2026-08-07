@@ -1,4 +1,5 @@
-import { apiFetch, ApiError, errorMessage } from '../api/client';
+import { apiFetch } from '../api/client';
+import { ApiError, errorMessage } from '../../shared';
 
 function jsonResponse( body: unknown, status = 200 ): Response {
 	return {

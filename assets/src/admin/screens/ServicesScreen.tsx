@@ -2,11 +2,12 @@ import { useState } from '@wordpress/element';
 import { __, sprintf } from '@wordpress/i18n';
 import { Button, CheckboxControl, Modal, Notice, SelectControl, Spinner, TextControl } from '@wordpress/components';
 import { bootConfig } from '../boot';
-import { errorMessage, isReferencedConflict } from '../api/client';
+import { isReferencedConflict } from '../api/client';
 import { useDeleteService, useSaveService, useSeatMaps, useServices } from '../api/queries';
 import type { ApprovalTimeout, PaymentMode, Service, ServiceType } from '../api/types';
 import { RowSelectButton } from '../components/RowSelectButton';
 import { useToasts } from '../components/Toasts';
+import { errorMessage } from '../../shared';
 
 const TYPE_OPTIONS: { value: ServiceType; label: string }[] = [
 	{ value: 'appointment', label: __( 'Appointment', 'reservant' ) },

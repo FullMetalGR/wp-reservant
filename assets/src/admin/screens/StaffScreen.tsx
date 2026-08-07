@@ -1,7 +1,6 @@
 import { useState } from '@wordpress/element';
 import { __, sprintf } from '@wordpress/i18n';
 import { Button, CheckboxControl, ComboboxControl, Notice, SelectControl, Spinner, TextControl } from '@wordpress/components';
-import { errorMessage } from '../api/client';
 import {
 	useAddException,
 	useExceptions,
@@ -16,6 +15,7 @@ import {
 import type { AvailabilityExceptionListItem, Resource, Service } from '../api/types';
 import { RowSelectButton } from '../components/RowSelectButton';
 import { useToasts } from '../components/Toasts';
+import { errorMessage } from '../../shared';
 
 /** ISO-8601: 1 = Monday .. 7 = Sunday (`AvailabilityRule`'s own convention). */
 const WEEKDAYS: { value: number; label: string }[] = [

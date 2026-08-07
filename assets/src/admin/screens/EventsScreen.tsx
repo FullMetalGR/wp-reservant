@@ -2,11 +2,11 @@ import { useState } from '@wordpress/element';
 import { __, sprintf } from '@wordpress/i18n';
 import { Button, Modal, Notice, SelectControl, Spinner, TextControl } from '@wordpress/components';
 import { bootConfig } from '../boot';
-import { errorMessage, isReferencedConflict } from '../api/client';
+import { isReferencedConflict } from '../api/client';
 import { useCancelOccurrence, useOccurrences, useSaveOccurrence, useServices } from '../api/queries';
 import type { Occurrence, Service } from '../api/types';
-import { siteToUtc, utcToSite } from '../calendar/adapter';
 import { useToasts } from '../components/Toasts';
+import { errorMessage, siteToUtc, utcToSite } from '../../shared';
 
 /**
  * Event services only - an occurrence has no meaning for an appointment service. Inactive event

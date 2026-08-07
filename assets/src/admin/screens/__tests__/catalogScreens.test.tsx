@@ -2,9 +2,10 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import '@testing-library/jest-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { ReactElement } from 'react';
-import { ApiError, apiFetch } from '../../api/client';
+import { apiFetch } from '../../api/client';
 import type { Resource, Service } from '../../api/types';
 import { ToastProvider } from '../../components/Toasts';
+import { ApiError } from '../../../shared';
 import { ServicesScreen } from '../ServicesScreen';
 import { StaffScreen } from '../StaffScreen';
 
