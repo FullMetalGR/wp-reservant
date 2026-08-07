@@ -17,6 +17,13 @@ use Reservant\Rest\Routes;
  * admins or by the staff member assigned to the booking"). The calendar and availability reads
  * accept either capability, since a staff member's own-schedule view has to be able to see what is
  * free as well as what is booked.
+ *
+ * The catalog is `reservant_manage_settings` throughout with exactly two exceptions: GET
+ * /admin/services and GET /admin/resources also accept `reservant_manage_bookings`
+ * (`AdminGuard::readCatalog()`), because the Calendar and Bookings screens are gated on that cap
+ * and cannot render their staff filter, service filter or manual-booking drawer without those two
+ * lists. Both are reads of the collection only - every write, and every other catalog route,
+ * including the single-item reads, stays on `reservant_manage_settings`.
  */
 final class AdminRoutes {
 
@@ -189,7 +196,7 @@ final class AdminRoutes {
 				array(
 					'methods'             => \WP_REST_Server::READABLE,
 					'callback'            => array( $services, 'index' ),
-					'permission_callback' => array( $guard, 'manageSettings' ),
+					'permission_callback' => array( $guard, 'readCatalog' ),
 					'args'                => self::includeInactiveArgs(),
 				),
 				array(
@@ -232,7 +239,7 @@ final class AdminRoutes {
 				array(
 					'methods'             => \WP_REST_Server::READABLE,
 					'callback'            => array( $resources, 'index' ),
-					'permission_callback' => array( $guard, 'manageSettings' ),
+					'permission_callback' => array( $guard, 'readCatalog' ),
 					'args'                => self::includeInactiveArgs(),
 				),
 				array(

@@ -112,20 +112,24 @@ final class AdminCatalogTest extends ReservantTestCase {
 		$service  = $this->createServiceAsAdmin();
 		$resource = $this->createResourceAsAdmin();
 
+		// Third element is what a manage_bookings holder without manage_settings gets. The two
+		// collection reads are 200 because the Calendar and Bookings screens - gated on
+		// manage_bookings - cannot render a staff filter, a service filter or the manual-booking
+		// drawer without them (AdminGuard::readCatalog()). Everything else stays 403.
 		$routes = array(
-			array( 'GET', '/reservant/v1/admin/services' ),
-			array( 'GET', "/reservant/v1/admin/services/{$service['id']}" ),
-			array( 'GET', '/reservant/v1/admin/resources' ),
-			array( 'GET', "/reservant/v1/admin/resources/{$resource['id']}" ),
-			array( 'GET', '/reservant/v1/admin/exceptions' ),
+			array( 'GET', '/reservant/v1/admin/services', 200 ),
+			array( 'GET', "/reservant/v1/admin/services/{$service['id']}", 403 ),
+			array( 'GET', '/reservant/v1/admin/resources', 200 ),
+			array( 'GET', "/reservant/v1/admin/resources/{$resource['id']}", 403 ),
+			array( 'GET', '/reservant/v1/admin/exceptions', 403 ),
 		);
-		foreach ( $routes as list( $method, $route ) ) {
+		foreach ( $routes as list( $method, $route, $bookingManagerStatus ) ) {
 			$this->asAnonymous();
 			self::assertSame( 401, $this->request( $method, $route )->get_status(), $route );
 			$this->asSubscriber();
 			self::assertSame( 403, $this->request( $method, $route )->get_status(), $route );
 			$this->asBookingManager();
-			self::assertSame( 403, $this->request( $method, $route )->get_status(), "manage_bookings alone must not reach {$route}" );
+			self::assertSame( $bookingManagerStatus, $this->request( $method, $route )->get_status(), "manage_bookings alone on {$route}" );
 			$this->asAdmin();
 			self::assertSame( 200, $this->request( $method, $route )->get_status(), $route );
 		}

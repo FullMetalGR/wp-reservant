@@ -41,6 +41,30 @@ final class AdminGuard {
 		return is_user_logged_in() ? self::forbidden() : self::unauthorized();
 	}
 
+	/**
+	 * Catalog LISTS, readable by a settings admin or by anyone who can manage bookings.
+	 *
+	 * The Calendar and Bookings screens are gated on `reservant_manage_bookings`, but neither can
+	 * render without the staff and service lists - the staff filter, the service filter and the
+	 * manual-booking drawer are all built from them. With those lists behind
+	 * `reservant_manage_settings`, a composed "front desk" role (manage_bookings +
+	 * approve_bookings) - exactly the delegation these custom capabilities exist to enable - got
+	 * both pages with three permanently empty pickers while POST /admin/bookings was allowed for
+	 * it. The capability model only actually worked for someone holding all four caps.
+	 *
+	 * Widened for READS only, and only for the two collection routes those screens fetch. Every
+	 * write, every single-item read and every other catalog route stays on `reservant_manage_settings`,
+	 * so a manage_bookings holder can see the catalog and still not touch it.
+	 *
+	 * @return true|\WP_Error
+	 */
+	public function readCatalog(): bool|\WP_Error {
+		if ( current_user_can( 'reservant_manage_settings' ) || current_user_can( 'reservant_manage_bookings' ) ) {
+			return true;
+		}
+		return is_user_logged_in() ? self::forbidden() : self::unauthorized();
+	}
+
 	/** @return true|\WP_Error */
 	private static function gate( string $capability ): bool|\WP_Error {
 		if ( current_user_can( $capability ) ) {
