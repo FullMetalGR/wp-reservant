@@ -126,6 +126,8 @@ const eventPropGetter: EventPropGetter< CalEvent > = ( event ) => {
  * did. `readOnly` suppresses slot selection (no new-booking affordance); event selection (viewing a
  * booking's detail) is controlled purely by whether the caller passed `onSelectEvent`.
  */
+function noop(): void {}
+
 export function ReservantCalendar( {
 	events,
 	view,
@@ -163,6 +165,15 @@ export function ReservantCalendar( {
 			date={ date }
 			views={ [ 'week', 'day' ] }
 			toolbar={ false }
+			// `view`/`date` are CONTROLLED here - the owning screen holds them in its own state and
+			// drives them from `CalendarNav`, which is why the library's own toolbar is off. react-big-
+			// calendar still requires a handler for each controlled prop (it warns "This will render a
+			// read-only field" otherwise, on every single render), so these acknowledge that
+			// navigation is owned upstream rather than leaving the props unpaired. Nothing inside the
+			// grid can fire them: with `toolbar={false}` and only week/day views there is no in-grid
+			// navigation or drilldown to trigger a change the screen has not already made itself.
+			onView={ noop }
+			onNavigate={ noop }
 			step={ step }
 			timeslots={ timeslots }
 			selectable={ canSelectSlots }

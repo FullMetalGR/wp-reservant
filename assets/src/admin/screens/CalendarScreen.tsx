@@ -1,66 +1,25 @@
 import { useMemo, useState } from '@wordpress/element';
 import { __ } from '@wordpress/i18n';
-import { Button, ButtonGroup, Notice, SelectControl } from '@wordpress/components';
-import { addDays, format, startOfWeek } from 'date-fns';
+import { Notice, SelectControl } from '@wordpress/components';
+import { addDays, format } from 'date-fns';
 import { bootConfig } from '../boot';
 import { useCalendar, useResources } from '../api/queries';
 import type { Resource } from '../api/types';
-import { toEvents, utcToSite, type CalEvent } from '../calendar/adapter';
+import { toEvents, type CalEvent } from '../calendar/adapter';
+import { CalendarNav, rangeFor, siteNow, type CalView } from '../calendar/navigation';
 import { ReservantCalendar, type CalendarSlot } from '../calendar/ReservantCalendar';
 import { BookingDrawer } from './BookingDrawer';
 import { ManualBookingDrawer } from './ManualBookingDrawer';
 
-export type CalView = 'week' | 'day';
-
-/** "Now", expressed as the site-local `Date` the calendar/adapter work in (see `utcToSite`). */
-export function siteNow( tz: string ): Date {
-	return utcToSite( new Date().toISOString().slice( 0, 19 ).replace( 'T', ' ' ), tz );
-}
-
 /**
- * The `{from, to}` business-date window (`useCalendar`'s `CalendarRange`, `to` exclusive) that
- * covers `date`'s week or day, in site-local terms. `date` is itself a site-local-packed `Date`
- * (see `utcToSite`), and `date-fns`'s `startOfWeek`/`addDays`/`format` all read/write through the
- * same LOCAL getters that packing relies on, so this stays correct without any tz argument of its
- * own.
+ * "All staff" plus every ACTIVE resource, in the shape `<SelectControl>` wants.
+ *
+ * `useResources()` deliberately returns inactive rows too (the catalog screen needs them to be
+ * reactivatable at all), so this filter is load-bearing rather than decorative: a departed staff
+ * member must not be offered as the target of a NEW booking made from an empty calendar slot.
+ * `BookingsScreen`'s own staff filter makes the opposite choice, and correctly - filtering the
+ * booking HISTORY by a since-deactivated staff member is exactly what you want to be able to do.
  */
-export function rangeFor( date: Date, view: CalView ): { from: string; to: string } {
-	if ( 'day' === view ) {
-		return { from: format( date, 'yyyy-MM-dd' ), to: format( addDays( date, 1 ), 'yyyy-MM-dd' ) };
-	}
-	const start = startOfWeek( date );
-	return { from: format( start, 'yyyy-MM-dd' ), to: format( addDays( start, 7 ), 'yyyy-MM-dd' ) };
-}
-
-interface CalendarNavProps {
-	view: CalView;
-	onChangeView: ( view: CalView ) => void;
-	onNavigate: ( direction: 1 | -1 ) => void;
-	onToday: () => void;
-}
-
-/** The week/day toggle plus Previous/Today/Next date nav - shared by `CalendarScreen` and `MyCalendarScreen`. */
-export function CalendarNav( { view, onChangeView, onNavigate, onToday }: CalendarNavProps ) {
-	return (
-		<>
-			<ButtonGroup>
-				<Button variant={ 'week' === view ? 'primary' : 'secondary' } onClick={ () => onChangeView( 'week' ) }>
-					{ __( 'Week', 'reservant' ) }
-				</Button>
-				<Button variant={ 'day' === view ? 'primary' : 'secondary' } onClick={ () => onChangeView( 'day' ) }>
-					{ __( 'Day', 'reservant' ) }
-				</Button>
-			</ButtonGroup>
-			<ButtonGroup>
-				<Button onClick={ () => onNavigate( -1 ) }>{ __( 'Previous', 'reservant' ) }</Button>
-				<Button onClick={ onToday }>{ __( 'Today', 'reservant' ) }</Button>
-				<Button onClick={ () => onNavigate( 1 ) }>{ __( 'Next', 'reservant' ) }</Button>
-			</ButtonGroup>
-		</>
-	);
-}
-
-/** "All staff" plus every active resource, in the shape `<SelectControl>` wants. */
 function staffOptions( resources: Resource[] ): { label: string; value: string }[] {
 	return [
 		{ label: __( 'All staff', 'reservant' ), value: 'all' },

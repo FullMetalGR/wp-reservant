@@ -4,8 +4,10 @@ import { Button, CheckboxControl, Modal, Notice, SelectControl, Spinner, TextCon
 import { addDays, format } from 'date-fns';
 import type { UseQueryResult } from '@tanstack/react-query';
 import { bootConfig } from '../boot';
+import { errorMessage } from '../api/client';
 import { useAdminAvailability, useManualBooking, useResources, useServices } from '../api/queries';
 import type { AvailabilityResponse, AvailabilityStart, ManualBookingSegment, Resource, Service } from '../api/types';
+import { siteToday } from '../calendar/navigation';
 import { useToasts } from '../components/Toasts';
 
 interface SegmentState {
@@ -18,6 +20,13 @@ const NO_SERVICE = '0';
 /** `SelectControl`'s "no pin" option for the per-segment staff select. */
 const ANY_STAFF = '';
 
+/**
+ * Both selects below filter on `status === 'active'`, and those filters are load-bearing:
+ * `useServices()`/`useResources()` fetch the FULL catalog (`include_inactive=1` - the catalog
+ * screens need inactive rows to be reactivatable, and `BookingsScreen` needs them to filter history
+ * by a departed staff member). A retired service or a departed staff member must never be offered
+ * as the target of a booking being created right now.
+ */
 function serviceOptions( services: Service[] ): { label: string; value: string }[] {
 	return [
 		{ label: __( 'Select a service', 'reservant' ), value: NO_SERVICE },
@@ -209,7 +218,7 @@ function CustomerFields( {
 
 export interface ManualBookingDrawerProps {
 	onClose: () => void;
-	/** Prefill from a calendar slot click (`yyyy-MM-dd`); defaults to today when omitted. */
+	/** Prefill from a calendar slot click (`yyyy-MM-dd`); defaults to the SITE's today when omitted. */
 	initialDate?: string;
 	/** Prefill the first segment's staff pin from the calendar's own staff filter. */
 	initialResourceId?: number;
@@ -228,7 +237,11 @@ export function ManualBookingDrawer( { onClose, initialDate, initialResourceId }
 	const { timezone } = bootConfig();
 	const { addToast } = useToasts();
 
-	const [ date, setDate ] = useState( initialDate ?? format( new Date(), 'yyyy-MM-dd' ) );
+	// `siteToday( timezone )`, never `format( new Date(), ... )`: the default day must be the
+	// BUSINESS's today, not the admin's laptop's. See `calendar/navigation.ts`'s `siteNow` docblock -
+	// an owner in US/Pacific opening this drawer at 16:00 local is already on the next day at a
+	// Europe/Athens business, and a host-local default would fetch the wrong day's slots.
+	const [ date, setDate ] = useState( () => initialDate ?? siteToday( timezone ) );
 	const [ segments, setSegments ] = useState< SegmentState[] >( [ { serviceId: 0, resourceId: initialResourceId } ] );
 	const [ sameStaff, setSameStaff ] = useState( false );
 	const [ selectedStart, setSelectedStart ] = useState< AvailabilityStart | null >( null );
@@ -305,8 +318,7 @@ export function ManualBookingDrawer( { onClose, initialDate, initialResourceId }
 					addToast( __( 'Booking created.', 'reservant' ) );
 					onClose();
 				},
-				onError: ( error ) =>
-					addToast( error instanceof Error ? error.message : __( 'Could not create the booking.', 'reservant' ), 'error' ),
+				onError: ( error ) => addToast( errorMessage( error ), 'error' ),
 			}
 		);
 	}
