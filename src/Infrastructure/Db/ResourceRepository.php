@@ -158,6 +158,38 @@ final class ResourceRepository {
 	}
 
 	/**
+	 * The public catalog's `resources` embed (`GET /services`, AGENTS.md section 5): id and name
+	 * only, selected in SQL rather than fetched-then-unset, so the narrow projection cannot widen
+	 * by accident on a route nobody authenticates to. Bookable staff only, mirroring
+	 * `activeIdsForService()`; ordered deterministically for the same reason
+	 * `ServiceRepository::allActive()` is.
+	 *
+	 * @return list<array{id: int, name: string}>
+	 */
+	public function publicSummaryForService( int $serviceId ): array {
+		$p    = $this->db->prefix;
+		$rows = $this->db->get_results(
+			$this->db->prepare(
+				"SELECT r.id, r.name
+				 FROM {$p}reservant_service_resource sr
+				 JOIN {$p}reservant_resources r ON r.id = sr.resource_id
+				 WHERE sr.service_id = %d AND r.status = 'active'
+				 ORDER BY r.name ASC, r.id ASC", // phpcs:ignore WordPress.DB.PreparedSQL
+				$serviceId
+			),
+			ARRAY_A
+		);
+		/** @var list<array<string, mixed>> $rows */
+		return array_map(
+			static fn ( array $row ): array => array(
+				'id'   => (int) $row['id'],
+				'name' => (string) $row['name'],
+			),
+			$rows
+		);
+	}
+
+	/**
 	 * Bookable staff only - a deactivated resource keeps its links but takes no new work.
 	 *
 	 * @return list<int> ascending

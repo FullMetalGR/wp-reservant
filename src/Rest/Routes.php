@@ -32,6 +32,17 @@ final class Routes {
 		$availability = new AvailabilityController( $this->db );
 		$holds        = new HoldsController( $this->db );
 		$bookings     = new BookingsController( $this->db );
+		$services     = new ServicesController( $this->db );
+
+		register_rest_route(
+			self::NS,
+			'/services',
+			array(
+				'methods'             => \WP_REST_Server::READABLE,
+				'callback'            => array( $services, 'index' ),
+				'permission_callback' => array( $this, 'allowPublic' ),
+			)
+		);
 
 		register_rest_route(
 			self::NS,

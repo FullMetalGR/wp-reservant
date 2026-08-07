@@ -69,6 +69,26 @@ final class ServiceRepository {
 	}
 
 	/**
+	 * The public catalog (`GET /services`, AGENTS.md section 5): active services only, in the
+	 * deterministic name-then-id order the booking widget needs so its list does not reshuffle
+	 * between page loads. Not the same query as `all(false)`: that method hides only rows whose
+	 * status is literally `inactive` and orders by id, whereas this mirrors the single-service
+	 * route's own definition of "active" (`AvailabilityController::service()`, `'active' ===
+	 * $service['status']`) so a future third status does not silently become bookable here.
+	 *
+	 * @return list<array<string, mixed>>
+	 */
+	public function allActive(): array {
+		$p    = $this->db->prefix;
+		$rows = $this->db->get_results(
+			"SELECT * FROM {$p}reservant_services WHERE status = 'active' ORDER BY name ASC, id ASC", // phpcs:ignore WordPress.DB.PreparedSQL
+			ARRAY_A
+		);
+		/** @var list<array<string, mixed>> $rows */
+		return array_map( array( self::class, 'castRow' ), $rows );
+	}
+
+	/**
 	 * A partial column update - only the given fields change, plus `updated_at`. Used for both
 	 * ordinary edits and the `setStatus()` deactivate shortcut.
 	 *
