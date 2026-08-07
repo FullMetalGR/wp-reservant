@@ -263,7 +263,7 @@ function exceptionPath( resourceId: number | null ): string {
 	return null === resourceId ? '/admin/exceptions' : `/admin/resources/${ resourceId }/exceptions`;
 }
 
-/** Both mutations below invalidate the `useExceptions()` cache entry the change actually affects, plus `['resources']` for a resource-scoped change (its `Resource.exceptions` embed). */
+/** Both mutations below invalidate the `useExceptions()` cache entry the change actually affects, plus `['resources']` for a resource-scoped change - the wire's own resource row still carries an `exceptions` association (`ResourcesAdminController::attachAssociations()`), even though the `Resource` TS type no longer declares it since nothing reads it off a cached resource any more. */
 function invalidateExceptionCaches( queryClient: ReturnType< typeof useQueryClient >, resourceId: number | null ): void {
 	void queryClient.invalidateQueries( { queryKey: [ 'exceptions', resourceId ?? 'business' ] } );
 	if ( null !== resourceId ) {

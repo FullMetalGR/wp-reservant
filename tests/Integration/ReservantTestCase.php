@@ -14,6 +14,15 @@ abstract class ReservantTestCase extends \WP_UnitTestCase {
 		foreach ( Migrations::tables() as $table ) {
 			$wpdb->query( "TRUNCATE TABLE {$wpdb->prefix}{$table}" ); // phpcs:ignore WordPress.DB.PreparedSQL
 		}
+		// wp_options is not truncated above (only the plugin's own tables are), and core's
+		// per-test transaction rollback does not clear the object cache - `update_option()` writes
+		// through to both, so a value another test wrote can otherwise survive into this one even
+		// though its DB row is gone. `reservant_settings` is the only option user-facing code
+		// writes in a way tests observe (`Settings::update()`); `reservant_version`/
+		// `reservant_db_version` are upgrade-trigger markers every relevant call sets fresh anyway,
+		// not state a test could see stale. This used to be an opt-in per test class (`SettingsTest`,
+		// `AdminSettingsTest`); hoisted here so the leak cannot recur in a class that forgets it.
+		delete_option( 'reservant_settings' );
 	}
 
 	/**

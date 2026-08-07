@@ -13,12 +13,8 @@ use Reservant\Settings;
 
 final class SettingsTest extends ReservantTestCase {
 
-	public function set_up(): void {
-		parent::set_up();
-		// wp_options is not truncated between tests (only plugin tables are); a value left behind
-		// by another test must not leak into these assertions.
-		delete_option( 'reservant_settings' );
-	}
+	// `reservant_settings` starts clean every test - `ReservantTestCase::set_up()`'s own doc block
+	// explains why this has to be more than the table truncation just above it in that method.
 
 	public function testDefaultsWithNoOptionRow(): void {
 		$settings = Settings::make();

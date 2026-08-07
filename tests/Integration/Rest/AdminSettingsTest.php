@@ -23,11 +23,7 @@ final class AdminSettingsTest extends ReservantTestCase {
 	public function set_up(): void {
 		parent::set_up();
 		Capabilities::sync();
-		// wp_options is not truncated between tests (only plugin tables are - see
-		// ReservantTestCase::set_up()); a value left behind by another test (e.g.
-		// SettingsTest's own writes) must not leak into these assertions, same guard that
-		// class's own set_up() already documents and applies.
-		delete_option( 'reservant_settings' );
+		// `reservant_settings` already starts clean every test - `ReservantTestCase::set_up()`.
 	}
 
 	// ---------------------------------------------------------------- auth helpers

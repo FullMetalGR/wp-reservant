@@ -206,7 +206,15 @@ export interface AvailabilityException {
 	end_time: string | null;
 }
 
-/** `ResourcesAdminController::present()` - the resource row plus its links, rules and exceptions. */
+/**
+ * `ResourcesAdminController::present()`/`attachAssociations()` - the resource row plus its links
+ * and rules. The wire response also carries `exceptions` (the same association, still attached
+ * server-side to every `GET /admin/resources`/`{id}` row) - omitted here because no frontend code
+ * reads it off a `Resource` any more: `StaffScreen`'s own exceptions panels load through
+ * `useExceptions()` (`GET /admin/exceptions`, Task 16b), a request scoped to exactly the resource
+ * (or business-wide) list being shown, kept fresh by its own cache invalidation rather than by
+ * re-reading whatever a resource happened to carry at fetch time.
+ */
 export interface Resource {
 	id: number;
 	wp_user_id: number | null;
@@ -216,7 +224,6 @@ export interface Resource {
 	created_at: string;
 	service_ids: number[];
 	rules: AvailabilityRule[];
-	exceptions: AvailabilityException[];
 }
 
 /** `GET /admin/resources` response envelope. */
@@ -226,7 +233,7 @@ export interface ResourcesResponse {
 
 /**
  * `ResourcesAdminController::presentExceptionRow()` - `GET /admin/exceptions`'s listing shape
- * (Task 16b gap-filler). Distinct from `AvailabilityException` (the `POST`/`DELETE` and
+ * (Task 16b gap-filler). Distinct from `AvailabilityException` (the `POST`/`DELETE` and the wire's
  * `Resource.exceptions` shape: `date_local`/`closed`) - this is the read-side presentation: an
  * all-day closure is `start_time`/`end_time` both null rather than a separate `closed` flag, and
  * `reason` always echoes `''` since the schema carries no such column.

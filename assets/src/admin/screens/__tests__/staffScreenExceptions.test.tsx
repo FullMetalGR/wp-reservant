@@ -59,7 +59,6 @@ function resourceFixture( overrides: Partial< Resource > = {} ): Resource {
 		created_at: '2026-01-01 00:00:00',
 		service_ids: [],
 		rules: [],
-		exceptions: [],
 		...overrides,
 	};
 }

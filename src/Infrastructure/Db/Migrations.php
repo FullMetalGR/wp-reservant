@@ -199,23 +199,14 @@ final class Migrations {
 		foreach ( $schemas as $sql ) {
 			dbDelta( $sql );
 		}
-		self::grantCapabilities();
+		// Capability grants are `Admin\Capabilities::sync()`'s job, never duplicated here: both
+		// `Plugin::boot()`'s upgrade-trigger path and `Plugin::activate()` call `Migrations::run()`
+		// immediately followed by `Capabilities::sync()` (which grants the full set - AGENTS.md
+		// section 7's four caps, never `manage_options` - to `administrator`, a superset of what a
+		// former, now-removed `grantCapabilities()` here duplicated for one cap only). A caller
+		// that runs `Migrations::run()` on its own (`ReservantTestCase::set_up()`, every test) never
+		// needs to re-grant anything either: the SAME upgrade-trigger path already ran once, process
+		// -wide, the first time the plugin bootstrapped in that process.
 		update_option( 'reservant_db_version', defined( 'RESERVANT_VERSION' ) ? RESERVANT_VERSION : '' );
-	}
-
-	/**
-	 * Custom capabilities, never `manage_options` (AGENTS.md section 7).
-	 *
-	 * Only the administrator grant lands here; the `reservant_staff` role and the remaining caps
-	 * arrive with the admin surface. `get_role()` is null on a network where roles have not been
-	 * installed yet, and re-adding an existing cap would rewrite the roles option on every run -
-	 * both are guarded.
-	 */
-	private static function grantCapabilities(): void {
-		$role = get_role( 'administrator' );
-		if ( null === $role || $role->has_cap( 'reservant_manage_bookings' ) ) {
-			return;
-		}
-		$role->add_cap( 'reservant_manage_bookings' );
 	}
 }
