@@ -303,6 +303,50 @@ final class AdminCatalogTest extends ReservantTestCase {
 		self::assertCount( 2, $data['rules'] );
 	}
 
+	/**
+	 * Task 17 finding: `GET /admin/resources` (the list every catalog screen loads through -
+	 * `useResources()`) used to return bare `reservant_resources` columns, never the
+	 * `service_ids`/`rules`/`exceptions` associations `GET /admin/resources/{id}` attaches via
+	 * `present()`. The `Resource` TypeScript type declares all three non-optional and several
+	 * screens dereference them unconditionally the moment a resource loads - `ManualBookingDrawer`'s
+	 * `staffOptionsForService()` (`resource.service_ids.includes(...)`) crashed the whole admin SPA
+	 * the instant the "New booking" drawer opened with any real resource in the list. The admin
+	 * smoke e2e spec (`tests/e2e/admin-smoke.spec.ts`) is what surfaced this - every existing
+	 * integration test that reaches this route only asserted its HTTP status
+	 * (`test_permission_matrix_for_catalog_routes`), never the shape of a resource row inside it.
+	 */
+	public function test_resource_list_carries_service_ids_and_rules_like_the_single_resource_shape(): void {
+		$this->asAdmin();
+		$service = $this->createService();
+
+		$this->jsonRequest(
+			'POST',
+			'/reservant/v1/admin/resources',
+			array(
+				'name'        => 'Alex',
+				'service_ids' => array( $service['id'] ),
+				'rules'       => array( array( 'weekday' => 1, 'start_time' => '09:00', 'end_time' => '17:00' ) ),
+			)
+		);
+
+		$listed = $this->request( 'GET', '/reservant/v1/admin/resources' );
+		self::assertSame( 200, $listed->get_status() );
+		/** @var list<array<string, mixed>> $resources */
+		$resources = $listed->get_data()['resources'];
+		self::assertNotSame( array(), $resources );
+
+		$alex = null;
+		foreach ( $resources as $row ) {
+			if ( 'Alex' === $row['name'] ) {
+				$alex = $row;
+			}
+		}
+		self::assertNotNull( $alex, 'the created resource must appear in the list' );
+		self::assertSame( array( (int) $service['id'] ), $alex['service_ids'] );
+		self::assertCount( 1, $alex['rules'] );
+		self::assertSame( array(), $alex['exceptions'] );
+	}
+
 	public function test_resource_save_replaces_rules_atomically(): void {
 		$this->asAdmin();
 		$created = $this->jsonRequest(

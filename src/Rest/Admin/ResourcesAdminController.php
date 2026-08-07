@@ -43,11 +43,20 @@ final class ResourcesAdminController {
 
 	public function __construct( private readonly \wpdb $db ) {}
 
-	/** GET /admin/resources */
+	/**
+	 * GET /admin/resources - every row carries `service_ids`/`rules`/`exceptions` too (the same
+	 * associations `show()` attaches via `present()`/`attachAssociations()`), not just the bare
+	 * `reservant_resources` columns: the `Resource` shape the SPA's `useResources()` (and every
+	 * screen built on it - the manual-booking drawer's staff-per-service filter, the staff
+	 * screen's own edit form) is typed against declares all three as always-present, non-optional
+	 * fields, and reads them unconditionally the moment a resource loads through this list.
+	 */
 	public function index( \WP_REST_Request $request ): \WP_REST_Response {
 		$includeInactive = (bool) $request->get_param( 'include_inactive' );
 		$rows            = ( new ResourceRepository( $this->db ) )->all( $includeInactive );
-		return new \WP_REST_Response( array( 'resources' => $rows ) );
+		return new \WP_REST_Response(
+			array( 'resources' => array_map( fn ( array $row ): array => self::attachAssociations( $this->db, $row ), $rows ) )
+		);
 	}
 
 	/** GET /admin/resources/{id} */
@@ -472,13 +481,28 @@ final class ResourcesAdminController {
 
 	/** @return array<string, mixed> */
 	private static function present( \wpdb $db, int $id ): array {
+		$repo     = new ResourceRepository( $db );
+		$resource = (array) $repo->find( $id );
+		return self::attachAssociations( $db, $resource );
+	}
+
+	/**
+	 * `service_ids`/`rules`/`exceptions` for one resource row, shared by `present()` (single
+	 * resource) and `index()` (the list) so both ever answer the same `Resource` shape - a row
+	 * missing any of the three is exactly the bug this method exists to make impossible to
+	 * reintroduce one call site at a time.
+	 *
+	 * @param array<string, mixed> $row
+	 * @return array<string, mixed>
+	 */
+	private static function attachAssociations( \wpdb $db, array $row ): array {
 		$repo         = new ResourceRepository( $db );
 		$availability = new AvailabilityRepository( $db );
+		$id           = (int) $row['id'];
 
-		$resource                = (array) $repo->find( $id );
-		$resource['service_ids'] = $repo->serviceIdsForResource( $id );
-		$resource['rules']       = $availability->rulesForResource( $id );
-		$resource['exceptions']  = $availability->exceptionsForResource( $id );
-		return $resource;
+		$row['service_ids'] = $repo->serviceIdsForResource( $id );
+		$row['rules']       = $availability->rulesForResource( $id );
+		$row['exceptions']  = $availability->exceptionsForResource( $id );
+		return $row;
 	}
 }
