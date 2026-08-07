@@ -2,6 +2,7 @@
   "name": "reservant",
   "private": true,
   "devDependencies": {
+    "@playwright/test": "^1.46",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
     "@types/jest": "^29.5.14",
@@ -17,6 +18,7 @@
     "build": "wp-scripts build admin=assets/src/admin/index.tsx --output-path=build",
     "start": "wp-scripts start admin=assets/src/admin/index.tsx --output-path=build",
     "test:js": "wp-scripts test-unit-js",
+    "test:e2e": "playwright test",
     "tsc": "tsc --noEmit"
   },
   "dependencies": {

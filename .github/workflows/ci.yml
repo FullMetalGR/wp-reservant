@@ -53,3 +53,13 @@ jobs:
       - run: npx wp-env start
       - run: composer test:integration
       - run: sudo apt-get install -y jq && chmod +x bin/run-concurrency.sh && ./bin/run-concurrency.sh
+      # Admin smoke e2e (AGENTS.md P4, final task): rebuilds the bundle (harmless if already
+      # current - the PHP suites above needed it too), installs the one browser the spec uses,
+      # then drives the running wp-env site through Playwright. `.wp-env.json`'s own
+      # `lifecycleScripts.afterStart` already switched the site to pretty permalinks as part of
+      # `wp-env start` above - a fresh WordPress install defaults to plain permalinks, under which
+      # any REST call carrying its own query string 404s (`rest_route=...` collides with the
+      # request's own `?`), so this is not optional environment polish.
+      - run: npm run build
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e

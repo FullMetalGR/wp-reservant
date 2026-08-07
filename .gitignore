@@ -3,3 +3,7 @@
 /build/
 .phpunit.cache/
 .phpunit.result.cache
+/test-results/
+/playwright-report/
+/blob-report/
+
