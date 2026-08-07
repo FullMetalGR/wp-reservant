@@ -31,6 +31,20 @@ import { expect, test } from '@playwright/test';
  * The drawer's date is deliberately pushed a week out rather than left on "today": the staff
  * member's weekly hours are seeded for every weekday precisely so this test's result does not
  * depend on what time of day (or which weekday) the suite happens to run.
+ *
+ * Permalinks: `.wp-env.json`'s `lifecycleScripts.afterStart` forces pretty permalinks
+ * (`wp rewrite structure '/%postname%/'`) on this environment. WordPress's own default for a
+ * fresh install is PLAIN permalinks, under which `rest_url()` returns a URL that already owns a
+ * `?` (`.../index.php?rest_route=/`) rather than a plain directory URL - a shape that broke this
+ * exact flow (`GET /admin/calendar` and `/admin/availability`, both query-bearing) until
+ * `assets/src/admin/api/client.ts`'s `buildRequestUrl()` was fixed to merge query strings rather
+ * than naively concatenate them. That fix is covered directly and exhaustively by
+ * `assets/src/admin/__tests__/client.test.ts` (exact-URL assertions under both permalink modes,
+ * with and without a query-bearing path) - far cheaper and more deterministic than running this
+ * whole multi-step browser flow twice, once per permalink mode, would be. The lifecycle hook stays
+ * for a different reason: it keeps this smoke test's environment deterministic (wp-env's own
+ * default permalink structure is not part of its documented contract) rather than to hide the
+ * permalink-join bug class, which jest now owns.
  */
 test( 'owner can configure a staff member and service, then book them end to end', async ( { page } ) => {
 	const unique = Date.now();

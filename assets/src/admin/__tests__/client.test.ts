@@ -132,4 +132,73 @@ describe( 'apiFetch', () => {
 		expect( error.status ).toBe( 404 );
 		expect( error.detail ).toBe( 'No route was found.' );
 	} );
+
+	// The bug this guards against: `rest_url()` (`src/Admin/AdminPage.php`) returns a plain
+	// directory URL under WordPress's PRETTY permalinks (`.../wp-json/`), but under PLAIN
+	// permalinks - WP core's own DEFAULT for a fresh install - it instead returns
+	// `.../index.php?rest_route=/`, a URL that already owns a `?` and treats the route itself as
+	// that parameter's value. Naive `${restRoot}${namespace}${path}` concatenation of a
+	// query-bearing path then opens a SECOND `?`, which PHP's query parser (splits only on `&`)
+	// folds into the `rest_route` value up to the path's own first `&` - 404 `rest_no_route` -
+	// while the remaining path args become bogus top-level params. Each case below asserts the
+	// exact final URL `fetch` is called with, under both permalink modes, with and without a
+	// query-bearing path.
+	describe( 'URL construction under both WordPress permalink modes', () => {
+		function setRestRoot( restRoot: string ): void {
+			( window as { reservantAdmin?: { restRoot: string } } ).reservantAdmin!.restRoot = restRoot;
+		}
+
+		it( 'pretty permalinks, path with no query string: plain concatenation', async () => {
+			setRestRoot( 'http://site.test/wp-json/' );
+			( global.fetch as jest.Mock ).mockResolvedValue( jsonResponse( {} ) );
+
+			await apiFetch( '/admin/availability' );
+
+			const [ url ] = ( global.fetch as jest.Mock ).mock.calls[ 0 ] as [ string, RequestInit ];
+			expect( url ).toBe( 'http://site.test/wp-json/reservant/v1/admin/availability' );
+		} );
+
+		it( 'pretty permalinks, query-bearing path: the path\'s own "?" is left untouched', async () => {
+			setRestRoot( 'http://site.test/wp-json/' );
+			( global.fetch as jest.Mock ).mockResolvedValue( jsonResponse( {} ) );
+
+			await apiFetch( '/admin/calendar?from=2026-08-01&to=2026-08-31' );
+
+			const [ url ] = ( global.fetch as jest.Mock ).mock.calls[ 0 ] as [ string, RequestInit ];
+			expect( url ).toBe( 'http://site.test/wp-json/reservant/v1/admin/calendar?from=2026-08-01&to=2026-08-31' );
+		} );
+
+		it( 'plain permalinks, path with no query string: the route lands inside rest_route, no second "?"', async () => {
+			setRestRoot( 'http://site.test/index.php?rest_route=/' );
+			( global.fetch as jest.Mock ).mockResolvedValue( jsonResponse( {} ) );
+
+			await apiFetch( '/admin/availability' );
+
+			const [ url ] = ( global.fetch as jest.Mock ).mock.calls[ 0 ] as [ string, RequestInit ];
+			expect( url ).toBe( 'http://site.test/index.php?rest_route=/reservant/v1/admin/availability' );
+		} );
+
+		it( 'plain permalinks, query-bearing path: the path\'s own "?" is folded into "&" rather than opening a second "?"', async () => {
+			setRestRoot( 'http://site.test/index.php?rest_route=/' );
+			( global.fetch as jest.Mock ).mockResolvedValue( jsonResponse( {} ) );
+
+			await apiFetch( '/admin/calendar?from=2026-08-01&to=2026-08-31' );
+
+			const [ url ] = ( global.fetch as jest.Mock ).mock.calls[ 0 ] as [ string, RequestInit ];
+			// Exactly one "?" in the whole URL - `rest_route` carries the bare route, `from`/`to`
+			// are ordinary sibling query params PHP's `&`-only parser reads correctly.
+			expect( url ).toBe( 'http://site.test/index.php?rest_route=/reservant/v1/admin/calendar&from=2026-08-01&to=2026-08-31' );
+			expect( url.match( /\?/g ) ).toHaveLength( 1 );
+		} );
+
+		it( 'plain permalinks with a namespace override (the wp/v2 lookup call): still exactly one "?"', async () => {
+			setRestRoot( 'http://site.test/index.php?rest_route=/' );
+			( global.fetch as jest.Mock ).mockResolvedValue( jsonResponse( [] ) );
+
+			await apiFetch( '/users?search=jane', {}, 'wp/v2' );
+
+			const [ url ] = ( global.fetch as jest.Mock ).mock.calls[ 0 ] as [ string, RequestInit ];
+			expect( url ).toBe( 'http://site.test/index.php?rest_route=/wp/v2/users&search=jane' );
+		} );
+	} );
 } );
