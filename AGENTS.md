@@ -185,7 +185,7 @@ requires a wp-admin login.
 ```
 reservant/
 +-- reservant.php              # header, guards (PHP/WP version), bootstrap only
-+-- uninstall.php              # honors reservant_delete_data_on_uninstall (default: keep)
++-- uninstall.php              # honors reservant_settings['purge_on_uninstall'] (default: keep)
 +-- composer.json  package.json
 +-- src/
 |   +-- Plugin.php             # container + hook registration, nothing else
@@ -270,7 +270,7 @@ Migrations are versioned and run through `Infrastructure/Db/Migrations` on activ
 | `GET /admin/bookings` | search/list; `reservant_manage_bookings` |
 | `POST /admin/bookings` | the owner's manual booking - lands on `confirmed` directly, never a hold; `reservant_manage_bookings` |
 | `GET /admin/bookings/{uuid}` | detail plus the audit trail; `reservant_manage_bookings` |
-| `POST /admin/bookings/{uuid}/approve` , `/reject` | `reservant_approve_bookings` alone is enough - a staff member without `reservant_manage_bookings` is scoped to bookings with an item on their own resource; approve issues the payment link when the booking is paid |
+| `POST /admin/bookings/{uuid}/approve` , `/reject` | `reservant_approve_bookings` alone is enough - a staff member without `reservant_manage_bookings` is scoped to bookings with an item on their own resource. Approve lands the booking on `confirmed` unconditionally: the approve -> `awaiting_payment` -> payment-link step for a paid service is the WooCommerce bridge's job (section 6), and it is not built yet - see P7 in section 9 |
 | `POST /admin/bookings/{uuid}/cancel` , `/no_show` , `/complete` | manager overrides; `reservant_manage_bookings` |
 | `GET /admin/calendar` | the week/day grid; `reservant_manage_bookings` or `reservant_view_own_calendar` |
 | `GET /admin/availability` | chain feasibility for the manual-booking drawer, same request shape as the public `GET /availability`; `reservant_manage_bookings` or `reservant_view_own_calendar` |
@@ -345,19 +345,32 @@ That namespace only loads when `class_exists( 'WooCommerce' )`. Everything else 
 ## 8. Commands
 
 ```bash
+# One-time / after a pull
 composer install && npm install
-npm run start                 # watch build
-npm run build                 # production build
-npx wp-env start              # local WP + DB
+npm run build                 # production build - REQUIRED before any suite that renders wp-admin
+npx wp-env start              # local WP + DB - REQUIRED before the integration, concurrency and e2e suites
+npx playwright install chromium   # once, before the first e2e run
 
-composer test:unit            # Domain/ - no WP bootstrap, fast
-composer test:integration     # repositories, REST, locking (needs wp-env)
-npm run test:e2e              # Playwright booking flow
-composer lint                 # PHPCS / WPCS
-composer stan                 # PHPStan level 6+
+npm run start                 # watch build (development)
+
+# Gates, in the order CI runs them
+composer lint                 # PHPCS / WPCS over src/ and bin/
+composer stan                 # PHPStan level 6+ over src/
+composer test:unit            # Domain/ + pure Application/ - no WP bootstrap, fast
+composer test:integration     # repositories, REST, migrations, locking (needs wp-env)
+npm run tsc                   # TypeScript strict, no emit
+npm run test:js               # Jest + Testing Library over assets/src
+npm run fallow                # fallow static analysis, failing on its error-level findings
+./bin/run-concurrency.sh      # parallel holds, opposing-order chains, contested seats (needs wp-env)
+npm run test:e2e              # Playwright admin smoke (needs wp-env + a built bundle)
 ```
 
-CI runs all of the above. Concurrency tests are not allowed to be marked skipped.
+CI runs all of the above. Concurrency tests are not allowed to be marked skipped: `./bin/run-concurrency.sh`
+is the command, and it must pass, not be commented out or `|| true`-d.
+
+`npm run fallow` is the enforcing form of `npx fallow --ci`: fallow writes SARIF but exits 0 even when
+it has reported `level: "error"` findings, so the wrapper (`bin/fallow-gate.mjs`) reads the report and
+fails the build on any of them. Running `npx fallow --ci` alone gates nothing.
 
 ---
 
