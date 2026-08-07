@@ -14,9 +14,13 @@ use Reservant\Tests\Integration\ReservantTestCase;
  * `POST /bookings/{uuid}/reschedule` (AGENTS.md section 5, Task 5): the REST wrapper around
  * `RescheduleBooking::execute()`. Token handling and error mapping mirror `cancel()`'s, with one
  * deliberate divergence: the route is guarded by `Routes::requireTokenOrCapNoOracle()`, which answers
- * a wrong token and an unknown uuid identically - `test_rejects_a_wrong_token_without_revealing_whether_the_uuid_exists()`
- * is the test that proves it (the brief's own "test that matters most"), so an anonymous caller
- * cannot use this endpoint to learn which booking ids are real.
+ * a wrong token and an unknown uuid identically -
+ * `test_rejects_a_wrong_token_without_revealing_whether_the_uuid_exists()` is the test that proves it
+ * (the brief's own "test that matters most"), so this route adds no NEW way to learn whether a
+ * booking id is real. That is not the same as saying the API cannot leak it at all: `show()`,
+ * `confirm()` and `cancel()` still answer a wrong token and an unknown uuid differently, on purpose,
+ * pinned by `RestApiTest::test_bad_token_is_403_and_missing_uuid_404()` - a plain, unauthenticated
+ * `GET /bookings/{uuid}` remains a cheaper way to probe than this route ever was.
  */
 final class RescheduleRouteTest extends ReservantTestCase {
 
@@ -27,6 +31,14 @@ final class RescheduleRouteTest extends ReservantTestCase {
 	public function set_up(): void {
 		parent::set_up();
 		global $wpdb;
+
+		// The rate limiter counts in transients, and a hold COMMITs the connection - so a counter
+		// left by an earlier test class outlives the harness rollback and would 429 an unrelated one.
+		// This file issues several holds per test (the fixture for every reschedule), so it needs the
+		// same reset RestApiTest's own set_up already does for the same reason.
+		$wpdb->query( "DELETE FROM {$wpdb->options} WHERE option_name LIKE '\\_transient%reservant\\_rl\\_%'" ); // phpcs:ignore
+		wp_cache_flush();
+
 		$services  = new ServiceRepository( $wpdb );
 		$resources = new ResourceRepository( $wpdb );
 		$avail     = new AvailabilityRepository( $wpdb );
@@ -208,5 +220,44 @@ final class RescheduleRouteTest extends ReservantTestCase {
 		self::assertSame( 200, $response->get_status(), (string) wp_json_encode( $response->get_data() ) );
 		self::assertSame( $this->sql( 11, '18:00' ), $response->get_data()['items'][0]['start_utc'] );
 		self::assertSame( $occB, $response->get_data()['items'][0]['occurrence_id'] );
+	}
+
+	/**
+	 * `reschedule()` never calls `$request->get_param( 'force' )` - `force` is derived only from
+	 * `current_user_can( Routes::CAP_MANAGE )` - so there is no line of code today that this could
+	 * fail against. The point of pinning it is the future: a refactor that starts reading the param
+	 * without noticing what that would hand a guest must break this test, not ship quietly. Tried as a
+	 * string `"1"`, the literal string `"true"`, a real boolean, and an int, since a naive read
+	 * (`(bool) $request->get_param('force')`) would treat all four as truthy.
+	 */
+	public function test_a_guest_supplied_force_param_never_bypasses_the_policy_window(): void {
+		global $wpdb;
+		$lateId = ( new ServiceRepository( $wpdb ) )->insert(
+			array( 'name' => 'Groom', 'type' => 'appointment', 'duration_min' => 30, 'payment_mode' => 'onsite', 'reschedule_window_hours' => 8760 )
+		);
+		( new ResourceRepository( $wpdb ) )->linkService( $lateId, $this->staffA );
+
+		$request = new \WP_REST_Request( 'POST', '/reservant/v1/holds' );
+		$request->set_body_params(
+			array(
+				'customer'    => array( 'name' => 'M', 'email' => 'm@example.com' ),
+				'appointment' => array( 'start_utc' => $this->sql( 2, '10:00' ), 'segments' => array( array( 'service_id' => $lateId, 'resource_id' => $this->staffA ) ) ),
+			)
+		);
+		/** @var array<string, mixed> $booking */
+		$booking = rest_do_request( $request )->get_data();
+
+		foreach ( array( '1', 'true', true, 1 ) as $forceValue ) {
+			$response = $this->reschedule(
+				(string) $booking['uuid'],
+				array(
+					'token'     => $booking['manage_token'],
+					'start_utc' => $this->sql( 2, '11:00' ),
+					'force'     => $forceValue,
+				)
+			);
+			self::assertSame( 403, $response->get_status(), 'force = ' . (string) wp_json_encode( $forceValue ) . ' must not bypass the window.' );
+			self::assertSame( 'window_closed', $response->get_data()['message'] );
+		}
 	}
 }

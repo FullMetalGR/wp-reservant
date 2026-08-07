@@ -78,6 +78,14 @@ final class BookingsController {
 	 * and an unknown uuid identically, so this method never needs to tell them apart either; a `uuid`
 	 * that reaches here with no matching booking can therefore only be the manager path, and
 	 * `RescheduleBooking::execute()` answers that with its own `not_found`.
+	 *
+	 * This parity is local to THIS route, not a product-wide closing of the booking-existence oracle.
+	 * `show()`, `confirm()` and `cancel()` still answer a wrong token (403) and an unknown uuid (404)
+	 * differently - that asymmetry is deliberate, older, and pinned by
+	 * `RestApiTest::test_bad_token_is_403_and_missing_uuid_404()` - and a plain, unauthenticated `GET`
+	 * against one of them is a cheaper, side-effect-free way to learn the same thing an attacker might
+	 * have wanted from probing this route. Do not read the sentence above as "this endpoint closes the
+	 * oracle": it only declines to add a second, redundant way to observe it.
 	 */
 	public function reschedule( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
 		$startUtcRaw     = $request->get_param( 'start_utc' );

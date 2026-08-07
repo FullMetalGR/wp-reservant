@@ -234,6 +234,19 @@ final class Routes {
 	 * misleading `403`. `$hideNotFound` inverts that for the one route that must not make the
 	 * distinction - see `requireTokenOrCapNoOracle()`.
 	 *
+	 * `$hideNotFound` is opt-in, defaults `false`, and only `/reschedule` passes `true`. Both
+	 * behaviours are intentional, not one fixed and one drifted: the default (distinguishing) answer
+	 * on `show`/`confirm`/`cancel` is pinned by
+	 * `RestApiTest::test_bad_token_is_403_and_missing_uuid_404()`; the non-distinguishing answer on
+	 * `/reschedule` is pinned by
+	 * `RescheduleRouteTest::test_rejects_a_wrong_token_without_revealing_whether_the_uuid_exists()`.
+	 * The default is left alone on purpose - a plain, unauthenticated, side-effect-free `GET
+	 * /bookings/{uuid}` is already a cheaper way to learn whether a uuid is real than anything
+	 * `/reschedule` could be made to hide, so the booking-existence oracle is an accepted,
+	 * product-wide property of this API today, not something any one route can close by itself.
+	 * Whether to revisit that product-wide is a separate decision (tracked outside this file), not one
+	 * to make by quietly flipping this default.
+	 *
 	 * @return true|\WP_Error
 	 */
 	private function guard( \WP_REST_Request $request, bool $allowCapability, bool $hideNotFound = false ): bool|\WP_Error {
