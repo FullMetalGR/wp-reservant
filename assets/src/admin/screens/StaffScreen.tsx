@@ -3,6 +3,7 @@ import { __ } from '@wordpress/i18n';
 import { Button, CheckboxControl, ComboboxControl, Notice, SelectControl, Spinner, TextControl } from '@wordpress/components';
 import {
 	useAddException,
+	useExceptions,
 	useRemoveException,
 	useResources,
 	useSaveResource,
@@ -11,7 +12,7 @@ import {
 	useWpUsers,
 	type ExceptionInput,
 } from '../api/queries';
-import type { AvailabilityException, Resource, Service } from '../api/types';
+import type { AvailabilityExceptionListItem, Resource, Service } from '../api/types';
 import { useToasts } from '../components/Toasts';
 
 function errorMessage( error: unknown ): string {
@@ -149,22 +150,25 @@ function WpUserLinkControl( { wpUserId, onChange }: { wpUserId: number | null; o
 
 interface ExceptionsListProps {
 	title: string;
-	exceptions: AvailabilityException[];
-	onDelete: ( exception: AvailabilityException ) => void;
+	exceptions: AvailabilityExceptionListItem[];
+	onDelete: ( exception: AvailabilityExceptionListItem ) => void;
 	isBusy: boolean;
+	isLoading: boolean;
 }
 
-function ExceptionsList( { title, exceptions, onDelete, isBusy }: ExceptionsListProps ) {
+/** Backed by `useExceptions()` (`GET /admin/exceptions`, Task 16b) - a null `start_time` marks an all-day closure, matching `AvailabilityExceptionListItem`'s shape. */
+function ExceptionsList( { title, exceptions, onDelete, isBusy, isLoading }: ExceptionsListProps ) {
 	return (
 		<div className="reservant-staff-screen__exceptions">
 			<h4>{ title }</h4>
-			{ 0 === exceptions.length && <p>{ __( 'No dates on record.', 'reservant' ) }</p> }
+			{ isLoading && <Spinner /> }
+			{ ! isLoading && 0 === exceptions.length && <p>{ __( 'No dates on record.', 'reservant' ) }</p> }
 			<ul>
 				{ exceptions.map( ( exception ) => (
 					<li key={ exception.id }>
-						{ exception.closed
-							? exception.date_local
-							: `${ exception.date_local } (${ exception.start_time ?? '' }-${ exception.end_time ?? '' })` }
+						{ null === exception.start_time
+							? exception.date
+							: `${ exception.date } (${ exception.start_time }-${ exception.end_time ?? '' })` }
 						<Button variant="tertiary" isBusy={ isBusy } onClick={ () => onDelete( exception ) }>
 							{ __( 'Delete', 'reservant' ) }
 						</Button>
@@ -300,13 +304,12 @@ function StaffTable( { resources, selectedId, onSelect }: StaffTableProps ) {
  * multiple windows per weekday, and the resource's own exceptions list with delete), plus a
  * business-wide blackouts panel.
  *
- * The business-wide panel is add/remove only, not a synced list: `AdminRoutes` never registered a
- * GET for `/admin/exceptions` (only POST/DELETE - `ResourcesAdminController::addBusinessException()`/
- * `removeBusinessException()`), so there is no server truth to list on load. What is shown is exactly
- * what THIS screen has added or removed in the current session - accurate for that, but not a
- * reflection of blackouts a previous session (or another admin) added; the panel says so rather than
- * imply a completeness it cannot have. Adding backend list support is out of this task's scope (a
- * frontend-only task, no PHP).
+ * Both exceptions panels are backed by `useExceptions()` (`GET /admin/exceptions`, Task 16b
+ * gap-filler): the business-wide panel calls it with no `resourceId` (business-wide rows only), the
+ * per-resource panel calls it with the selected resource's id. Neither keeps its own
+ * session-tracking state any more - `useAddException`/`useRemoveException` invalidate the matching
+ * `useExceptions()` cache entry on success, so a reload (or another admin's edit, on next refetch)
+ * is always reflected rather than only what THIS screen session has added or removed.
  */
 export function StaffScreen() {
 	const { addToast } = useToasts();
@@ -322,8 +325,14 @@ export function StaffScreen() {
 	const [ serviceIds, setServiceIds ] = useState< number[] >( [] );
 	const [ rules, setRules ] = useState< RuleRow[] >( [] );
 	const [ exceptionForm, setExceptionForm ] = useState< BlackoutFormState >( blankBlackoutForm() );
-	const [ businessBlackouts, setBusinessBlackouts ] = useState< AvailabilityException[] >( [] );
 	const [ businessForm, setBusinessForm ] = useState< BlackoutFormState >( blankBlackoutForm() );
+
+	const businessExceptionsQuery = useExceptions();
+	// `selectedId ?? undefined` falls back to the business-wide query when nothing is selected - the
+	// per-resource panel that consumes this is only rendered once `selected` is non-null, so that
+	// fallback result is fetched (react-query dedupes it against `businessExceptionsQuery`'s own
+	// identical key) but never actually displayed.
+	const resourceExceptionsQuery = useExceptions( selectedId ?? undefined );
 
 	const resources = resourcesQuery.data ?? [];
 	// Deliberately NOT kept in sync with `resourcesQuery.data` via an effect: react-query refetches
@@ -410,16 +419,16 @@ export function StaffScreen() {
 		} );
 	}
 
-	function handleRemoveResourceException( exception: AvailabilityException ): void {
+	function handleRemoveResourceException( exception: AvailabilityExceptionListItem ): void {
 		if ( null === selectedId ) {
 			return;
 		}
 		removeException.mutate(
 			{
 				resourceId: selectedId,
-				date: exception.date_local,
-				start_time: exception.closed ? undefined : exception.start_time ?? undefined,
-				end_time: exception.closed ? undefined : exception.end_time ?? undefined,
+				date: exception.date,
+				start_time: exception.start_time ?? undefined,
+				end_time: exception.end_time ?? undefined,
 			},
 			{
 				onSuccess: () => addToast( __( 'Blackout date removed.', 'reservant' ) ),
@@ -430,28 +439,24 @@ export function StaffScreen() {
 
 	function handleAddBusinessBlackout(): void {
 		addException.mutate( exceptionPayload( businessForm, null ), {
-			onSuccess: ( created ) => {
+			onSuccess: () => {
 				addToast( __( 'Business-wide blackout added.', 'reservant' ) );
-				setBusinessBlackouts( ( current ) => [ ...current, created ] );
 				setBusinessForm( blankBlackoutForm() );
 			},
 			onError: ( error ) => addToast( errorMessage( error ), 'error' ),
 		} );
 	}
 
-	function handleRemoveBusinessBlackout( exception: AvailabilityException ): void {
+	function handleRemoveBusinessBlackout( exception: AvailabilityExceptionListItem ): void {
 		removeException.mutate(
 			{
 				resourceId: null,
-				date: exception.date_local,
-				start_time: exception.closed ? undefined : exception.start_time ?? undefined,
-				end_time: exception.closed ? undefined : exception.end_time ?? undefined,
+				date: exception.date,
+				start_time: exception.start_time ?? undefined,
+				end_time: exception.end_time ?? undefined,
 			},
 			{
-				onSuccess: () => {
-					addToast( __( 'Business-wide blackout removed.', 'reservant' ) );
-					setBusinessBlackouts( ( current ) => current.filter( ( entry ) => entry.id !== exception.id ) );
-				},
+				onSuccess: () => addToast( __( 'Business-wide blackout removed.', 'reservant' ) ),
 				onError: ( error ) => addToast( errorMessage( error ), 'error' ),
 			}
 		);
@@ -521,11 +526,17 @@ export function StaffScreen() {
 				{ null !== selected && (
 					<>
 						<h3>{ __( 'Exceptions (this staff member)', 'reservant' ) }</h3>
+						{ resourceExceptionsQuery.isError && (
+							<Notice status="error" isDismissible={ false }>
+								{ __( 'Could not load this staff member\'s blackout dates.', 'reservant' ) }
+							</Notice>
+						) }
 						<ExceptionsList
 							title={ __( 'Blackout dates', 'reservant' ) }
-							exceptions={ selected.exceptions }
+							exceptions={ resourceExceptionsQuery.data ?? [] }
 							onDelete={ handleRemoveResourceException }
 							isBusy={ removeException.isPending }
+							isLoading={ resourceExceptionsQuery.isLoading }
 						/>
 						<AddExceptionForm
 							form={ exceptionForm }
@@ -539,17 +550,17 @@ export function StaffScreen() {
 
 			<div className="reservant-staff-screen__business-blackouts">
 				<h2>{ __( 'Business-wide blackouts', 'reservant' ) }</h2>
-				<Notice status="info" isDismissible={ false }>
-					{ __(
-						'There is no listing endpoint for business-wide blackouts - only what this screen has added or removed in the current session is shown below.',
-						'reservant'
-					) }
-				</Notice>
+				{ businessExceptionsQuery.isError && (
+					<Notice status="error" isDismissible={ false }>
+						{ __( 'Could not load business-wide blackout dates.', 'reservant' ) }
+					</Notice>
+				) }
 				<ExceptionsList
-					title={ __( 'Added this session', 'reservant' ) }
-					exceptions={ businessBlackouts }
+					title={ __( 'Blackout dates', 'reservant' ) }
+					exceptions={ businessExceptionsQuery.data ?? [] }
 					onDelete={ handleRemoveBusinessBlackout }
 					isBusy={ removeException.isPending }
+					isLoading={ businessExceptionsQuery.isLoading }
 				/>
 				<AddExceptionForm
 					form={ businessForm }

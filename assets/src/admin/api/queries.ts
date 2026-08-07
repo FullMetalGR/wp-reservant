@@ -10,6 +10,8 @@ import { bootConfig } from '../boot';
 import { apiFetch } from './client';
 import type {
 	AvailabilityException,
+	AvailabilityExceptionListItem,
+	AvailabilityExceptionsResponse,
 	AvailabilityResponse,
 	BookingDetail,
 	BookingFilters,
@@ -227,6 +229,21 @@ export function useSaveResource(): UseMutationResult< Resource, Error, ResourceS
 }
 
 /**
+ * `GET /admin/exceptions` (Task 16b gap-filler): `resourceId` omitted lists business-wide rows
+ * only, a real id lists that resource's own rows only - never a merge of the two. Query key mirrors
+ * `useCalendar`'s own `resourceId ?? sentinel` shape so a business-wide list and a per-resource list
+ * cache and invalidate independently.
+ */
+export function useExceptions( resourceId?: number ): UseQueryResult< AvailabilityExceptionListItem[], Error > {
+	return useQuery( {
+		queryKey: [ 'exceptions', resourceId ?? 'business' ],
+		queryFn: async () =>
+			( await apiFetch< AvailabilityExceptionsResponse >( `/admin/exceptions${ toQueryString( { resource_id: resourceId } ) }` ) )
+				.exceptions,
+	} );
+}
+
+/**
  * One availability exception, resource-scoped or business-wide - `resourceId: null` routes to
  * `/admin/exceptions` (`ResourcesAdminController::addBusinessException()`/`removeBusinessException()`),
  * a real id to `/admin/resources/{id}/exceptions`. The same shape serves both add (POST) and remove
@@ -246,16 +263,20 @@ function exceptionPath( resourceId: number | null ): string {
 	return null === resourceId ? '/admin/exceptions' : `/admin/resources/${ resourceId }/exceptions`;
 }
 
+/** Both mutations below invalidate the `useExceptions()` cache entry the change actually affects, plus `['resources']` for a resource-scoped change (its `Resource.exceptions` embed). */
+function invalidateExceptionCaches( queryClient: ReturnType< typeof useQueryClient >, resourceId: number | null ): void {
+	void queryClient.invalidateQueries( { queryKey: [ 'exceptions', resourceId ?? 'business' ] } );
+	if ( null !== resourceId ) {
+		void queryClient.invalidateQueries( { queryKey: [ 'resources' ] } );
+	}
+}
+
 export function useAddException(): UseMutationResult< AvailabilityException, Error, ExceptionInput > {
 	const queryClient = useQueryClient();
 	return useMutation( {
 		mutationFn: ( { resourceId, ...body }: ExceptionInput ) =>
 			apiFetch< AvailabilityException >( exceptionPath( resourceId ), { method: 'POST', body: JSON.stringify( body ) } ),
-		onSuccess: ( _data, variables ) => {
-			if ( null !== variables.resourceId ) {
-				void queryClient.invalidateQueries( { queryKey: [ 'resources' ] } );
-			}
-		},
+		onSuccess: ( _data, variables ) => invalidateExceptionCaches( queryClient, variables.resourceId ),
 	} );
 }
 
@@ -264,11 +285,7 @@ export function useRemoveException(): UseMutationResult< { deleted: number }, Er
 	return useMutation( {
 		mutationFn: ( { resourceId, ...body }: ExceptionInput ) =>
 			apiFetch< { deleted: number } >( exceptionPath( resourceId ), { method: 'DELETE', body: JSON.stringify( body ) } ),
-		onSuccess: ( _data, variables ) => {
-			if ( null !== variables.resourceId ) {
-				void queryClient.invalidateQueries( { queryKey: [ 'resources' ] } );
-			}
-		},
+		onSuccess: ( _data, variables ) => invalidateExceptionCaches( queryClient, variables.resourceId ),
 	} );
 }
 

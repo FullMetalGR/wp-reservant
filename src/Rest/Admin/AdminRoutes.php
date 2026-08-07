@@ -292,6 +292,17 @@ final class AdminRoutes {
 			'/admin/exceptions',
 			array(
 				array(
+					'methods'             => \WP_REST_Server::READABLE,
+					'callback'            => array( $resources, 'listExceptions' ),
+					'permission_callback' => array( $guard, 'manageSettings' ),
+					'args'                => array(
+						'resource_id' => array(
+							'default'           => 0,
+							'sanitize_callback' => 'absint',
+						),
+					),
+				),
+				array(
 					'methods'             => \WP_REST_Server::CREATABLE,
 					'callback'            => array( $resources, 'addBusinessException' ),
 					'permission_callback' => array( $guard, 'manageSettings' ),

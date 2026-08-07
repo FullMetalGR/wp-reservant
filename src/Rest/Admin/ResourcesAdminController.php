@@ -28,6 +28,14 @@ use Reservant\Rest\Input;
  * whether `start_time`/`end_time` were given) rather than by row id, since the body is the same
  * `{date,start_time?,end_time?,reason?}` shape POST accepts; `reason` is accepted for forward
  * compatibility but not persisted - the schema carries no such column.
+ *
+ * `GET /admin/exceptions` (Task 16b gap-filler: Task 11 shipped POST|DELETE here but no listing, so
+ * the admin blackouts panel could not reload what it had already added) reads through the same
+ * `AvailabilityRepository::exceptionsForResource()` used by `present()` - business-wide rows only
+ * when `resource_id` is absent/0, one resource's own rows when given. Never a merge of the two,
+ * unlike `exceptionsForResources()` (the availability-math read). `date_local`/`closed` are
+ * presented as `date`/(`start_time`,`end_time` both null for an all-day closure) to match the shape
+ * `POST` already accepts on input; `reason` echoes the same "accepted, never persisted" placeholder.
  */
 final class ResourcesAdminController {
 
@@ -179,6 +187,20 @@ final class ResourcesAdminController {
 	/** DELETE /admin/resources/{id}/exceptions */
 	public function removeException( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
 		return $this->deleteExceptionByShape( (int) $request->get_param( 'id' ), $request );
+	}
+
+	/**
+	 * GET /admin/exceptions - `resource_id` absent/0 (the default) lists business-wide rows only;
+	 * a positive `resource_id` lists that resource's own rows only.
+	 */
+	public function listExceptions( \WP_REST_Request $request ): \WP_REST_Response {
+		$resourceId = (int) $request->get_param( 'resource_id' );
+		$rows       = ( new AvailabilityRepository( $this->db ) )->exceptionsForResource( $resourceId > 0 ? $resourceId : null );
+		return new \WP_REST_Response(
+			array(
+				'exceptions' => array_map( array( self::class, 'presentExceptionRow' ), $rows ),
+			)
+		);
 	}
 
 	/** POST /admin/exceptions - business-wide (resource_id NULL). */
@@ -427,6 +449,24 @@ final class ResourcesAdminController {
 					$availability->insertRule( $resourceId, $rule );
 				}
 			}
+		);
+	}
+
+	/**
+	 * `exceptionsForResource()`'s cast row (`id`,`resource_id`,`date_local`,`closed`,`start_time`,
+	 * `end_time`) reshaped for `GET /admin/exceptions`'s listing contract.
+	 *
+	 * @param array<string, mixed> $row
+	 * @return array<string, mixed>
+	 */
+	private static function presentExceptionRow( array $row ): array {
+		return array(
+			'id'          => $row['id'],
+			'resource_id' => $row['resource_id'],
+			'date'        => $row['date_local'],
+			'start_time'  => $row['start_time'],
+			'end_time'    => $row['end_time'],
+			'reason'      => '',
 		);
 	}
 

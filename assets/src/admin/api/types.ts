@@ -224,6 +224,27 @@ export interface ResourcesResponse {
 	resources: Resource[];
 }
 
+/**
+ * `ResourcesAdminController::presentExceptionRow()` - `GET /admin/exceptions`'s listing shape
+ * (Task 16b gap-filler). Distinct from `AvailabilityException` (the `POST`/`DELETE` and
+ * `Resource.exceptions` shape: `date_local`/`closed`) - this is the read-side presentation: an
+ * all-day closure is `start_time`/`end_time` both null rather than a separate `closed` flag, and
+ * `reason` always echoes `''` since the schema carries no such column.
+ */
+export interface AvailabilityExceptionListItem {
+	id: number;
+	resource_id: number | null;
+	date: string;
+	start_time: string | null;
+	end_time: string | null;
+	reason: string;
+}
+
+/** `GET /admin/exceptions` response envelope. */
+export interface AvailabilityExceptionsResponse {
+	exceptions: AvailabilityExceptionListItem[];
+}
+
 export type OccurrenceStatus = 'active' | 'cancelled';
 
 /** `OccurrencesAdminController::present()`. */

@@ -117,6 +117,7 @@ final class AdminCatalogTest extends ReservantTestCase {
 			array( 'GET', "/reservant/v1/admin/services/{$service['id']}" ),
 			array( 'GET', '/reservant/v1/admin/resources' ),
 			array( 'GET', "/reservant/v1/admin/resources/{$resource['id']}" ),
+			array( 'GET', '/reservant/v1/admin/exceptions' ),
 		);
 		foreach ( $routes as list( $method, $route ) ) {
 			$this->asAnonymous();
@@ -504,6 +505,61 @@ final class AdminCatalogTest extends ReservantTestCase {
 		$this->asBookingManager();
 		self::assertSame( 403, $this->jsonRequest( 'POST', '/reservant/v1/admin/exceptions', array( 'date' => $this->utc( 1 )->format( 'Y-m-d' ) ) )->get_status() );
 		self::assertSame( 403, $this->jsonRequest( 'DELETE', '/reservant/v1/admin/exceptions', array( 'date' => $this->utc( 1 )->format( 'Y-m-d' ) ) )->get_status() );
+	}
+
+	// ---------------------------------------------------------------- listing exceptions (Task 16b gap-filler)
+
+	/**
+	 * Task 11 shipped POST|DELETE /admin/exceptions but no GET, so the admin blackouts panel could
+	 * not reload what it had already added (Task 16 report, "known limitation"). This adds the
+	 * missing GET: business-wide rows (`resource_id` absent) by default, one resource's own rows
+	 * when `resource_id` is given - never a merge of the two, unlike `exceptionsForResources()`
+	 * (the availability-math read, which deliberately duplicates business-wide rows under every
+	 * resource for feasibility checks).
+	 */
+	public function test_list_exceptions_business_wide_returns_only_null_resource_rows(): void {
+		$this->asAdmin();
+		$resource = $this->createResource();
+		$this->jsonRequest( 'POST', '/reservant/v1/admin/exceptions', array( 'date' => $this->utc( 1 )->format( 'Y-m-d' ) ) );
+		$this->jsonRequest( 'POST', "/reservant/v1/admin/resources/{$resource['id']}/exceptions", array( 'date' => $this->utc( 2 )->format( 'Y-m-d' ) ) );
+
+		$response = $this->request( 'GET', '/reservant/v1/admin/exceptions' );
+		self::assertSame( 200, $response->get_status(), (string) wp_json_encode( $response->get_data() ) );
+		$rows = $response->get_data()['exceptions'];
+		self::assertCount( 1, $rows );
+		self::assertNull( $rows[0]['resource_id'] );
+		self::assertSame( $this->utc( 1 )->format( 'Y-m-d' ), $rows[0]['date'] );
+		self::assertNull( $rows[0]['start_time'] );
+		self::assertNull( $rows[0]['end_time'] );
+		self::assertSame( '', $rows[0]['reason'] );
+	}
+
+	public function test_list_exceptions_with_resource_id_returns_only_that_resources_rows(): void {
+		$this->asAdmin();
+		$resourceA = $this->createResource( 'Alex' );
+		$resourceB = $this->createResource( 'Bella' );
+		$this->jsonRequest( 'POST', '/reservant/v1/admin/exceptions', array( 'date' => $this->utc( 1 )->format( 'Y-m-d' ) ) );
+		$this->jsonRequest( 'POST', "/reservant/v1/admin/resources/{$resourceA['id']}/exceptions", array( 'date' => $this->utc( 2 )->format( 'Y-m-d' ) ) );
+		$this->jsonRequest( 'POST', "/reservant/v1/admin/resources/{$resourceB['id']}/exceptions", array( 'date' => $this->utc( 3 )->format( 'Y-m-d' ) ) );
+
+		$response = $this->request( 'GET', '/reservant/v1/admin/exceptions', array( 'resource_id' => $resourceA['id'] ) );
+		self::assertSame( 200, $response->get_status(), (string) wp_json_encode( $response->get_data() ) );
+		$rows = $response->get_data()['exceptions'];
+		self::assertCount( 1, $rows );
+		self::assertSame( (int) $resourceA['id'], $rows[0]['resource_id'] );
+		self::assertSame( $this->utc( 2 )->format( 'Y-m-d' ), $rows[0]['date'] );
+	}
+
+	public function test_list_exceptions_is_forbidden_for_manage_bookings_only_caller(): void {
+		$this->asBookingManager();
+		self::assertSame( 403, $this->request( 'GET', '/reservant/v1/admin/exceptions' )->get_status() );
+	}
+
+	public function test_list_exceptions_empty_is_empty_array_not_error(): void {
+		$this->asAdmin();
+		$response = $this->request( 'GET', '/reservant/v1/admin/exceptions' );
+		self::assertSame( 200, $response->get_status(), (string) wp_json_encode( $response->get_data() ) );
+		self::assertSame( array(), $response->get_data()['exceptions'] );
 	}
 
 	// ---------------------------------------------------------------- delete race guards (fix round 1)
