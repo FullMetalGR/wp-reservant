@@ -2,6 +2,7 @@ import { __ } from '@wordpress/i18n';
 import { Button, Modal, Notice, Spinner } from '@wordpress/components';
 import type { UseMutationResult } from '@tanstack/react-query';
 import { bootConfig } from '../boot';
+import { errorMessage } from '../api/client';
 import { useApprove, useBooking, useCancelBooking, useOutcome, useReject } from '../api/queries';
 import type { BookingDetail, BookingStatus, BookingSummary } from '../api/types';
 import { utcToSite } from '../calendar/adapter';
@@ -80,10 +81,6 @@ const STATUS_LABELS: Record< BookingStatus, () => string > = {
 export function statusLabel( status: BookingStatus ): string {
 	const label = STATUS_LABELS[ status ];
 	return undefined === label ? status : label();
-}
-
-function errorMessage( error: unknown ): string {
-	return error instanceof Error ? error.message : __( 'Something went wrong.', 'reservant' );
 }
 
 /** The read-only half of the drawer: status/customer/total, the item table, the audit trail. */

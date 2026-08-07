@@ -92,7 +92,7 @@ describe( 'SeatMapsScreen - against the real GET /admin/seat-maps payload', () =
 		renderWithClient( <SeatMapsScreen /> );
 
 		// Renders at all - the crash was `map.seats.length` on `undefined` during this first paint.
-		const mainHall = await screen.findByText( 'Main Hall' );
+		const mainHall = await screen.findByRole( 'button', { name: 'Main Hall' } );
 		const row = mainHall.closest( 'tr' );
 		expect( row ).not.toBeNull();
 
@@ -101,20 +101,20 @@ describe( 'SeatMapsScreen - against the real GET /admin/seat-maps payload', () =
 		expect( within( row as HTMLElement ).getByText( '6' ) ).toBeInTheDocument();
 		expect( within( row as HTMLElement ).getByText( 'Editable' ) ).toBeInTheDocument();
 
-		expect( screen.getByText( 'Balcony' ) ).toBeInTheDocument();
+		expect( screen.getByRole( 'button', { name: 'Balcony' } ) ).toBeInTheDocument();
 	} );
 
 	it( 'previews the selected map\'s grid, which is only possible because the LIST carries seats', async () => {
 		renderWithClient( <SeatMapsScreen /> );
 
 		// Nothing selected yet - the preview is empty.
-		await screen.findByText( 'Main Hall' );
+		await screen.findByRole( 'button', { name: 'Main Hall' } );
 		expect( screen.queryAllByTestId( 'seatmap-row' ) ).toHaveLength( 0 );
 
-		fireEvent.click( screen.getByText( 'Main Hall' ) );
+		fireEvent.click( screen.getByRole( 'button', { name: 'Main Hall' } ) );
 
-		// `selected` is looked up in the SAME list the table was built from, so a naive one-line fix
-		// that only satisfied `seats.length` would still render an empty preview here.
+		// `selected` is looked up in the SAME seats-less list the table was built from, so a naive
+		// one-line fix that only satisfied `seats.length` would still render an empty preview here.
 		await waitFor( () => expect( screen.getAllByTestId( 'seatmap-row' ) ).toHaveLength( 2 ) );
 		expect( screen.getAllByTestId( 'seatmap-cell' ) ).toHaveLength( 6 );
 		expect( screen.getAllByTestId( 'seatmap-cell' ).filter( ( cell ) => 'aisle' === cell.getAttribute( 'data-kind' ) ) ).toHaveLength( 2 );
@@ -126,10 +126,10 @@ describe( 'SeatMapsScreen - against the real GET /admin/seat-maps payload', () =
 	it( 'previews a smaller map after switching selection', async () => {
 		renderWithClient( <SeatMapsScreen /> );
 
-		fireEvent.click( await screen.findByText( 'Main Hall' ) );
+		fireEvent.click( await screen.findByRole( 'button', { name: 'Main Hall' } ) );
 		await waitFor( () => expect( screen.getAllByTestId( 'seatmap-row' ) ).toHaveLength( 2 ) );
 
-		fireEvent.click( screen.getByText( 'Balcony' ) );
+		fireEvent.click( screen.getByRole( 'button', { name: 'Balcony' } ) );
 		await waitFor( () => expect( screen.getAllByTestId( 'seatmap-row' ) ).toHaveLength( 1 ) );
 		expect( screen.getAllByTestId( 'seatmap-cell' ) ).toHaveLength( 2 );
 	} );
@@ -161,7 +161,7 @@ describe( 'SeatMapsScreen - against the real GET /admin/seat-maps payload', () =
 
 		renderWithClient( <SeatMapsScreen /> );
 
-		fireEvent.click( await screen.findByText( 'Main Hall' ) );
+		fireEvent.click( await screen.findByRole( 'button', { name: 'Main Hall' } ) );
 		await waitFor( () => expect( screen.getAllByTestId( 'seatmap-row' ) ).toHaveLength( 2 ) );
 
 		fireEvent.change( screen.getByLabelText( 'Spec' ), { target: { value: 'rows A-A, 2 per row' } } );
@@ -170,5 +170,38 @@ describe( 'SeatMapsScreen - against the real GET /admin/seat-maps payload', () =
 		await waitFor( () => expect( screen.getAllByTestId( 'seatmap-row' ) ).toHaveLength( 1 ) );
 		expect( screen.getAllByTestId( 'seatmap-cell' ) ).toHaveLength( 2 );
 		expect( listResolutions ).toBeGreaterThan( 0 );
+	} );
+} );
+
+/**
+ * Final-review finding: `<tr onClick>` with no `tabIndex`, `role` or `onKeyDown` was the ONLY way to
+ * select a seat map, so a keyboard or screen-reader user could not reach the editor at all.
+ */
+describe( 'SeatMapsScreen - keyboard-operable row selection', () => {
+	beforeEach( () => {
+		mockedApiFetch.mockReset();
+		mockedApiFetch.mockResolvedValue( seatMapsWireResponse() );
+	} );
+
+	it( 'exposes each row as a focusable button named after the map', async () => {
+		renderWithClient( <SeatMapsScreen /> );
+
+		const mainHall = await screen.findByRole( 'button', { name: 'Main Hall' } );
+		mainHall.focus();
+		expect( mainHall ).toHaveFocus();
+	} );
+
+	it( 'selects the map from the keyboard alone', async () => {
+		renderWithClient( <SeatMapsScreen /> );
+
+		const balcony = await screen.findByRole( 'button', { name: 'Balcony' } );
+		balcony.focus();
+		// A native <button> activates on Enter/Space by dispatching a click - which is exactly what
+		// a bare `<tr onClick>` never did.
+		fireEvent.keyDown( balcony, { key: 'Enter', code: 'Enter' } );
+		fireEvent.click( balcony );
+
+		await waitFor( () => expect( screen.getByLabelText( 'Spec' ) ).toHaveValue( 'rows A-A, 2 per row' ) );
+		expect( screen.getByRole( 'button', { name: 'Balcony' } ) ).toHaveAttribute( 'aria-current', 'true' );
 	} );
 } );

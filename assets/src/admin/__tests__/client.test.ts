@@ -1,4 +1,4 @@
-import { apiFetch, ApiError } from '../api/client';
+import { apiFetch, ApiError, errorMessage } from '../api/client';
 
 function jsonResponse( body: unknown, status = 200 ): Response {
 	return {
@@ -200,5 +200,58 @@ describe( 'apiFetch', () => {
 			const [ url ] = ( global.fetch as jest.Mock ).mock.calls[ 0 ] as [ string, RequestInit ];
 			expect( url ).toBe( 'http://site.test/index.php?rest_route=/wp/v2/users&search=jane' );
 		} );
+	} );
+} );
+
+/**
+ * Final-review finding: six screens each carried their own
+ * `error instanceof Error ? error.message : 'Something went wrong.'` helper, which showed the
+ * MACHINE reason and threw the translated sentence away. `Rest\Errors::badRequest()` hardcodes
+ * `message = 'invalid_request'` for EVERY 400 the admin API can answer and puts the real per-field
+ * sentence in `data.detail`, so saving a service with a bad duration reported "invalid_request"
+ * rather than naming the field - across roughly eighteen of them. A 409 reported a bare `overlap`
+ * or `not_approvable`, untranslated, to a non-English admin.
+ */
+describe( 'errorMessage', () => {
+	it( 'prefers the translated detail over the machine reason for a 400', () => {
+		const error = ApiError.fromResponse(
+			{
+				code: 'rest_invalid_param',
+				message: 'invalid_request',
+				data: { status: 400, detail: '"duration_min" must be a positive multiple of 5.' },
+			},
+			400
+		);
+
+		expect( error.message ).toBe( 'invalid_request' );
+		expect( errorMessage( error ) ).toBe( '"duration_min" must be a positive multiple of 5.' );
+	} );
+
+	it( 'prefers the translated detail over the machine reason for a conflict', () => {
+		const error = ApiError.fromResponse(
+			{
+				code: 'reservant_overlap',
+				message: 'overlap',
+				data: { status: 409, detail: 'That time was just taken. Please pick another.' },
+			},
+			409
+		);
+
+		expect( errorMessage( error ) ).toBe( 'That time was just taken. Please pick another.' );
+	} );
+
+	it( 'falls back to the machine reason when an ApiError somehow carries no detail', () => {
+		expect( errorMessage( new ApiError( 'reservant_overlap', 'overlap', 409, '' ) ) ).toBe( 'overlap' );
+		expect( errorMessage( new ApiError( 'reservant_overlap', 'overlap', 409, '   ' ) ) ).toBe( 'overlap' );
+	} );
+
+	it( 'uses a plain Error\'s own message - a network or parse failure has nothing else to say', () => {
+		expect( errorMessage( new TypeError( 'Failed to fetch' ) ) ).toBe( 'Failed to fetch' );
+	} );
+
+	it( 'falls back to a generic sentence for an empty or non-Error throw', () => {
+		expect( errorMessage( new Error( '' ) ) ).toBe( 'Something went wrong.' );
+		expect( errorMessage( 'a bare string' ) ).toBe( 'Something went wrong.' );
+		expect( errorMessage( undefined ) ).toBe( 'Something went wrong.' );
 	} );
 } );

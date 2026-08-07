@@ -1,3 +1,4 @@
+import { __ } from '@wordpress/i18n';
 import { bootConfig } from '../boot';
 
 /**
@@ -143,4 +144,32 @@ export async function apiFetch< T >( path: string, init: RequestInit = {}, names
  */
 export function isReferencedConflict( error: unknown ): boolean {
 	return error instanceof ApiError && 'referenced' === error.message;
+}
+
+/**
+ * The one sentence to SHOW a human for a failed request - `detail` first, always.
+ *
+ * `ApiError` carries two halves of the same failure (see the `ErrorEnvelope` docblock at the top of
+ * this file): `message` is the machine reason the code branches on (`overlap`, `not_approvable`,
+ * `referenced`, and - for every single 400 the admin API can answer, since `Rest\Errors::badRequest()`
+ * hardcodes it - the useless literal `invalid_request`), while `data.detail` is the translated,
+ * per-field sentence written expressly to be shown verbatim. Six screens each carried their own
+ * `error instanceof Error ? error.message : ...` copy of this, which threw the translated half away
+ * and showed the admin "Error: invalid_request" for any of ~18 possible bad fields, or an
+ * untranslated "overlap"/"not_approvable" to a non-English admin.
+ *
+ * Falls back, in order: a non-empty `detail`, then the machine `message` (better than nothing when a
+ * response somehow carries no detail - `ApiError.fromResponse()` already defaults `detail` to
+ * `message`, so this only matters for a hand-constructed `ApiError`), then any other `Error`'s own
+ * message (a network/parse failure from `fetch`, which is genuinely all there is to say), then a
+ * generic sentence for a non-`Error` throw.
+ */
+export function errorMessage( error: unknown ): string {
+	if ( error instanceof ApiError ) {
+		return '' === error.detail.trim() ? error.message : error.detail;
+	}
+	if ( error instanceof Error && '' !== error.message.trim() ) {
+		return error.message;
+	}
+	return __( 'Something went wrong.', 'reservant' );
 }

@@ -11,7 +11,13 @@ import { ManualBookingDrawer } from '../ManualBookingDrawer';
 // The client layer is mocked, not React Query itself (task brief) - every hook in `api/queries.ts`
 // runs for real against a real `QueryClient`, so these tests exercise the actual mutation wiring
 // (`useApprove`, `useManualBooking`, ...) and only stub out the network boundary.
-jest.mock( '../../api/client', () => ( { apiFetch: jest.fn() } ) );
+// Only the network boundary is replaced - `ApiError`, `errorMessage` and `isReferencedConflict`
+// stay REAL, so a test can throw the same typed error the client layer builds from a real response
+// and screens render it exactly as they would in production.
+jest.mock( '../../api/client', () => ( {
+	...jest.requireActual( '../../api/client' ),
+	apiFetch: jest.fn(),
+} ) );
 
 const mockedApiFetch = apiFetch as jest.MockedFunction< typeof apiFetch >;
 

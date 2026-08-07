@@ -1,13 +1,10 @@
 import { useEffect, useState } from '@wordpress/element';
 import { __ } from '@wordpress/i18n';
 import { Button, CheckboxControl, Notice, Spinner, TextControl } from '@wordpress/components';
+import { errorMessage } from '../api/client';
 import { useSaveSettings, useSettings } from '../api/queries';
 import type { SettingsPayload } from '../api/types';
 import { useToasts } from '../components/Toasts';
-
-function errorMessage( error: unknown ): string {
-	return error instanceof Error ? error.message : __( 'Something went wrong.', 'reservant' );
-}
 
 /**
  * A TTL field is only ever meaningful as a positive whole number - `SettingsAdminController`'s own

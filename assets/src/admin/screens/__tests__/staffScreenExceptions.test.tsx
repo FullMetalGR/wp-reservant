@@ -14,7 +14,10 @@ import { StaffScreen } from '../StaffScreen';
  * on first load with no local action taken. Same mocking shape as `bookingactions.test.tsx`/
  * `settingsScreen.test.tsx`: only `apiFetch` is stubbed, every hook in `api/queries.ts` runs for real.
  */
-jest.mock( '../../api/client', () => ( { apiFetch: jest.fn() } ) );
+jest.mock( '../../api/client', () => ( {
+	...jest.requireActual( '../../api/client' ),
+	apiFetch: jest.fn(),
+} ) );
 
 const mockedApiFetch = apiFetch as jest.MockedFunction< typeof apiFetch >;
 

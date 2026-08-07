@@ -1,16 +1,13 @@
 import { useState } from '@wordpress/element';
 import { __ } from '@wordpress/i18n';
 import { Button, Notice, Spinner, TextControl, TextareaControl } from '@wordpress/components';
-import { ApiError, isReferencedConflict } from '../api/client';
+import { ApiError, errorMessage, isReferencedConflict } from '../api/client';
 import { useSaveSeatMap, useSeatMaps } from '../api/queries';
 import type { Seat, SeatMap } from '../api/types';
+import { RowSelectButton } from '../components/RowSelectButton';
 import { useToasts } from '../components/Toasts';
 
 const EXAMPLE_SPEC = 'rows A-J, 12 per row, aisle after 6';
-
-function errorMessage( error: unknown ): string {
-	return error instanceof Error ? error.message : __( 'Something went wrong.', 'reservant' );
-}
 
 interface SeatRow {
 	sortRow: number;
@@ -101,7 +98,9 @@ function SeatMapList( { seatMaps, selectedId, lockedIds, onSelect, onNew }: Seat
 							}
 							onClick={ () => onSelect( map.id ) }
 						>
-							<td>{ map.name }</td>
+							<td>
+								<RowSelectButton label={ map.name } isSelected={ map.id === selectedId } onSelect={ () => onSelect( map.id ) } />
+							</td>
 							<td>{ map.seats.length }</td>
 							<td>{ lockedIds.has( map.id ) ? __( 'Locked (in use)', 'reservant' ) : __( 'Editable', 'reservant' ) }</td>
 						</tr>
@@ -175,13 +174,16 @@ export function SeatMapsScreen() {
 					setSavedMap( saved );
 				},
 				onError: ( error ) => {
+					// A 400 here is a `SpecParseError` - `Rest\Errors::badRequest()` puts the parser's
+					// own sentence in `detail` (its `message` is the useless literal
+					// `invalid_request`), which `errorMessage()` is precisely what prefers.
 					if ( error instanceof ApiError && 400 === error.status ) {
-						setParseError( error.detail );
+						setParseError( errorMessage( error ) );
 						return;
 					}
 					if ( isReferencedConflict( error ) && null !== selectedId ) {
 						setLockedIds( ( current ) => new Set( current ).add( selectedId ) );
-						addToast( error instanceof ApiError ? error.detail : errorMessage( error ), 'error' );
+						addToast( errorMessage( error ), 'error' );
 						return;
 					}
 					addToast( errorMessage( error ), 'error' );

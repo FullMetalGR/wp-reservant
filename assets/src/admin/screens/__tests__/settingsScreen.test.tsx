@@ -9,7 +9,10 @@ import { SettingsScreen } from '../SettingsScreen';
 
 // Same mocking shape as `bookingactions.test.tsx`: only the network boundary is stubbed, every
 // hook in `api/queries.ts` runs for real against a real `QueryClient`.
-jest.mock( '../../api/client', () => ( { apiFetch: jest.fn() } ) );
+jest.mock( '../../api/client', () => ( {
+	...jest.requireActual( '../../api/client' ),
+	apiFetch: jest.fn(),
+} ) );
 
 const mockedApiFetch = apiFetch as jest.MockedFunction< typeof apiFetch >;
 
