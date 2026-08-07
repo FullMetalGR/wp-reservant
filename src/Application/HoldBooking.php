@@ -154,7 +154,7 @@ final class HoldBooking {
 						$items,
 						$candidates,
 						$request->appointment->sameStaff,
-						$this->openIntervals( $items, $candidates )
+						self::openIntervals( $this->availability, $items, $candidates )
 					);
 				}
 
@@ -376,6 +376,71 @@ final class HoldBooking {
 	}
 
 	/**
+	 * The booking window an APPOINTMENT chain must satisfy: on the granularity grid, late enough to
+	 * respect the notice period, near enough to still be on sale.
+	 *
+	 * Extracted from `validateChainWindow()` so `RescheduleBooking` holds a moved chain to the exact
+	 * window a fresh hold is held to. Reads no state - the caller supplies the aggregated
+	 * lead time and horizon, which for a chain are the longest notice and the nearest horizon of its
+	 * segments.
+	 *
+	 * @param bool $admin Owner/admin action: skips the lead-time and horizon clamps ONLY, backdating
+	 *                    included. An off-grid start is still `bad_time`; see `assertWithinWindow()`.
+	 * @throws SlotConflict `bad_time`, `lead_time` or `horizon`.
+	 */
+	public static function assertChainWindow( \DateTimeImmutable $startUtc, \DateTimeImmutable $nowUtc, int $leadTimeMin, int $horizonDays, bool $admin ): void {
+		$start = $startUtc->setTimezone( new \DateTimeZone( 'UTC' ) );
+
+		$secondsIntoDay = $start->getTimestamp() - $start->setTime( 0, 0 )->getTimestamp();
+		if ( 0 !== $secondsIntoDay % ( self::granularity() * 60 ) ) {
+			throw new SlotConflict( 'bad_time' );
+		}
+		self::assertWithinWindow( $start, self::anchor( $nowUtc ), $leadTimeMin, $horizonDays, $admin );
+	}
+
+	/**
+	 * The same window for an OCCURRENCE, minus the grid.
+	 *
+	 * `validateEvent()`'s standing ruling, unchanged and now shared: an occurrence's start is authored
+	 * by the owner, not chosen by the customer, so refusing it for sitting off-grid would reject the
+	 * shop's own calendar.
+	 *
+	 * @throws SlotConflict `lead_time` or `horizon`.
+	 */
+	public static function assertOccurrenceWindow( \DateTimeImmutable $startUtc, \DateTimeImmutable $nowUtc, int $leadTimeMin, int $horizonDays, bool $admin ): void {
+		self::assertWithinWindow( $startUtc->setTimezone( new \DateTimeZone( 'UTC' ) ), self::anchor( $nowUtc ), $leadTimeMin, $horizonDays, $admin );
+	}
+
+	/**
+	 * Every item's service span falls inside its own resource's working hours.
+	 *
+	 * The check `assignResources()` folds into staff selection, lifted out for the case where the
+	 * staff member is already decided - a reschedule keeps the one it was sold with, so there is
+	 * nothing to select, only something to verify. Same `coversSpan()` predicate, so a moved chain and
+	 * a fresh hold agree on what "open" means.
+	 *
+	 * Deliberately NOT gated on an admin/force flag, exactly as it is not in `assignResources()`:
+	 * opening hours are the staff member's availability, not a sales window, and admin-mode holds
+	 * have never been able to book outside them either.
+	 *
+	 * @param list<array<string, mixed>> $items items with `resource_id` already filled in.
+	 * @throws SlotConflict `outside_hours`, carrying the failing segment index.
+	 */
+	public static function assertItemsWithinOpeningHours( AvailabilityRepository $availability, array $items ): void {
+		$candidates = array_map(
+			static fn ( array $item ): array => array( (int) $item['resource_id'] ),
+			$items
+		);
+		$open       = self::openIntervals( $availability, $items, $candidates );
+		foreach ( $items as $index => $item ) {
+			if ( ! self::coversSpan( $open, (int) $item['resource_id'], $item ) ) {
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped
+				throw new SlotConflict( 'outside_hours', $index );
+			}
+		}
+	}
+
+	/**
 	 * First candidate (ascending id) that is open and has no blocking overlap wins -
 	 * deterministic, so a failure reproduces in tests.
 	 *
@@ -402,11 +467,14 @@ final class HoldBooking {
 	 * Open intervals for every (candidate resource, UTC day) an appointment item's service span
 	 * touches. Read under the lock but not contended; one query pair feeds the whole chain.
 	 *
+	 * Static, with the repository passed in, so `RescheduleBooking` can ask the same question about a
+	 * moved chain without owning a `HoldBooking` - see `assertItemsWithinOpeningHours()`.
+	 *
 	 * @param list<array<string, mixed>> $items
 	 * @param list<list<int>>            $candidates parallel to $items
 	 * @return array<string, list<array{\DateTimeImmutable,\DateTimeImmutable}>> keyed "resourceId|Y-m-d"
 	 */
-	private function openIntervals( array $items, array $candidates ): array {
+	private static function openIntervals( AvailabilityRepository $availability, array $items, array $candidates ): array {
 		$resourceIds = array();
 		foreach ( $candidates as $pool ) {
 			$resourceIds = array_merge( $resourceIds, $pool );
@@ -416,8 +484,8 @@ final class HoldBooking {
 			return array();
 		}
 
-		$rules      = $this->availability->rulesForResources( $resourceIds );
-		$exceptions = $this->availability->exceptionsForResources( $resourceIds );
+		$rules      = $availability->rulesForResources( $resourceIds );
+		$exceptions = $availability->exceptionsForResources( $resourceIds );
 		$expander   = new RuleExpander( wp_timezone() );
 		$utc        = new \DateTimeZone( 'UTC' );
 
@@ -506,9 +574,9 @@ final class HoldBooking {
 		if ( null === $service || 'active' !== $service['status'] ) {
 			throw new SlotConflict( 'not_found' );
 		}
-		self::assertWithinWindow(
+		self::assertOccurrenceWindow(
 			new \DateTimeImmutable( (string) $occurrence['start_utc'], new \DateTimeZone( 'UTC' ) ),
-			self::anchor( $nowUtc ),
+			$nowUtc,
 			(int) $service['lead_time_min'],
 			(int) $service['horizon_days'],
 			$admin
@@ -565,14 +633,7 @@ final class HoldBooking {
 	 * @param array<string, mixed> $plan
 	 */
 	private function validateChainWindow( AppointmentRequest $appointment, array $plan, \DateTimeImmutable $nowUtc, bool $admin ): void {
-		$start = $appointment->startUtc->setTimezone( new \DateTimeZone( 'UTC' ) );
-
-		$secondsIntoDay = $start->getTimestamp() - $start->setTime( 0, 0 )->getTimestamp();
-		if ( 0 !== $secondsIntoDay % ( self::granularity() * 60 ) ) {
-			throw new SlotConflict( 'bad_time' );
-		}
-
-		self::assertWithinWindow( $start, self::anchor( $nowUtc ), (int) $plan['lead_time_min'], (int) $plan['horizon_days'], $admin );
+		self::assertChainWindow( $appointment->startUtc, $nowUtc, (int) $plan['lead_time_min'], (int) $plan['horizon_days'], $admin );
 	}
 
 	/**

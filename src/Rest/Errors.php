@@ -16,7 +16,7 @@ use Reservant\Application\SlotConflict;
 final class Errors {
 
 	/**
-	 * Every reason string this plugin may repeat back to a caller: the ten `SlotConflict` codes
+	 * Every reason string this plugin may repeat back to a caller: the eleven `SlotConflict` codes
 	 * (documented on that class) plus the lifecycle refusals the use cases throw. Anything outside
 	 * this list is an internal detail - grep `src/` for `new \RuntimeException(` before adding to it.
 	 */
@@ -32,6 +32,9 @@ final class Errors {
 		'horizon',
 		'outside_hours',
 		'bad_seat',
+		// SlotConflict - RescheduleBooking's own addition. Its closed-window refusal is `window_closed`
+		// below, deliberately the same signal CancelBooking raises, not a second convention.
+		'not_reschedulable',
 		// Lifecycle - ConfirmBooking, CancelBooking, HoldBooking, HoldsController::release().
 		'window_closed',
 		'online_payment_required',
@@ -146,6 +149,7 @@ final class Errors {
 			'horizon'                 => __( 'That date is too far ahead to book.', 'reservant' ),
 			'outside_hours'           => __( 'That time is outside our working hours.', 'reservant' ),
 			'bad_seat'                => __( 'Those seats are not selectable.', 'reservant' ),
+			'not_reschedulable'       => __( 'This booking can no longer be moved.', 'reservant' ),
 			'window_closed'           => __( 'It is too late to change this booking. Please contact us.', 'reservant' ),
 			'online_payment_required' => __( 'This booking must be paid for online.', 'reservant' ),
 			'hold_expired'            => __( 'Your reservation expired. Please start again.', 'reservant' ),

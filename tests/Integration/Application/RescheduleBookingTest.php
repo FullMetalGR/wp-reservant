@@ -75,6 +75,26 @@ final class RescheduleBookingTest extends ReservantTestCase {
 	}
 
 	/**
+	 * A service wanting two hours' notice, with its reschedule window opened right up so the lead-time
+	 * refusal is what the test actually reaches (the window is checked first, and it defaults to 24 h).
+	 */
+	private function noticeService(): int {
+		global $wpdb;
+		$id = ( new ServiceRepository( $wpdb ) )->insert(
+			array(
+				'name'                    => 'Shave',
+				'type'                    => 'appointment',
+				'duration_min'            => 30,
+				'payment_mode'            => 'onsite',
+				'lead_time_min'           => 120,
+				'reschedule_window_hours' => 0,
+			)
+		);
+		( new ResourceRepository( $wpdb ) )->linkService( $id, $this->staffA );
+		return $id;
+	}
+
+	/**
 	 * @param list<SegmentChoice> $segments
 	 * @return array<string, mixed>
 	 */
@@ -147,7 +167,14 @@ final class RescheduleBookingTest extends ReservantTestCase {
 		self::assertSame( $this->staffA, $after['items'][0]['resource_id'] );
 	}
 
-	/** The service's reschedule window binds a customer; `$force` is the owner's escape from it. */
+	/**
+	 * The service's reschedule window binds a customer; `$force` is the owner's escape from it.
+	 *
+	 * The refusal is `\RuntimeException('window_closed')`, not a `SlotConflict` - the same signal
+	 * `CancelBooking` raises for the same class of refusal, so both answer 403 through
+	 * `Errors::failure()` rather than inventing a second convention. `SlotConflict` extends
+	 * `\RuntimeException`, so the message is what this asserts on (`LifecycleTest`'s idiom).
+	 */
 	public function test_refuses_outside_the_policy_window_unless_forced(): void {
 		global $wpdb;
 		$trim = ( new ServiceRepository( $wpdb ) )->insert(
@@ -160,9 +187,9 @@ final class RescheduleBookingTest extends ReservantTestCase {
 
 		try {
 			RescheduleBooking::make( $wpdb )->execute( (string) $booking['uuid'], $this->utc( 3, '14:00' ), null, $now );
-			self::fail( 'Expected a policy refusal.' );
-		} catch ( SlotConflict $exception ) {
-			self::assertSame( 'policy', $exception->reason );
+			self::fail( 'Expected a window_closed refusal.' );
+		} catch ( \RuntimeException $exception ) {
+			self::assertSame( 'window_closed', $exception->getMessage() );
 		}
 		self::assertSame(
 			$this->sql( 3, '09:00' ),
@@ -171,6 +198,129 @@ final class RescheduleBookingTest extends ReservantTestCase {
 
 		$forced = RescheduleBooking::make( $wpdb )->execute( (string) $booking['uuid'], $this->utc( 3, '14:00' ), null, $now, true );
 		self::assertSame( $this->sql( 3, '14:00' ), $forced['items'][0]['start_utc'] );
+	}
+
+	/**
+	 * A start off the granularity grid is not a slot the shop ever offered.
+	 *
+	 * `$force` does NOT excuse it, exactly as `HoldBooking`'s admin flag does not: the grid is what a
+	 * start time IS, not a sales window an owner may waive.
+	 */
+	public function test_refuses_a_start_off_the_granularity_grid(): void {
+		global $wpdb;
+		$booking    = $this->confirmedChain( $this->utc( 1, '09:00' ), array( new SegmentChoice( $this->cutId, $this->staffA ) ) );
+		$reschedule = RescheduleBooking::make( $wpdb );
+
+		foreach ( array( false, true ) as $force ) {
+			try {
+				$reschedule->execute( (string) $booking['uuid'], $this->utc( 1, '09:07' ), null, $this->utc( 0 ), $force );
+				self::fail( 'Expected a bad_time refusal.' );
+			} catch ( SlotConflict $exception ) {
+				self::assertSame( 'bad_time', $exception->reason );
+			}
+		}
+		self::assertSame(
+			$this->sql( 1, '09:00' ),
+			( new BookingRepository( $wpdb ) )->findByUuid( (string) $booking['uuid'] )['items'][0]['start_utc']
+		);
+	}
+
+	/**
+	 * Staff work 09:00-17:00, so 20:00 is nobody's slot to give.
+	 *
+	 * `$force` does NOT excuse this either: opening hours are the staff member's availability, not a
+	 * sales window, and admin-mode holds have never been able to book outside them
+	 * (`HoldBooking::assignResources()` applies `coversSpan()` regardless of the admin flag).
+	 */
+	public function test_refuses_a_target_outside_working_hours(): void {
+		global $wpdb;
+		$booking    = $this->confirmedChain( $this->utc( 1, '10:00' ), array( new SegmentChoice( $this->cutId, $this->staffA ) ) );
+		$reschedule = RescheduleBooking::make( $wpdb );
+
+		foreach ( array( false, true ) as $force ) {
+			try {
+				$reschedule->execute( (string) $booking['uuid'], $this->utc( 1, '20:00' ), null, $this->utc( 0 ), $force );
+				self::fail( 'Expected an outside_hours refusal.' );
+			} catch ( SlotConflict $exception ) {
+				self::assertSame( 'outside_hours', $exception->reason );
+			}
+		}
+		self::assertSame(
+			$this->sql( 1, '10:00' ),
+			( new BookingRepository( $wpdb ) )->findByUuid( (string) $booking['uuid'] )['items'][0]['start_utc']
+		);
+	}
+
+	/** The service's notice period applies to where a booking MOVES to, not only to where it began. */
+	public function test_refuses_a_target_inside_the_lead_time(): void {
+		global $wpdb;
+		$booking = $this->confirmedChain( $this->utc( 5, '12:00' ), array( new SegmentChoice( $this->noticeService(), $this->staffA ) ) );
+
+		try {
+			// "Now" is 11:00 and the service wants two hours' notice, so 11:30 is too soon.
+			RescheduleBooking::make( $wpdb )->execute( (string) $booking['uuid'], $this->utc( 5, '11:30' ), null, $this->utc( 5, '11:00' ) );
+			self::fail( 'Expected a lead_time refusal.' );
+		} catch ( SlotConflict $exception ) {
+			self::assertSame( 'lead_time', $exception->reason );
+		}
+		self::assertSame(
+			$this->sql( 5, '12:00' ),
+			( new BookingRepository( $wpdb ) )->findByUuid( (string) $booking['uuid'] )['items'][0]['start_utc']
+		);
+	}
+
+	/** A service on sale ten days out cannot be moved twelve days out. */
+	public function test_refuses_a_target_beyond_the_horizon(): void {
+		global $wpdb;
+		$shortRun = ( new ServiceRepository( $wpdb ) )->insert(
+			array( 'name' => 'Pop-up', 'type' => 'appointment', 'duration_min' => 30, 'payment_mode' => 'onsite', 'horizon_days' => 10 )
+		);
+		( new ResourceRepository( $wpdb ) )->linkService( $shortRun, $this->staffA );
+		$booking = $this->confirmedChain( $this->utc( 1, '09:00' ), array( new SegmentChoice( $shortRun, $this->staffA ) ) );
+
+		try {
+			// Day 0 is "now" and the horizon is ten days, so day 12 is past the end of the sale.
+			RescheduleBooking::make( $wpdb )->execute( (string) $booking['uuid'], $this->utc( 12, '09:00' ), null, $this->utc( 0 ) );
+			self::fail( 'Expected a horizon refusal.' );
+		} catch ( SlotConflict $exception ) {
+			self::assertSame( 'horizon', $exception->reason );
+		}
+		self::assertSame(
+			$this->sql( 1, '09:00' ),
+			( new BookingRepository( $wpdb ) )->findByUuid( (string) $booking['uuid'] )['items'][0]['start_utc']
+		);
+	}
+
+	/**
+	 * `$force` draws the line exactly where `HoldBooking`'s admin flag draws it: the sales windows are
+	 * waived - lead time, horizon, and with them the guard against a start already in the past, which
+	 * is how an owner records a walk-in after the fact - and integrity is not.
+	 */
+	public function test_force_skips_the_window_clamps_but_never_the_overlap_check(): void {
+		global $wpdb;
+		$notice     = $this->noticeService();
+		$booking    = $this->confirmedChain( $this->utc( 5, '12:00' ), array( new SegmentChoice( $notice, $this->staffA ) ) );
+		$reschedule = RescheduleBooking::make( $wpdb );
+		$now        = $this->utc( 5, '11:00' );
+
+		// 10:00 is both inside the two-hour notice period and already an hour in the past.
+		$backdated = $reschedule->execute( (string) $booking['uuid'], $this->utc( 5, '10:00' ), null, $now, true );
+		self::assertSame( $this->sql( 5, '10:00' ), $backdated['items'][0]['start_utc'] );
+
+		// A rival holds 15:00, and forcing does not take it away from them.
+		$this->hold( $this->utc( 5, '15:00' ), array( new SegmentChoice( $notice, $this->staffA ) ) );
+		try {
+			$reschedule->execute( (string) $booking['uuid'], $this->utc( 5, '15:00' ), null, $now, true );
+			self::fail( 'Expected an overlap conflict even under force.' );
+		} catch ( SlotConflict $exception ) {
+			self::assertSame( 'overlap', $exception->reason );
+		}
+
+		$after = ( new BookingRepository( $wpdb ) )->findByUuid( (string) $booking['uuid'] );
+		self::assertNotNull( $after );
+		self::assertSame( 'confirmed', $after['status'] );
+		self::assertCount( 1, $after['items'] );
+		self::assertSame( $this->sql( 5, '10:00' ), $after['items'][0]['start_utc'] );
 	}
 
 	/** A booking that is not blocking anything has no slot to move. */

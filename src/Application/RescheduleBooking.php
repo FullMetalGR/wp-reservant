@@ -7,6 +7,7 @@ use Reservant\Application\Dto\BookingSnapshot;
 use Reservant\Domain\Booking\CancellationPolicy;
 use Reservant\Domain\Enum\BookingStatus;
 use Reservant\Infrastructure\Db\AuditLog;
+use Reservant\Infrastructure\Db\AvailabilityRepository;
 use Reservant\Infrastructure\Db\BookingRepository;
 use Reservant\Infrastructure\Db\LockKey;
 use Reservant\Infrastructure\Db\LockManager;
@@ -19,6 +20,11 @@ use Reservant\Infrastructure\Db\TransactionRunner;
  * Move an existing booking to a new time (appointments and chains) or to a new occurrence (events) -
  * AGENTS.md section 5: "Reschedule moves ALL segments as one atomic release + re-hold; partial
  * success is impossible."
+ *
+ * The target is held to the same rules a fresh hold is held to, through `HoldBooking`'s own
+ * assertions rather than a second copy of them: the granularity grid, the notice period, the booking
+ * horizon and the staff member's working hours. A slot the hold protocol would have refused is not a
+ * slot a reschedule may land on - the business cannot serve it either way.
  *
  * Atomic by construction. The release and the re-hold happen inside ONE transaction, under the union
  * of the locks guarding both the slots being freed and the slots being taken. If the new placement is
@@ -67,16 +73,19 @@ use Reservant\Infrastructure\Db\TransactionRunner;
  *    the locked re-read and compared: a mismatch is refused `stale_state` (retryable) rather than
  *    released under a mutex nobody holds. Acquiring the missing keys mid-transaction is NOT the fix -
  *    it would take a key out of global order and reintroduce the deadlock `sorted()` exists to prevent.
- *  - It says nothing about opening hours, the granularity grid, lead time or the booking horizon.
- *    Those are POLICY - owner-configured business rules - and this use case enforces exactly one
- *    policy, the service's `reschedule_window_hours`, which `$force` overrides. Integrity (overlap,
- *    capacity) is enforced unconditionally and `$force` never touches it. A caller that wants a
- *    customer held to the advertised grid must apply that at its own boundary, on the same advisory
- *    availability read the widget already uses.
- *  - Seat-mapped (grid) event bookings are refused `not_reschedulable`. Moving named seats is a
- *    re-pick, not a move, and this signature carries no seat choice to re-pick with; silently
- *    transplanting the old seat ids onto another occurrence would be a decision the customer never
- *    made. Capacity-only event bookings move freely.
+ *  - The window rules it enforces - the granularity grid, the notice period, the horizon, opening
+ *    hours - are asserted against the availability tables as they read INSIDE the transaction, but
+ *    those tables are not under the slot mutex: an owner editing a working-hours rule takes no
+ *    resource-day lock at all. A move validated against hours the owner narrows moments later is
+ *    therefore possible, exactly as it already is for `HoldBooking`, which reads the same tables
+ *    under the same locks. This is not a case the lock reaches, and it is not one this class makes
+ *    worse; capacity, which is what the mutex exists for, is unaffected either way.
+ *  - Seat-mapped (grid) event bookings are refused `not_reschedulable`. That is a DELIBERATE limit,
+ *    not an oversight or an unimplemented branch: moving named seats is a re-pick, not a move, and
+ *    this signature carries no seat choice to re-pick with. Silently transplanting the old seat ids
+ *    onto another occurrence would be a decision the customer never made, and refusing is the
+ *    smaller harm. The seat picker is v1.2; until it exists, capacity-only event bookings move
+ *    freely and grid ones do not move at all.
  *
  * The booking's own commercial terms are carried over untouched: `price_minor` per item and the
  * container's `total_minor` are what the customer agreed to, and moving an appointment is not a
@@ -92,6 +101,7 @@ final class RescheduleBooking {
 		private readonly BookingRepository $bookings,
 		private readonly ServiceRepository $services,
 		private readonly OccurrenceRepository $occurrences,
+		private readonly AvailabilityRepository $availability,
 		private readonly AuditLog $audit,
 	) {}
 
@@ -103,6 +113,7 @@ final class RescheduleBooking {
 			new BookingRepository( $db ),
 			new ServiceRepository( $db ),
 			new OccurrenceRepository( $db ),
+			new AvailabilityRepository( $db ),
 			new AuditLog( $db )
 		);
 	}
@@ -116,17 +127,24 @@ final class RescheduleBooking {
 	 *                                             appointment move. It must match the booking's own
 	 *                                             shape - an appointment cannot be moved onto an
 	 *                                             occurrence, nor an event off one.
-	 * @param bool               $force            Skip the reschedule window (owner/admin action). It
-	 *                                             skips POLICY only: overlap and capacity are integrity
-	 *                                             and are enforced for a forced move exactly as for a
-	 *                                             customer one.
+	 * @param bool               $force            Owner/admin action. Skips the SALES windows and
+	 *                                             nothing else: the service's reschedule window, the
+	 *                                             lead time and the horizon - backdating included,
+	 *                                             this project's standing ruling for admin-mode holds.
+	 *                                             It does NOT skip the granularity grid or opening
+	 *                                             hours (`HoldBooking`'s admin flag does not either),
+	 *                                             and it never skips overlap or capacity, which are
+	 *                                             integrity rather than policy.
 	 * @return array<string, mixed> The updated `BookingRepository::findByUuid()` row.
 	 * @throws SlotConflict `not_found` (the booking, a named service, or the target occurrence),
 	 *                      `not_reschedulable` (status, shape, or a seat-mapped event booking),
-	 *                      `policy` (inside the reschedule window and not forced), `overlap`
-	 *                      (a blocking item already covers the target range), `capacity` (the target
-	 *                      occurrence has no room). `\RuntimeException('stale_state')` when the booking
-	 *                      moved under this call - retryable, never a partial write.
+	 *                      `bad_time` (off the granularity grid), `lead_time`, `horizon`,
+	 *                      `outside_hours`, `overlap` (a blocking item already covers the target
+	 *                      range), `capacity` (the target occurrence has no room).
+	 * @throws \RuntimeException `window_closed` when the service's reschedule window has closed and the
+	 *                      caller did not force - `CancelBooking`'s convention, so the two guest-facing
+	 *                      policy refusals answer with one status. `stale_state` when the booking moved
+	 *                      under this call - retryable, never a partial write.
 	 */
 	public function execute( string $uuid, \DateTimeImmutable $newStartUtc, ?int $newOccurrenceId, \DateTimeImmutable $nowUtc, bool $force = false ): array {
 		$booking = $this->bookings->findByUuid( $uuid );
@@ -137,10 +155,11 @@ final class RescheduleBooking {
 		// them is decided again under the lock below, which is what actually binds.
 		$this->assertReschedulable( $booking, $nowUtc, $newOccurrenceId );
 		if ( ! $force && ! $this->policyAllows( $booking, $nowUtc ) ) {
-			throw new SlotConflict( 'policy' );
+			throw new \RuntimeException( 'window_closed' );
 		}
 
 		$plan = $this->plan( $booking, $newStartUtc, $newOccurrenceId );
+		self::assertWindow( $plan, $nowUtc, $force );
 		$keys = self::union( $booking, $plan );
 		// Mutex rows must exist before the transaction opens - SELECT ... FOR UPDATE cannot lock a row
 		// that is not there (AGENTS.md section 2.2). Both halves of the union, not just the new one.
@@ -159,7 +178,7 @@ final class RescheduleBooking {
 				}
 				$this->assertReschedulable( $fresh, $nowUtc, $newOccurrenceId );
 				if ( ! $force && ! $this->policyAllows( $fresh, $nowUtc ) ) {
-					throw new SlotConflict( 'policy' );
+					throw new \RuntimeException( 'window_closed' );
 				}
 
 				$plan = $this->plan( $fresh, $newStartUtc, $newOccurrenceId );
@@ -167,6 +186,14 @@ final class RescheduleBooking {
 					// The booking moved between the unlocked plan and this transaction, so the locks held
 					// are not the locks this write needs. Refuse rather than write outside the mutex.
 					throw new \RuntimeException( 'stale_state' );
+				}
+				// The target must be one the business can actually serve, decided here rather than on
+				// the unlocked read above: the grid and the clamps are pure input, but opening hours
+				// read the availability tables, and every read this decision rests on is taken with the
+				// mutexes held.
+				self::assertWindow( $plan, $nowUtc, $force );
+				if ( null === $plan['occurrence'] ) {
+					HoldBooking::assertItemsWithinOpeningHours( $this->availability, $plan['items'] );
 				}
 
 				$bookingId = (int) $fresh['id'];
@@ -213,7 +240,7 @@ final class RescheduleBooking {
 	 * hold of either placement would have locked - never a set derived some other way.
 	 *
 	 * @param array<string, mixed>                                                 $booking
-	 * @param array{items: list<array<string, mixed>>, occurrence: array<string, mixed>|null, seats: int} $plan
+	 * @param array{items: list<array<string, mixed>>, occurrence: array<string, mixed>|null, seats: int, lead_time_min: int, horizon_days: int} $plan
 	 * @return list<LockKey>
 	 */
 	private static function union( array $booking, array $plan ): array {
@@ -239,7 +266,7 @@ final class RescheduleBooking {
 	 * the locked re-read, which is the one that decides. Nothing here writes.
 	 *
 	 * @param array<string, mixed> $booking
-	 * @return array{items: list<array<string, mixed>>, occurrence: array<string, mixed>|null, seats: int}
+	 * @return array{items: list<array<string, mixed>>, occurrence: array<string, mixed>|null, seats: int, lead_time_min: int, horizon_days: int}
 	 */
 	private function plan( array $booking, \DateTimeImmutable $newStartUtc, ?int $newOccurrenceId ): array {
 		/** @var list<array<string, mixed>> $current */
@@ -263,13 +290,15 @@ final class RescheduleBooking {
 	 * would be a different sale.
 	 *
 	 * @param list<array<string, mixed>> $current
-	 * @return array{items: list<array<string, mixed>>, occurrence: array<string, mixed>|null, seats: int}
+	 * @return array{items: list<array<string, mixed>>, occurrence: array<string, mixed>|null, seats: int, lead_time_min: int, horizon_days: int}
 	 */
 	private function planAppointment( array $current, \DateTimeImmutable $newStartUtc ): array {
 		// Normalise to UTC first: adding minutes inside a DST-observing zone shifts the instant.
-		$chainStart = $newStartUtc->setTimezone( new \DateTimeZone( 'UTC' ) );
-		$offsetMin  = 0;
-		$items      = array();
+		$chainStart  = $newStartUtc->setTimezone( new \DateTimeZone( 'UTC' ) );
+		$offsetMin   = 0;
+		$items       = array();
+		$leadMin     = 0;
+		$horizonDays = null;
 
 		foreach ( $current as $index => $item ) {
 			$service = $this->services->find( (int) $item['service_id'] );
@@ -279,6 +308,11 @@ final class RescheduleBooking {
 			}
 			$geometry   = HoldBooking::segmentGeometry( $service, $chainStart, $offsetMin );
 			$offsetMin += (int) $geometry['advance_min'];
+
+			// The whole chain must satisfy every segment's booking window: the longest notice and the
+			// nearest horizon win - `planAppointment()`'s rule in `HoldBooking`, unchanged.
+			$leadMin     = max( $leadMin, (int) $service['lead_time_min'] );
+			$horizonDays = null === $horizonDays ? (int) $service['horizon_days'] : min( $horizonDays, (int) $service['horizon_days'] );
 
 			$items[] = array(
 				'service_id'          => (int) $item['service_id'],
@@ -295,9 +329,11 @@ final class RescheduleBooking {
 			);
 		}
 		return array(
-			'items'      => $items,
-			'occurrence' => null,
-			'seats'      => 0,
+			'items'         => $items,
+			'occurrence'    => null,
+			'seats'         => 0,
+			'lead_time_min' => $leadMin,
+			'horizon_days'  => (int) $horizonDays,
 		);
 	}
 
@@ -309,7 +345,7 @@ final class RescheduleBooking {
 	 * them in a room nobody is opening.
 	 *
 	 * @param list<array<string, mixed>> $current
-	 * @return array{items: list<array<string, mixed>>, occurrence: array<string, mixed>|null, seats: int}
+	 * @return array{items: list<array<string, mixed>>, occurrence: array<string, mixed>|null, seats: int, lead_time_min: int, horizon_days: int}
 	 */
 	private function planEvent( array $current, int $newOccurrenceId ): array {
 		$occurrence = $this->occurrences->find( $newOccurrenceId );
@@ -317,6 +353,12 @@ final class RescheduleBooking {
 			throw new SlotConflict( 'not_found' );
 		}
 		if ( (int) $occurrence['service_id'] !== (int) $current[0]['service_id'] ) {
+			throw new SlotConflict( 'not_found' );
+		}
+		// The window clamps are the service's, exactly as `HoldBooking::validateEvent()` reads them.
+		// `status` is not re-checked here for the reason `planAppointment()` gives.
+		$service = $this->services->find( (int) $occurrence['service_id'] );
+		if ( null === $service ) {
 			throw new SlotConflict( 'not_found' );
 		}
 
@@ -339,9 +381,49 @@ final class RescheduleBooking {
 			);
 		}
 		return array(
-			'items'      => $items,
-			'occurrence' => $occurrence,
-			'seats'      => $seats,
+			'items'         => $items,
+			'occurrence'    => $occurrence,
+			'seats'         => $seats,
+			'lead_time_min' => (int) $service['lead_time_min'],
+			'horizon_days'  => (int) $service['horizon_days'],
+		);
+	}
+
+	/**
+	 * The target must be a time the business can actually serve, not merely a free one.
+	 *
+	 * `HoldBooking`'s own window assertions, called on the planned placement: the granularity grid, the
+	 * notice period and the booking horizon for a chain; the notice period and the horizon for an
+	 * occurrence, whose start the owner authored and which is therefore never grid-checked. Reusing them
+	 * is the point - a moved booking that a fresh hold would have refused is a booking nobody can serve.
+	 *
+	 * `$force` is passed straight through as `HoldBooking`'s admin flag, so it skips the lead-time and
+	 * horizon clamps (backdating included) and nothing else. Opening hours are asserted by the caller,
+	 * under the lock, and are not gated on `$force` at all - see
+	 * `HoldBooking::assertItemsWithinOpeningHours()`.
+	 *
+	 * @param array{items: list<array<string, mixed>>, occurrence: array<string, mixed>|null, seats: int, lead_time_min: int, horizon_days: int} $plan
+	 * @throws SlotConflict `bad_time`, `lead_time` or `horizon`.
+	 */
+	private static function assertWindow( array $plan, \DateTimeImmutable $nowUtc, bool $force ): void {
+		$utc        = new \DateTimeZone( 'UTC' );
+		$occurrence = $plan['occurrence'];
+		if ( null !== $occurrence ) {
+			HoldBooking::assertOccurrenceWindow(
+				new \DateTimeImmutable( (string) $occurrence['start_utc'], $utc ),
+				$nowUtc,
+				$plan['lead_time_min'],
+				$plan['horizon_days'],
+				$force
+			);
+			return;
+		}
+		HoldBooking::assertChainWindow(
+			new \DateTimeImmutable( (string) $plan['items'][0]['start_utc'], $utc ),
+			$nowUtc,
+			$plan['lead_time_min'],
+			$plan['horizon_days'],
+			$force
 		);
 	}
 
@@ -354,7 +436,7 @@ final class RescheduleBooking {
 	 * `OccurrencesAdminController`, where two concurrent requests both passed it. Without the lock this
 	 * check closes nothing at all.
 	 *
-	 * @param array{items: list<array<string, mixed>>, occurrence: array<string, mixed>|null, seats: int} $plan
+	 * @param array{items: list<array<string, mixed>>, occurrence: array<string, mixed>|null, seats: int, lead_time_min: int, horizon_days: int} $plan
 	 */
 	private function assertTargetIsFree( array $plan ): void {
 		$occurrence = $plan['occurrence'];
@@ -422,6 +504,10 @@ final class RescheduleBooking {
 	 *
 	 * The `reservant/booking/can_reschedule` filter mirrors `reservant/booking/can_cancel`: a site may
 	 * widen or narrow the window, and `$force` bypasses both.
+	 *
+	 * The caller refuses with `\RuntimeException('window_closed')`, not a `SlotConflict` - the same
+	 * signal `CancelBooking` raises for the same class of refusal, so both guest-facing policy
+	 * refusals reach `Errors::failure()` and answer 403 with one sentence rather than two conventions.
 	 *
 	 * @param array<string, mixed> $booking
 	 */
