@@ -17,17 +17,17 @@ const CANCELLABLE_STATUSES: readonly BookingStatus[] = [ 'pending', 'awaiting_ap
  * `reservant_manage_bookings` does NOT imply it. A caller who holds manage without approve (e.g. a
  * custom "booking manager" role built with a role editor) must not see a button that 403s.
  */
-export function canDecide( caps: string[], status: BookingStatus ): boolean {
+function canDecide( caps: string[], status: BookingStatus ): boolean {
 	return 'awaiting_approval' === status && caps.includes( 'reservant_approve_bookings' );
 }
 
 /** Cancel is a manager override (`BookingsAdminController::cancel()` is manage-gated outright). */
-export function canCancel( caps: string[], status: BookingStatus ): boolean {
+function canCancel( caps: string[], status: BookingStatus ): boolean {
 	return caps.includes( 'reservant_manage_bookings' ) && CANCELLABLE_STATUSES.includes( status );
 }
 
 /** Completed/No-show only make sense once the booking is confirmed AND its own start has passed. */
-export function canMarkOutcome( caps: string[], status: BookingStatus, started: boolean ): boolean {
+function canMarkOutcome( caps: string[], status: BookingStatus, started: boolean ): boolean {
 	return caps.includes( 'reservant_manage_bookings' ) && 'confirmed' === status && started;
 }
 

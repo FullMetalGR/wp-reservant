@@ -19,7 +19,8 @@
     "start": "wp-scripts start admin=assets/src/admin/index.tsx --output-path=build",
     "test:js": "wp-scripts test-unit-js",
     "test:e2e": "playwright test",
-    "tsc": "tsc --noEmit"
+    "tsc": "tsc --noEmit",
+    "fallow": "fallow --ci --output-file .fallow-report.sarif && node bin/fallow-gate.mjs .fallow-report.sarif"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.101.4",

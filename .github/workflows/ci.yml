@@ -28,7 +28,10 @@ jobs:
       - run: npm run build
       - run: npm run tsc
       - run: npm run test:js
-      - run: npx fallow --ci
+      # Not a bare `npx fallow --ci`: it emits SARIF and exits 0 even on level:"error" findings, so
+      # by itself it can never fail the job. `npm run fallow` runs the same analysis and then gates
+      # on the report (bin/fallow-gate.mjs), which is what AGENTS.md section 7 claims of it.
+      - run: npm run fallow
 
   integration-and-concurrency:
     runs-on: ubuntu-latest
@@ -53,13 +56,12 @@ jobs:
       - run: npx wp-env start
       - run: composer test:integration
       - run: sudo apt-get install -y jq && chmod +x bin/run-concurrency.sh && ./bin/run-concurrency.sh
-      # Admin smoke e2e (AGENTS.md P4, final task): rebuilds the bundle (harmless if already
-      # current - the PHP suites above needed it too), installs the one browser the spec uses,
-      # then drives the running wp-env site through Playwright. `.wp-env.json`'s own
-      # `lifecycleScripts.afterStart` already switched the site to pretty permalinks as part of
-      # `wp-env start` above - a fresh WordPress install defaults to plain permalinks, under which
-      # any REST call carrying its own query string 404s (`rest_route=...` collides with the
-      # request's own `?`), so this is not optional environment polish.
-      - run: npm run build
+      # Admin smoke e2e (AGENTS.md P4, final task): installs the one browser the spec uses, then
+      # drives the running wp-env site through Playwright. The bundle `Admin\AdminPage` enqueues is
+      # already built above (nothing has changed a source file since), so it is not rebuilt here.
+      # `.wp-env.json`'s own `lifecycleScripts.afterStart` already switched the site to pretty
+      # permalinks as part of `wp-env start` above - a fresh WordPress install defaults to plain
+      # permalinks, under which any REST call carrying its own query string 404s (`rest_route=...`
+      # collides with the request's own `?`), so this is not optional environment polish.
       - run: npx playwright install --with-deps chromium
       - run: npm run test:e2e
