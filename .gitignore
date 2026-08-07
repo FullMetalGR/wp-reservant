@@ -6,4 +6,11 @@
 /test-results/
 /playwright-report/
 /blob-report/
+/.fallow/
+/.fallow-report.sarif
+# Agent/tooling scratch space. Only `.superpowers/sdd/` carried a nested ignore of its own, so a
+# file added anywhere else under it was one `git add -A` away from being committed.
+/.superpowers/
+# Local demo-data screenshot; nothing at the repository root is a tracked image.
+/*.png
 

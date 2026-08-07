@@ -38,7 +38,14 @@ declare( strict_types=1 );
 /**
  * The original scenario: 8 byte-identical customer holds racing for one slot.
  *
- * @return array{codes: list<int>, pass: bool}
+ * The losers' reason slug is asserted, not just their status code (the anti-pattern
+ * bin/concurrency-chains.php's own header names): a 409 proves only that seven requests were
+ * refused, not that contention is what refused them. A leftover hold from an earlier run, a start
+ * that has drifted off the 5-minute grid or outside the fixture's working hours, or a service that
+ * no longer has that resource all produce 1-winner-7-refusals too, and would let a genuinely broken
+ * lock protocol pass here. Only `overlap` is the contention answer.
+ *
+ * @return array{codes: list<int>, reasons: list<string>, pass: bool}
  */
 function run_parallel_holds_race( string $base, int $serviceId, int $resourceId, string $startUtc ): array {
 	$payload = (string) json_encode(
@@ -82,18 +89,26 @@ function run_parallel_holds_race( string $base, int $serviceId, int $resourceId,
 		curl_multi_select( $mh, 0.05 );
 	} while ( $running > 0 );
 
-	$codes = array_map( static fn ( $ch ): int => (int) curl_getinfo( $ch, CURLINFO_RESPONSE_CODE ), $handles );
+	$codes   = array();
+	$reasons = array();
 	foreach ( $handles as $ch ) {
+		$code    = (int) curl_getinfo( $ch, CURLINFO_RESPONSE_CODE );
+		$codes[] = $code;
+		if ( 201 !== $code ) {
+			$reasons[] = extract_reason( json_decode( (string) curl_multi_getcontent( $ch ), true ) ) ?? 'unparseable';
+		}
 		curl_multi_remove_handle( $mh, $ch );
 		curl_close( $ch );
 	}
 	curl_multi_close( $mh );
 
-	$wins = count( array_keys( $codes, 201, true ) );
-	$conf = count( array_keys( $codes, 409, true ) );
+	$wins       = count( array_keys( $codes, 201, true ) );
+	$conf       = count( array_keys( $codes, 409, true ) );
+	$allOverlap = array( 'overlap' ) === array_values( array_unique( $reasons ) );
 	return array(
-		'codes' => $codes,
-		'pass'  => ( 1 === $wins ) && ( $parallel - 1 === $conf ),
+		'codes'   => $codes,
+		'reasons' => $reasons,
+		'pass'    => ( 1 === $wins ) && ( $parallel - 1 === $conf ) && $allOverlap,
 	);
 }
 
@@ -189,7 +204,10 @@ function run_admin_customer_race( string $base, string $cli, int $serviceId, int
 	$target  = time() + 20;
 	$phpCode = build_admin_hold_eval( $serviceId, $resourceId, $startUtc, $target );
 
-	$descriptors = array( 1 => array( 'pipe', 'w' ), 2 => array( 'pipe', 'w' ) );
+	$descriptors = array(
+		1 => array( 'pipe', 'w' ),
+		2 => array( 'pipe', 'w' ),
+	);
 	$process     = proc_open(
 		array( 'npx', 'wp-env', 'run', $cli, '--env-cwd=wp-content/plugins/reservant', 'wp', 'eval', $phpCode ),
 		$descriptors,
@@ -197,7 +215,10 @@ function run_admin_customer_race( string $base, string $cli, int $serviceId, int
 	);
 	if ( false === $process || ! is_array( $pipes ) ) {
 		return array(
-			'admin'         => array( 'ok' => false, 'reason' => 'spawn_failed' ),
+			'admin'         => array(
+				'ok'     => false,
+				'reason' => 'spawn_failed',
+			),
 			'customer_code' => 0,
 			'customer_body' => '',
 			'winner'        => null,
@@ -223,7 +244,7 @@ function run_admin_customer_race( string $base, string $cli, int $serviceId, int
 			),
 		)
 	);
-	$ch = curl_init( $base . '/?rest_route=/reservant/v1/holds' );
+	$ch              = curl_init( $base . '/?rest_route=/reservant/v1/holds' );
 	curl_setopt_array(
 		$ch,
 		array(
@@ -307,6 +328,7 @@ echo json_encode(
 		'codes'     => $holdsResult['codes'],
 		'winners'   => count( array_keys( $holdsResult['codes'], 201, true ) ),
 		'conflicts' => count( array_keys( $holdsResult['codes'], 409, true ) ),
+		'reasons'   => $holdsResult['reasons'],
 		'pass'      => $holdsResult['pass'],
 	)
 ), PHP_EOL;

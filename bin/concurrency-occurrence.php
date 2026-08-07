@@ -218,7 +218,7 @@ $holdPayload = (string) json_encode(
 		),
 	)
 );
-$ch = curl_init( $base . '/?rest_route=/reservant/v1/holds' );
+$ch          = curl_init( $base . '/?rest_route=/reservant/v1/holds' );
 curl_setopt_array(
 	$ch,
 	array(

@@ -1,5 +1,10 @@
 <?xml version="1.0"?>
-<phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" bootstrap="tests/Integration/bootstrap.php" colors="true">
+<!--
+  failOnWarning/failOnRisky match phpunit-unit.xml.dist on purpose: the integration suite is the
+  larger of the two, so it is the one where a risky or warning-only test (no assertions, an
+  unintentionally output-producing test, a deprecated assertion) would otherwise sit green forever.
+-->
+<phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" bootstrap="tests/Integration/bootstrap.php" colors="true" failOnWarning="true" failOnRisky="true">
   <testsuites>
     <testsuite name="integration"><directory>tests/Integration</directory></testsuite>
   </testsuites>
