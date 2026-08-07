@@ -5,13 +5,14 @@ namespace Reservant\Rest;
 
 use Reservant\Application\CancelBooking;
 use Reservant\Application\ConfirmBooking;
+use Reservant\Application\RescheduleBooking;
 use Reservant\Application\SlotConflict;
 use Reservant\Infrastructure\Db\BookingRepository;
 
 /**
- * Guest self-service on one booking (AGENTS.md section 5): read it, confirm it, cancel it. The magic-link
- * token is checked in the route's permission callback (`Routes::guard()`); by the time a handler
- * runs, the caller is either the booking's owner or a manager.
+ * Guest self-service on one booking (AGENTS.md section 5): read it, confirm it, cancel it, reschedule
+ * it. The magic-link token is checked in the route's permission callback (`Routes::guard()`); by the
+ * time a handler runs, the caller is either the booking's owner or a manager.
  */
 final class BookingsController {
 
@@ -61,6 +62,53 @@ final class BookingsController {
 			return Errors::failure( $exception );
 		}
 		return new \WP_REST_Response( $this->presentBooking( $cancelled ) );
+	}
+
+	/**
+	 * POST /bookings/{uuid}/reschedule.
+	 *
+	 * A guest is held to the service's reschedule window and never gets `force = true`; a manager's
+	 * capability IS the override, exactly as `cancel()`'s - no `force` flag is read from the request,
+	 * so a token can never buy a policy-window bypass by claiming to be one.
+	 *
+	 * Exactly one of "start_utc" (move the chain) or "occurrence_id" (move to another occurrence) must
+	 * be present - both, or neither, is a 400, not a silent preference for one.
+	 *
+	 * The permission callback (`Routes::requireTokenOrCapNoOracle()`) already answers a wrong token
+	 * and an unknown uuid identically, so this method never needs to tell them apart either; a `uuid`
+	 * that reaches here with no matching booking can therefore only be the manager path, and
+	 * `RescheduleBooking::execute()` answers that with its own `not_found`.
+	 */
+	public function reschedule( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
+		$startUtcRaw     = $request->get_param( 'start_utc' );
+		$occurrenceIdRaw = $request->get_param( 'occurrence_id' );
+		$hasStart        = null !== $startUtcRaw && '' !== $startUtcRaw;
+		$hasOccurrence   = null !== $occurrenceIdRaw;
+		if ( $hasStart === $hasOccurrence ) {
+			return Errors::badRequest( __( 'Send exactly one of "start_utc" or "occurrence_id".', 'reservant' ) );
+		}
+
+		$newOccurrenceId = $hasOccurrence ? (int) $occurrenceIdRaw : null;
+		$newStartUtc     = $hasStart
+			? new \DateTimeImmutable( (string) $startUtcRaw, new \DateTimeZone( 'UTC' ) )
+			// Ignored on the event path (the target occurrence's own start wins); "now" is a harmless
+			// filler so the signature never needs a nullable start.
+			: $this->now();
+
+		try {
+			$moved = RescheduleBooking::make( $this->db )->execute(
+				(string) $request->get_param( 'uuid' ),
+				$newStartUtc,
+				$newOccurrenceId,
+				$this->now(),
+				current_user_can( Routes::CAP_MANAGE )
+			);
+		} catch ( SlotConflict $exception ) {
+			return Errors::conflict( $exception );
+		} catch ( \RuntimeException $exception ) {
+			return Errors::failure( $exception );
+		}
+		return new \WP_REST_Response( $this->presentBooking( $moved ) );
 	}
 
 	/** The request's single "now" (AGENTS.md section 7). */
