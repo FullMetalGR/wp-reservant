@@ -743,8 +743,13 @@ final class HoldBooking {
 	private function holdExpiresAt( BookingStatus $status, \DateTimeImmutable $nowUtc, int $approvalHoldHours ): string {
 		$anchor = self::anchor( $nowUtc );
 		if ( BookingStatus::AwaitingApproval === $status ) {
-			$hours = $approvalHoldHours > 0 ? $approvalHoldHours : 48;
-			return self::sql( $anchor->add( new \DateInterval( 'PT' . $hours . 'H' ) ) );
+			// The per-service `approval_hold_hours` column wins; behind it sits the site-wide
+			// `approval_ttl_hours` setting, not a hardcoded 48. They are the same quantity - AGENTS.md
+			// section 2.3's "`awaiting_approval` = owner decision (default 48 h)" - and `Settings`
+			// already defaults it to 48, so the shipped behaviour is unchanged while the settings
+			// screen's own field now actually governs a service that stores no window of its own.
+			$hours = $approvalHoldHours > 0 ? $approvalHoldHours : Settings::make()->approvalTtlHours();
+			return self::sql( $anchor->add( new \DateInterval( 'PT' . max( 1, $hours ) . 'H' ) ) );
 		}
 		$minutes = (int) apply_filters( 'reservant/hold_ttl_minutes', Settings::make()->checkoutTtlMin() );
 		return self::sql( $anchor->add( new \DateInterval( 'PT' . max( 1, $minutes ) . 'M' ) ) );
