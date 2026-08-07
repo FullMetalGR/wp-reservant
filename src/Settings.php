@@ -8,9 +8,10 @@ namespace Reservant;
  *
  * A small value object: `make()` reads and validates the stored option (defaults fill in any
  * missing key), `update()` validates a partial change, persists it, and hands back the new state.
- * `checkout_ttl_min` is the live default consumed by HoldBooking's checkout hold; `approval_ttl_hours`
- * and `payment_ttl_hours` are stored defaults for later plans (per-service approval holds already
- * carry their own `approval_hold_hours` column and are not rewired here - see AGENTS.md section 2.3).
+ * `checkout_ttl_min` is the live default consumed by HoldBooking's checkout hold. `approval_ttl_hours`
+ * is the site-wide fallback behind a service's own `approval_hold_hours` column, which always wins
+ * when set - see AGENTS.md section 2.3. `payment_ttl_hours` is a stored default with no consumer
+ * until the WooCommerce bridge lands, and the settings screen labels it as not yet active.
  */
 final class Settings {
 
