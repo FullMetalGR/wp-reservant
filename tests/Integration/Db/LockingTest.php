@@ -99,7 +99,7 @@ final class LockingTest extends ReservantTestCase {
 				$locks->acquire( array( $key ) );
 			}
 		);
-		self::assertSame( 'stale_state', $onResourceDay, 'A failed resource-day lock must refuse the request.' );
+		self::assertSame( 'lock_unavailable', $onResourceDay, 'A failed resource-day lock must refuse the request.' );
 
 		$onOccurrence = $this->refusalUnderSabotage(
 			'/^\s*SELECT\s+id\s+FROM\s+\S*reservant_occurrences\b.*FOR UPDATE/is',
@@ -108,7 +108,7 @@ final class LockingTest extends ReservantTestCase {
 				$locks->acquire( array( LockKey::occurrence( 7 ) ) );
 			}
 		);
-		self::assertSame( 'stale_state', $onOccurrence, 'A failed occurrence lock must refuse the request.' );
+		self::assertSame( 'lock_unavailable', $onOccurrence, 'A failed occurrence lock must refuse the request.' );
 	}
 
 	/**
@@ -130,7 +130,7 @@ final class LockingTest extends ReservantTestCase {
 				$repo->bumpRev( array( $key ) );
 			}
 		);
-		self::assertSame( 'stale_state', $refusal );
+		self::assertSame( 'lock_unavailable', $refusal );
 		self::assertSame(
 			'0',
 			$wpdb->get_var( $wpdb->prepare( "SELECT rev FROM {$wpdb->prefix}reservant_resource_days WHERE resource_id = %d AND day_utc = %s", 8, '2026-02-03' ) ), // phpcs:ignore WordPress.DB.PreparedSQL

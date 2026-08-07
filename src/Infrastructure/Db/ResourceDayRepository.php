@@ -44,10 +44,12 @@ final class ResourceDayRepository {
 	 * guard is inert today. It is here anyway: a silent write failure in this transaction family
 	 * should not be a judgement call each time somebody reads it, and the moment `rev` acquires a
 	 * reader an unnoticed bump becomes a stale mask that keeps selling a slot already taken. Refused
-	 * as `stale_state`, the reason `acquire()` uses, so the two failures answer alike.
+	 * as `lock_unavailable`, the reason `LockManager::acquire()` uses and for the same reason it uses
+	 * it, so the two failures answer alike - see that docblock for why this is not `stale_state` and
+	 * why `last_error` is deliberately not appended to the message.
 	 *
 	 * @param list<LockKey> $keys
-	 * @throws \RuntimeException `stale_state` when the bump failed at the DB level.
+	 * @throws \RuntimeException `lock_unavailable` when the bump failed at the DB level.
 	 */
 	public function bumpRev( array $keys ): void {
 		$p = $this->db->prefix;
@@ -63,7 +65,7 @@ final class ResourceDayRepository {
 				)
 			);
 			if ( false === $ok ) {
-				throw new \RuntimeException( 'stale_state' );
+				throw new \RuntimeException( 'lock_unavailable' );
 			}
 		}
 	}

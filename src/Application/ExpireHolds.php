@@ -36,7 +36,24 @@ final class ExpireHolds {
 		);
 	}
 
-	/** @return int bookings actually moved to expired */
+	/**
+	 * Sweep a batch of lapsed holds.
+	 *
+	 * **A booking whose mutex is busy is SKIPPED, not fatal.** One contended row must not stop the
+	 * sweep: a lock lost this minute is one the next run will very likely take, and every other
+	 * booking in the batch is independent of it. AGENTS.md section 2.1 permits this in both
+	 * directions - correctness never depends on the sweeper having run, and a lapsed hold is already
+	 * free by time comparison in every query - so aborting and skipping are equally safe, and
+	 * skipping does strictly more work.
+	 *
+	 * The catch is narrowed to `lock_unavailable` on purpose. Anything else - a failed write, an
+	 * unclassified refusal, a listener that threw - is a genuine bug, and a sweeper nobody watches is
+	 * the worst possible place to swallow one. `expireByUuid()` itself is deliberately NOT given this
+	 * catch: it targets exactly one booking (`Jobs::timeout()`), where there is no rest-of-the-batch
+	 * to protect and the right answer is to let Action Scheduler see the failure and retry.
+	 *
+	 * @return int bookings actually moved to expired
+	 */
 	public function run( int $batch = 50 ): int {
 		$processed = 0;
 		foreach ( $this->bookings->expiredHeldIds( $batch ) as $id ) {
@@ -44,8 +61,16 @@ final class ExpireHolds {
 			if ( null === $booking ) {
 				continue;
 			}
-			if ( null !== $this->expireByUuid( (string) $booking['uuid'] ) ) {
-				++$processed;
+			try {
+				if ( null !== $this->expireByUuid( (string) $booking['uuid'] ) ) {
+					++$processed;
+				}
+			} catch ( \RuntimeException $e ) {
+				if ( 'lock_unavailable' !== $e->getMessage() ) {
+					throw $e;
+				}
+				// Somebody else holds this slot's mutex right now. Leave the row exactly as it is and
+				// let the next sweep have it - the hold is already non-blocking by time comparison.
 			}
 		}
 		return $processed;

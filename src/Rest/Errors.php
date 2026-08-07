@@ -45,6 +45,13 @@ final class Errors {
 		'stale_state',
 		'not_held',
 		'currency_mismatch',
+		// Infrastructure contention - `LockManager::acquire()` and `ResourceDayRepository::bumpRev()`.
+		// Deliberately NOT `stale_state`: that one means "a rival moved this booking between the plan
+		// and the transaction", which is a benign no-op for a caller that only wanted the booking to
+		// end up decided. A lock that could not be taken is the opposite - nothing happened at all and
+		// the request is worth repeating verbatim. Folding the two together made
+		// `Admin\ApprovalActionEndpoint` render a busy lock as "may already have been handled".
+		'lock_unavailable',
 		// Lifecycle - ApproveBooking, RejectBooking.
 		'not_approvable',
 		// Lifecycle - MarkBookingOutcome.
@@ -76,7 +83,9 @@ final class Errors {
 	 *
 	 * `window_closed` is 403 (the policy forbids it, not the state), `online_payment_required` is
 	 * 402, an elapsed hold is 410 Gone, and everything else - `not_confirmable`, `approval_required`,
-	 * `not_cancellable`, `stale_state` - is a 409 state conflict.
+	 * `not_cancellable`, `stale_state` - is a 409 state conflict. `lock_unavailable` is a 409 too,
+	 * though it is contention rather than state: the request was never decided, and repeating it
+	 * verbatim is the correct response, which is exactly what 409 already asks a client to do.
 	 *
 	 * **The message is only echoed when it is a known reason.** `RuntimeException` is also how the
 	 * repositories report a failed write (`booking_insert_failed: <$wpdb->last_error>`), so passing
@@ -159,6 +168,7 @@ final class Errors {
 			'not_approvable'          => __( 'This booking can no longer be approved or rejected.', 'reservant' ),
 			'bad_outcome'             => __( 'That outcome is not recognised.', 'reservant' ),
 			'referenced'              => __( 'This item is still used by existing bookings. Deactivate it instead of deleting it.', 'reservant' ),
+			'lock_unavailable'        => __( 'The system was busy. Please try again.', 'reservant' ),
 			default                   => __( 'That request could not be completed.', 'reservant' ),
 		};
 	}

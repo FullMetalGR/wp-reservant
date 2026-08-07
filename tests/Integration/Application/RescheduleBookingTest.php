@@ -567,7 +567,7 @@ final class RescheduleBookingTest extends LockedDecisionTestCase {
 			remove_filter( 'query', $sabotage );
 			$wpdb->suppress_errors( $suppressed );
 		}
-		self::assertSame( 'stale_state', $refusal, 'A lock that could not be taken must refuse the request.' );
+		self::assertSame( 'lock_unavailable', $refusal, 'A lock that could not be taken must refuse the request.' );
 
 		$after = ( new BookingRepository( $wpdb ) )->findByUuid( (string) $booking['uuid'] );
 		self::assertNotNull( $after );

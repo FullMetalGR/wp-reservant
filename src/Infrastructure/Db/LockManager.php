@@ -27,15 +27,27 @@ final class LockManager {
 	 *    `RescheduleBooking`'s "atomic release + re-hold; partial success is impossible" would be a
 	 *    promise the code cannot keep, and the request would still answer 200.
 	 *
-	 * The refusal is `stale_state`: already a known reason (`Rest\Errors::KNOWN_REASONS`), already a
-	 * 409, and already meaning "a rival got in the way, retry" - the honest answer to a lock this
-	 * request could not take. Locking ZERO rows is not a failure and is deliberately not guarded here:
+	 * The refusal is `lock_unavailable` (`Rest\Errors::KNOWN_REASONS`, a 409), and it is deliberately
+	 * NOT `stale_state`. `stale_state` means "a rival moved this booking between the plan and the
+	 * transaction" - a benign no-op to a caller that only wanted the booking decided, which is why
+	 * `Admin\ApprovalActionEndpoint` lists it among its benign refusals and answers it with "may
+	 * already have been handled". A lock that could not be taken is the opposite claim: nothing
+	 * happened, the row is untouched, and the request is worth repeating verbatim. One reason cannot
+	 * carry both meanings without lying about one of them.
+	 *
+	 * The message is the bare reason, with `$this->db->last_error` deliberately NOT appended -
+	 * unlike `deleteItems()`, which does append it. `Rest\Errors::failure()` matches `KNOWN_REASONS`
+	 * by exact `in_array`, so a decorated `lock_unavailable: <last_error>` would miss the list, fall
+	 * to the opaque 500 arm, and destroy the 409 retry signal that is the entire point of naming this
+	 * reason. The DB text is not lost: that same 500 arm fires `reservant/error` with the exception.
+	 *
+	 * Locking ZERO rows is not a failure and is deliberately not guarded here:
 	 * `0` is an honest answer for a key whose entity is gone, and the guards that read after this
 	 * refuse it as `not_found` on their own. Only `false` is a failure - `deleteItems()`'s convention,
 	 * not a second one.
 	 *
 	 * @param list<LockKey> $keys
-	 * @throws \RuntimeException `stale_state` when a lock statement failed at the DB level.
+	 * @throws \RuntimeException `lock_unavailable` when a lock statement failed at the DB level.
 	 */
 	public function acquire( array $keys ): void {
 		$p = $this->db->prefix;
@@ -57,7 +69,7 @@ final class LockManager {
 				);
 			}
 			if ( false === $ok ) {
-				throw new \RuntimeException( 'stale_state' );
+				throw new \RuntimeException( 'lock_unavailable' );
 			}
 		}
 	}
