@@ -75,6 +75,7 @@ CUT=$(json_field "$FIXTURE" cut)
 COLOUR=$(json_field "$FIXTURE" colour)
 STAFF_A=$(json_field "$FIXTURE" staff_a)
 STAFF_B=$(json_field "$FIXTURE" staff_b)
+SEMINAR=$(json_field "$FIXTURE" seminar)
 GRID_OCC=$(json_field "$FIXTURE" grid_occ)
 SEAT=$(json_array_field "$FIXTURE" grid_seats | head -n1)
 
@@ -84,10 +85,14 @@ SEAT=$(json_array_field "$FIXTURE" grid_seats | head -n1)
 # clock-derived: the truncation above is what makes re-runs clean, not a shifting start time.
 START=$(date -u -d '+21 days' +%Y-%m-%d)' 10:00:00'
 
-echo "fixture: cut=$CUT colour=$COLOUR staff_a=$STAFF_A staff_b=$STAFF_B grid_occ=$GRID_OCC seat=$SEAT start=$START" >&2
+echo "fixture: cut=$CUT colour=$COLOUR staff_a=$STAFF_A staff_b=$STAFF_B seminar=$SEMINAR grid_occ=$GRID_OCC seat=$SEAT start=$START" >&2
 
 php bin/concurrency-holds.php  "$BASE" "$CUT" "$STAFF_A" "$START" "$CLI"
 php bin/concurrency-chains.php "$BASE" "$CUT" "$COLOUR" "$STAFF_A" "$STAFF_B" "$START"
 php bin/concurrency-seats.php  "$BASE" "$GRID_OCC" "$SEAT"
+# Seeds its own capacity-50 occurrence on the seminar service rather than reusing `seminar_occ`
+# (capacity 3): the scenario needs room for a shrink that is still legal against the seats already
+# sold, which is the whole point of the guard it is testing.
+php bin/concurrency-occurrence.php "$BASE" "$SEMINAR" "$CLI"
 
 echo "ALL CONCURRENCY TESTS PASSED"

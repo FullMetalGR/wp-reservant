@@ -4,6 +4,8 @@ declare( strict_types=1 );
 namespace Reservant\Rest\Admin;
 
 use Reservant\Domain\Enum\ServiceType;
+use Reservant\Infrastructure\Db\LockKey;
+use Reservant\Infrastructure\Db\LockManager;
 use Reservant\Infrastructure\Db\OccurrenceRepository;
 use Reservant\Infrastructure\Db\ServiceRepository;
 use Reservant\Infrastructure\Db\TransactionRunner;
@@ -37,9 +39,27 @@ use Reservant\Rest\Input;
  * so a diverged value would either strand real seats or admit more claims than the grid has cells for.
  *
  * Guard checks run twice per write - once outside any transaction for a fast, ordinary refusal, and
- * again as the transaction's first statement immediately before the write - mirroring
- * `ServicesAdminController::destroy()` as fixed in the Task 11 review (fix round 1): the recheck
- * closes the same TOCTOU window a concurrent booking could otherwise slip through.
+ * again inside the transaction immediately before the write - mirroring
+ * `ServicesAdminController::destroy()` as fixed in the Task 11 review (fix round 1).
+ *
+ * The recheck is only worth anything under the occurrence mutex, so the transaction's FIRST
+ * statement is `LockManager::acquire( LockKey::occurrence( $id ) )` and the guards read after it.
+ * Both guards are plain non-locking SELECTs; on their own they close nothing, because the row an
+ * admin edit contends with is written by `HoldBooking`, which takes the occurrence row itself
+ * `FOR UPDATE` (AGENTS.md section 2.2 - "event items use the occurrence row itself as the mutex").
+ * Unlocked, the sequence "read 8 of 50 booked -> shrink capacity to 10" interleaves with a hold
+ * that reads the same 50, sells 20 more seats and commits first: the edit is not blocked by it and
+ * cannot see it, and the occurrence lands on capacity 10 with 28 seats sold - permanently, since
+ * `activeBookingCount() > 0` then refuses every further edit. Locking first also fixes the read
+ * itself: InnoDB assigns this transaction's REPEATABLE READ snapshot at its first CONSISTENT read,
+ * which is now the guard query after the lock, so the guards see everything the rival hold
+ * committed rather than a snapshot predating it.
+ *
+ * Lock order is unchanged by this and must stay that way: occurrences/resource_days are always
+ * taken BEFORE bookings rows (`HoldBooking` -> `LockManager::acquire()` then
+ * `reapExpiredTouching()`'s `FOR UPDATE`; `CancelBooking`/`ExpireHolds`/`ApproveBooking`/
+ * `RejectBooking` likewise). These two writes lock the occurrence and no booking row at all, so
+ * they sit inside that partial order rather than extending it.
  */
 final class OccurrencesAdminController {
 
@@ -151,6 +171,11 @@ final class OccurrencesAdminController {
 		try {
 			$updated = ( new TransactionRunner( $this->db ) )->run(
 				function () use ( $id, $patch, $touchesSchedule ): array {
+					// The occurrence mutex FIRST, before anything reads: see the class docblock.
+					// Nothing may run before this - a consistent read placed above it would pin the
+					// transaction's snapshot to an instant before the rival hold committed.
+					( new LockManager( $this->db ) )->acquire( array( LockKey::occurrence( $id ) ) );
+
 					// A fresh repository instance, deliberately not the outer `$repo` - a genuinely
 					// new read, not a reuse of the earlier result (Task 11 fix round 1 idiom).
 					$repo         = new OccurrenceRepository( $this->db );
@@ -192,6 +217,11 @@ final class OccurrencesAdminController {
 		try {
 			$cancelled = ( new TransactionRunner( $this->db ) )->run(
 				function () use ( $id ): bool {
+					// The occurrence mutex FIRST - same reason as `update()`, worse ending: an
+					// unlocked recheck lets a hold confirm microseconds before the occurrence it
+					// just joined is cancelled out from under it.
+					( new LockManager( $this->db ) )->acquire( array( LockKey::occurrence( $id ) ) );
+
 					$repo = new OccurrenceRepository( $this->db );
 					if ( $repo->activeBookingCount( $id ) > 0 ) {
 						throw new \RuntimeException( 'referenced' );
