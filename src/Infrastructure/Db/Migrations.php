@@ -36,6 +36,7 @@ final class Migrations {
 			"CREATE TABLE {$p}reservant_services (
 				id BIGINT(20) UNSIGNED NOT NULL AUTO_INCREMENT,
 				name VARCHAR(190) NOT NULL,
+				description TEXT NOT NULL,
 				type VARCHAR(20) NOT NULL DEFAULT 'appointment',
 				duration_min SMALLINT(5) UNSIGNED NOT NULL DEFAULT 30,
 				processing_time_min SMALLINT(5) UNSIGNED NOT NULL DEFAULT 0,

@@ -66,6 +66,37 @@ final class PublicServicesTest extends ReservantTestCase {
 	}
 
 	/**
+	 * Fix round 1: `description` used to be a schema-less field that could only ever read back as
+	 * `''` (the brief's own contract for it, but nowhere to store a real value). The column now
+	 * exists (`Migrations.php`), so a service seeded with real prose must return that prose, not the
+	 * placeholder empty string every earlier version of this route was stuck answering.
+	 */
+	public function test_returns_the_real_description_when_one_is_set(): void {
+		global $wpdb;
+		( new ServiceRepository( $wpdb ) )->insert(
+			array(
+				'name'         => 'Cut',
+				'type'         => 'appointment',
+				'duration_min' => 30,
+				'payment_mode' => 'onsite',
+				'description'  => 'A precision trim with a hot towel finish.',
+			)
+		);
+
+		$cut = $this->byName( $this->list(), 'Cut' );
+		self::assertSame( 'A precision trim with a hot towel finish.', $cut['description'] );
+	}
+
+	/** A service seeded without one still answers the field as the empty string, never a missing key or null. */
+	public function test_description_defaults_to_empty_string_when_none_was_set(): void {
+		global $wpdb;
+		( new ServiceRepository( $wpdb ) )->insert( array( 'name' => 'Cut', 'type' => 'appointment', 'duration_min' => 30, 'payment_mode' => 'onsite' ) );
+
+		$cut = $this->byName( $this->list(), 'Cut' );
+		self::assertSame( '', $cut['description'] );
+	}
+
+	/**
 	 * Ambiguity resolved in the brief: a service nobody can currently perform still lists, with an
 	 * empty `resources` array, rather than being hidden - a silently dropped catalog row is harder
 	 * to debug than a widget that shows "no staff available" for one.

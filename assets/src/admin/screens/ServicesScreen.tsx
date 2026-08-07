@@ -1,6 +1,6 @@
 import { useState } from '@wordpress/element';
 import { __, sprintf } from '@wordpress/i18n';
-import { Button, CheckboxControl, Modal, Notice, SelectControl, Spinner, TextControl } from '@wordpress/components';
+import { Button, CheckboxControl, Modal, Notice, SelectControl, Spinner, TextControl, TextareaControl } from '@wordpress/components';
 import { bootConfig } from '../boot';
 import { isReferencedConflict } from '../api/client';
 import { useDeleteService, useSaveService, useSeatMaps, useServices } from '../api/queries';
@@ -28,6 +28,7 @@ const APPROVAL_TIMEOUT_OPTIONS: { value: ApprovalTimeout; label: string }[] = [
 /** The editable form fields, string/boolean at the input layer - parsed to the wire's numeric types only on save. */
 interface ServiceFormState {
 	name: string;
+	description: string;
 	type: ServiceType;
 	durationMin: string;
 	processingTimeMin: string;
@@ -51,6 +52,7 @@ interface ServiceFormState {
 function blankForm( currency: string ): ServiceFormState {
 	return {
 		name: '',
+		description: '',
 		type: 'appointment',
 		durationMin: '30',
 		processingTimeMin: '0',
@@ -75,6 +77,7 @@ function blankForm( currency: string ): ServiceFormState {
 function formFromService( service: Service ): ServiceFormState {
 	return {
 		name: service.name,
+		description: service.description,
 		type: service.type,
 		durationMin: String( service.duration_min ),
 		processingTimeMin: String( service.processing_time_min ),
@@ -106,6 +109,7 @@ function toInt( value: string ): number {
 function toPatch( form: ServiceFormState ): Record< string, unknown > {
 	return {
 		name: form.name,
+		description: form.description,
 		type: form.type,
 		duration_min: toInt( form.durationMin ),
 		processing_time_min: toInt( form.processingTimeMin ),
@@ -318,6 +322,13 @@ export function ServicesScreen() {
 					label={ __( 'Name', 'reservant' ) }
 					value={ form.name }
 					onChange={ ( value ) => patchForm( { name: value } ) }
+				/>
+				<TextareaControl
+					__nextHasNoMarginBottom
+					label={ __( 'Description', 'reservant' ) }
+					help={ __( 'Shown to customers choosing this service in the booking widget.', 'reservant' ) }
+					value={ form.description }
+					onChange={ ( value ) => patchForm( { description: value } ) }
 				/>
 				<SelectControl
 					__next40pxDefaultSize

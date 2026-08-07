@@ -43,6 +43,7 @@ function serviceFixture( overrides: Partial< Service > = {} ): Service {
 	return {
 		id: 1,
 		name: 'Haircut',
+		description: '',
 		type: 'appointment',
 		duration_min: 30,
 		processing_time_min: 0,

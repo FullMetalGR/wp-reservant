@@ -27,6 +27,7 @@ final class ServicesAdminController {
 	/** @var list<string> every column this endpoint may write - schema columns minus wc_product_id, which the WC bridge owns exclusively (AGENTS.md section 6). */
 	private const FIELDS = array(
 		'name',
+		'description',
 		'type',
 		'duration_min',
 		'processing_time_min',
@@ -80,6 +81,12 @@ final class ServicesAdminController {
 		} catch ( \InvalidArgumentException $exception ) {
 			return Errors::badRequest( $exception->getMessage() );
 		}
+
+		// `description` is optional on create, unlike `name` below - a caller that never sends it
+		// gets the empty string, not a missing column. (The schema's `TEXT NOT NULL` carries no
+		// SQL-level DEFAULT - confirmed dbDelta-stable without one, see Migrations.php - so this is
+		// the one place that default is supplied.)
+		$patch['description'] ??= '';
 
 		if ( '' === trim( (string) ( $patch['name'] ?? '' ) ) ) {
 			return Errors::badRequest( __( '"name" is required.', 'reservant' ) );
@@ -201,6 +208,10 @@ final class ServicesAdminController {
 	private static function sanitizeField( string $field, mixed $value ): mixed {
 		return match ( $field ) {
 			'name' => sanitize_text_field( Input::text( $value ) ),
+			// Prose, not a single line - `sanitize_textarea_field()` keeps line breaks that
+			// `sanitize_text_field()` would collapse, same distinction the schema draws with `TEXT`
+			// against every other column's `VARCHAR`.
+			'description' => sanitize_textarea_field( Input::text( $value ) ),
 			'type' => self::enumOrThrow( $value, array( ServiceType::Appointment->value, ServiceType::Event->value ), $field ),
 			'duration_min', 'processing_time_min', 'buffer_before_min', 'buffer_after_min', 'capacity',
 			'price_minor', 'approval_hold_hours', 'cancel_window_hours', 'reschedule_window_hours',

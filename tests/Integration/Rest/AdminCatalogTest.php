@@ -169,6 +169,46 @@ final class AdminCatalogTest extends ReservantTestCase {
 		self::assertSame( 'Deluxe Cut', $fetched->get_data()['name'] );
 	}
 
+	/**
+	 * Fix round 1: `description` is optional on create (defaults to `''`, not a missing column - the
+	 * schema now has one, `Migrations.php`), sanitized with `sanitize_textarea_field()` so line
+	 * breaks survive a save, and editable on an existing service through the same partial-PUT
+	 * semantics every other field already gets.
+	 */
+	public function test_create_and_update_round_trip_description(): void {
+		$this->asAdmin();
+
+		$created = $this->jsonRequest(
+			'POST',
+			'/reservant/v1/admin/services',
+			array(
+				'name'         => 'Cut',
+				'type'         => 'appointment',
+				'duration_min' => 30,
+				'payment_mode' => 'onsite',
+				'description'  => "A precision trim.\nWalk-ins welcome.",
+			)
+		);
+		self::assertSame( 201, $created->get_status(), (string) wp_json_encode( $created->get_data() ) );
+		self::assertSame( "A precision trim.\nWalk-ins welcome.", $created->get_data()['description'] );
+
+		$updated = $this->jsonRequest(
+			'PUT',
+			"/reservant/v1/admin/services/{$created->get_data()['id']}",
+			array( 'description' => 'Now with a hot towel finish.' )
+		);
+		self::assertSame( 200, $updated->get_status(), (string) wp_json_encode( $updated->get_data() ) );
+		self::assertSame( 'Now with a hot towel finish.', $updated->get_data()['description'] );
+		// Untouched fields survive the partial update.
+		self::assertSame( 'Cut', $updated->get_data()['name'] );
+	}
+
+	/** A caller that never sends `description` gets `''`, not a missing key. */
+	public function test_create_defaults_description_to_empty_string_when_omitted(): void {
+		$created = $this->createServiceAsAdmin();
+		self::assertSame( '', $created['description'] );
+	}
+
 	public function test_create_service_rejects_bad_duration_and_bad_type(): void {
 		$this->asAdmin();
 

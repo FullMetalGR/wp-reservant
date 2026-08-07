@@ -29,7 +29,7 @@ final class ServicesController {
 			$rows[] = array(
 				'id'                => (int) $service['id'],
 				'name'              => (string) $service['name'],
-				'description'       => (string) ( $service['description'] ?? '' ),
+				'description'       => (string) $service['description'],
 				'type'              => (string) $service['type'],
 				'duration_min'      => (int) $service['duration_min'],
 				'price_minor'       => (int) $service['price_minor'],

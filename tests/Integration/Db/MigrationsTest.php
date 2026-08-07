@@ -5,6 +5,7 @@ namespace Reservant\Tests\Integration\Db;
 
 use Reservant\Admin\Capabilities;
 use Reservant\Infrastructure\Db\Migrations;
+use Reservant\Infrastructure\Db\ServiceRepository;
 use Reservant\Plugin;
 use Reservant\Tests\Integration\ReservantTestCase;
 
@@ -24,10 +25,12 @@ final class MigrationsTest extends ReservantTestCase {
 	}
 
 	public function tear_down(): void {
-		// `test_upgrading_a_v0_1_x_schema_*` replaces the real tables with a historical shape and
-		// lets `Migrations::run()` upgrade them; both halves are DDL, which implicitly commits, so
-		// WordPress's per-test transaction cannot undo any of it. Put the current schema and the
-		// capability grants back by hand before the next test in the process runs.
+		// The upgrade-path tests below (`test_upgrading_a_v0_1_x_schema_*`, and the v0.2.x ->
+		// v0.3.0 pair that drops `reservant_services.description` before re-adding it) replace or
+		// alter the real tables and let `Migrations::run()` bring them forward; every one of those
+		// operations is DDL, which implicitly commits, so WordPress's per-test transaction cannot
+		// undo any of it. Put the current schema and the capability grants back by hand before the
+		// next test in the process runs.
 		Migrations::run();
 		Capabilities::sync();
 		parent::tear_down();
@@ -63,14 +66,18 @@ final class MigrationsTest extends ReservantTestCase {
 	 *
 	 * Four properties, and the third is the whole content of the display-width fix (commit af95332):
 	 *
-	 * 1. The one genuinely missing column (`bookings.approved_by`) is added.
+	 * 1. The two genuinely missing columns (`bookings.approved_by`, added by af95332's release, and
+	 *    `services.description`, added by this one) are added - and nothing else. Both are new
+	 *    since the frozen fixture below, so a real v0.1.x site takes both `ADD COLUMN`s in the same
+	 *    upgrade; a fixture representing v0.2.x instead (already has `approved_by`) is covered
+	 *    separately below by `test_upgrading_a_v0_2_x_schema_adds_only_the_description_column()`.
 	 * 2. Nothing else is altered - in particular not one `CHANGE COLUMN` on a column whose only
 	 *    difference is a display width. MariaDB always reports `bigint(20) unsigned` from `DESCRIBE`,
 	 *    while a widthless `BIGINT UNSIGNED` source spec makes dbDelta believe every such column has
 	 *    the wrong type and re-issue an `ALTER TABLE ... CHANGE COLUMN` for it on EVERY run, forever
 	 *    (dbDelta's own strip-the-display-width shortcut is guarded on MySQL 8.0.17+ and never
 	 *    applies here). Delete the explicit widths from `Migrations::run()` and this assertion is the
-	 *    thing that fails; the rest of the 216-test suite still passes, only slower.
+	 *    thing that fails; the rest of the suite still passes, only slower.
 	 * 3. A second consecutive run issues no DDL whatsoever.
 	 * 4. The site's data and every index - including the unique `occ_seat` backstop of AGENTS.md
 	 *    section 2.2 - come through untouched.
@@ -83,13 +90,13 @@ final class MigrationsTest extends ReservantTestCase {
 	 * The `query` filter sees exactly the SQL wpdb executes, is removed the moment the call returns,
 	 * and asserts on what actually reached the database rather than on what dbDelta reported.
 	 */
-	public function test_upgrading_a_v0_1_x_schema_adds_only_the_missing_column(): void {
+	public function test_upgrading_a_v0_1_x_schema_adds_only_the_missing_columns(): void {
 		global $wpdb;
 		$this->installLegacySchema();
 		$seeded = $this->seedLegacyBookingAndItem();
 
-		$first  = self::altersIn( $this->captureQueries( static fn () => Migrations::run() ) );
-		$typed  = array_values( array_filter( $first, static fn ( string $sql ): bool => false !== stripos( $sql, 'CHANGE COLUMN' ) ) );
+		$first = self::altersIn( $this->captureQueries( static fn () => Migrations::run() ) );
+		$typed = array_values( array_filter( $first, static fn ( string $sql ): bool => false !== stripos( $sql, 'CHANGE COLUMN' ) ) );
 
 		self::assertSame(
 			array(),
@@ -98,17 +105,21 @@ final class MigrationsTest extends ReservantTestCase {
 				. "UNSIGNED column in Migrations::run() needs an explicit width matching what MariaDB reports.\n"
 				. implode( "\n", $typed )
 		);
-		self::assertCount( 1, $first, "Expected exactly one ALTER TABLE.\n" . implode( "\n", $first ) );
-		self::assertMatchesRegularExpression(
-			'/^ALTER TABLE \S*reservant_bookings ADD COLUMN\s+approved_by\b/i',
-			trim( $first[0] )
-		);
+		self::assertCount( 2, $first, "Expected exactly two ALTER TABLE statements.\n" . implode( "\n", $first ) );
+		$joined = implode( "\n", $first );
+		self::assertMatchesRegularExpression( '/ALTER TABLE \S*reservant_bookings ADD COLUMN\s+approved_by\b/i', $joined );
+		self::assertMatchesRegularExpression( '/ALTER TABLE \S*reservant_services ADD COLUMN\s+description\b/i', $joined );
 
-		// The column really is there, and the pre-existing row got the NULL default rather than a
-		// value invented for it.
+		// Both columns really are there, and the pre-existing rows got the defaults dbDelta gives an
+		// added column (NULL for `approved_by`, which has none in the schema; the empty string for
+		// `description`, which is `TEXT NOT NULL` with none either) rather than a value invented here.
 		self::assertSame(
 			'approved_by',
 			$wpdb->get_var( "SHOW COLUMNS FROM {$wpdb->prefix}reservant_bookings LIKE 'approved_by'" ) // phpcs:ignore WordPress.DB.PreparedSQL
+		);
+		self::assertSame(
+			'description',
+			$wpdb->get_var( "SHOW COLUMNS FROM {$wpdb->prefix}reservant_services LIKE 'description'" ) // phpcs:ignore WordPress.DB.PreparedSQL
 		);
 		$booking = $wpdb->get_row( $wpdb->prepare( "SELECT * FROM {$wpdb->prefix}reservant_bookings WHERE uuid = %s", $seeded['uuid'] ), ARRAY_A ); // phpcs:ignore WordPress.DB.PreparedSQL
 		self::assertIsArray( $booking, 'The upgrade lost the booking row.' );
@@ -146,6 +157,95 @@ final class MigrationsTest extends ReservantTestCase {
 
 		self::assertSame( array(), self::altersIn( $second ), "A settled schema must produce no ALTER TABLE.\n" . implode( "\n", self::altersIn( $second ) ) );
 		self::assertSame( array(), self::createsIn( $second ), "A settled schema must produce no CREATE TABLE.\n" . implode( "\n", self::createsIn( $second ) ) );
+	}
+
+	// ------------------------------------------------------------------ the v0.2.x -> v0.3.0 upgrade path (description column)
+
+	/**
+	 * The narrower, more literal upgrade this task actually ships: a site already on v0.2.x (has
+	 * `approved_by`, has every display-width fix, does not have `services.description`) takes v0.3.0
+	 * and `Migrations::run()` adds exactly one column.
+	 *
+	 * Unlike `installLegacySchema()` above, this does not hand-freeze a second whole schema copy.
+	 * v0.1.x differed from current on nearly every column (nine tables' worth of missing display
+	 * widths), which is why that fixture is worth maintaining as a literal historical copy. v0.2.x
+	 * differs from current by exactly one column, so the truer and far less duplicative way to build
+	 * "a table shaped like v0.2.x" is to run the real, current `Migrations::run()` and then drop that
+	 * one column back off - the result is byte-for-byte what a v0.2.x install's `reservant_services`
+	 * table actually looks like, not a hand-copied approximation of it that could drift from the real
+	 * schema over time.
+	 */
+	public function test_upgrading_a_v0_2_x_schema_adds_only_the_description_column(): void {
+		global $wpdb;
+		Migrations::run();
+		$serviceId = ( new ServiceRepository( $wpdb ) )->insert(
+			array( 'name' => 'Legacy Cut', 'type' => 'appointment', 'duration_min' => 30, 'payment_mode' => 'onsite' )
+		);
+		$wpdb->query( "ALTER TABLE {$wpdb->prefix}reservant_services DROP COLUMN description" ); // phpcs:ignore WordPress.DB.PreparedSQL
+
+		$first = self::altersIn( $this->captureQueries( static fn () => Migrations::run() ) );
+
+		self::assertCount( 1, $first, "Expected exactly one ALTER TABLE.\n" . implode( "\n", $first ) );
+		self::assertMatchesRegularExpression(
+			'/^ALTER TABLE \S*reservant_services ADD COLUMN\s+description\b/i',
+			trim( $first[0] )
+		);
+		self::assertSame(
+			'description',
+			$wpdb->get_var( "SHOW COLUMNS FROM {$wpdb->prefix}reservant_services LIKE 'description'" ) // phpcs:ignore WordPress.DB.PreparedSQL
+		);
+
+		// The pre-existing row survived the upgrade and reads back as the empty string, not NULL or
+		// a dropped row - `TEXT NOT NULL` with no SQL-level DEFAULT still resolves to `''` for a row
+		// that predates the column, the same way it does for a fresh INSERT that omits the field
+		// (verified against this database directly; see the report for the reproduction).
+		$row = $wpdb->get_row( $wpdb->prepare( "SELECT * FROM {$wpdb->prefix}reservant_services WHERE id = %d", $serviceId ), ARRAY_A ); // phpcs:ignore WordPress.DB.PreparedSQL
+		self::assertIsArray( $row, 'The upgrade lost the pre-existing service row.' );
+		self::assertSame( '', $row['description'] );
+		self::assertSame( 'Legacy Cut', $row['name'] );
+	}
+
+	/**
+	 * The dbDelta-stability proof the fix-round instructions asked for by name: not "it looks right"
+	 * but a captured, asserted absence of any `ALTER TABLE` touching `description` (or anything else)
+	 * once the column is in place. Mirrors `test_a_second_consecutive_run_issues_no_ddl_at_all()`
+	 * above, scoped to the v0.2.x starting point instead of v0.1.x, since that is the step this task
+	 * actually adds.
+	 */
+	public function test_a_second_run_after_the_description_upgrade_issues_no_ddl(): void {
+		global $wpdb;
+		Migrations::run();
+		$wpdb->query( "ALTER TABLE {$wpdb->prefix}reservant_services DROP COLUMN description" ); // phpcs:ignore WordPress.DB.PreparedSQL
+		Migrations::run(); // First run after the drop: re-adds the column (proven above).
+
+		$second = $this->captureQueries( static fn () => Migrations::run() );
+
+		self::assertSame( array(), self::altersIn( $second ), "A settled schema must produce no ALTER TABLE.\n" . implode( "\n", self::altersIn( $second ) ) );
+		self::assertSame( array(), self::createsIn( $second ), "A settled schema must produce no CREATE TABLE.\n" . implode( "\n", self::createsIn( $second ) ) );
+	}
+
+	/**
+	 * The other half of "a schema change that does not bump the version never reaches an installed
+	 * site": the two tests above prove `Migrations::run()` itself upgrades a v0.2.x-shaped table, but
+	 * a real site never calls that directly - it goes through `Plugin::boot()`'s
+	 * `reservant_version` option check. This pins that a site whose stored option genuinely reads
+	 * `0.2.0` (not merely absent, which `test_the_upgrade_entry_point_restores_capabilities_it_no_longer_grants_itself`
+	 * already covers below) reaches `Migrations::run()` because `RESERVANT_VERSION` moved to `0.3.0`,
+	 * and ends the request with both the column and the stored option caught up.
+	 */
+	public function test_plugin_boot_upgrades_a_site_whose_stored_version_is_0_2_0(): void {
+		global $wpdb;
+		Migrations::run();
+		$wpdb->query( "ALTER TABLE {$wpdb->prefix}reservant_services DROP COLUMN description" ); // phpcs:ignore WordPress.DB.PreparedSQL
+		update_option( 'reservant_version', '0.2.0' );
+
+		Plugin::boot();
+
+		self::assertSame(
+			'description',
+			$wpdb->get_var( "SHOW COLUMNS FROM {$wpdb->prefix}reservant_services LIKE 'description'" ) // phpcs:ignore WordPress.DB.PreparedSQL
+		);
+		self::assertSame( RESERVANT_VERSION, get_option( 'reservant_version' ) );
 	}
 
 	// ------------------------------------------------------------------ run() + Capabilities::sync()
