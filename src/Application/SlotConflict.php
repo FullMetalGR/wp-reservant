@@ -25,6 +25,13 @@ final class SlotConflict extends \RuntimeException {
 	 * - `bad_seat`      the seat ids do not name real seats of the service's map, or the
 	 *                   grid/capacity-only mode was mismatched
 	 *
+	 * `RescheduleBooking` adds two of its own, and refuses with nothing outside this list:
+	 *
+	 * - `not_reschedulable` the booking holds no slot to move (terminal status, or a hold that has
+	 *                       lapsed), the move does not match its shape (appointment vs event), or it
+	 *                       claims named grid seats, which a move cannot re-pick
+	 * - `policy`            the service's reschedule window has closed and the caller did not force
+	 *
 	 * @param string $reason one of the codes above
 	 * @param int    $segmentIndex chain position of the failing segment, -1 when not per-segment
 	 */

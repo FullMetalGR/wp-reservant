@@ -34,6 +34,20 @@ final class BookingRepository {
 			throw new \RuntimeException( 'booking_insert_failed: ' . $this->db->last_error );
 		}
 		$bookingId = (int) $this->db->insert_id;
+		$this->insertItems( $bookingId, $items );
+		return $bookingId;
+	}
+
+	/**
+	 * The item rows of one booking, in chain order. Call inside a transaction only.
+	 *
+	 * `sort` is the array position, so the caller's ordering is the chain's ordering. The unique
+	 * `(occurrence_id, seat_claim)` index is the seat backstop (AGENTS.md section 2.2) and surfaces
+	 * here as `seat_taken`, exactly as it does for a first-time hold.
+	 *
+	 * @param list<array<string, mixed>> $items
+	 */
+	public function insertItems( int $bookingId, array $items ): void {
 		foreach ( $items as $sort => $item ) {
 			$ok = $this->db->insert(
 				$this->db->prefix . 'reservant_booking_items',
@@ -50,7 +64,18 @@ final class BookingRepository {
 				throw new \RuntimeException( 'booking_item_insert_failed: ' . $this->db->last_error );
 			}
 		}
-		return $bookingId;
+	}
+
+	/**
+	 * Drop every item of a booking - the "release" half of a reschedule (`RescheduleBooking`).
+	 *
+	 * Call inside a transaction, holding both the slot mutexes of the rows being dropped and the
+	 * booking row itself: this frees capacity, and every capacity write in this codebase happens
+	 * under the mutex governing that slot. The container row is untouched, so a booking is never
+	 * left itemless outside the transaction that immediately re-inserts them.
+	 */
+	public function deleteItems( int $bookingId ): void {
+		$this->db->delete( $this->db->prefix . 'reservant_booking_items', array( 'booking_id' => $bookingId ) );
 	}
 
 	/** @return array<string, mixed>|null booking row + 'items' list, ints cast */

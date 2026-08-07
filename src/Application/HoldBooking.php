@@ -344,6 +344,38 @@ final class HoldBooking {
 	}
 
 	/**
+	 * The geometry of ONE chain segment on the granularity grid: the customer-facing span, the
+	 * buffer-widened block range that actually contends (and that `lockKeysForItems()` reads), the
+	 * processing tail, and how far the chain advances before the next segment may start.
+	 *
+	 * Extracted verbatim from `planAppointment()` so `RescheduleBooking` can place a moved chain on
+	 * exactly the math a hold would have placed it on. Two implementations of this would be two
+	 * definitions of a slot, and the second one would drift.
+	 *
+	 * @param array<string, mixed> $service ServiceRepository row.
+	 * @return array{start_utc: string, end_utc: string, block_start_utc: string, block_end_utc: string, processing_ends_utc: string|null, advance_min: int}
+	 */
+	public static function segmentGeometry( array $service, \DateTimeImmutable $chainStartUtc, int $offsetMin ): array {
+		$granularity = self::granularity();
+		$duration    = self::roundUp( (int) $service['duration_min'], $granularity );
+		$processing  = self::roundUp( (int) $service['processing_time_min'], $granularity );
+		$before      = self::roundUp( (int) $service['buffer_before_min'], $granularity );
+		$after       = self::roundUp( (int) $service['buffer_after_min'], $granularity );
+
+		$start = $chainStartUtc->add( new \DateInterval( 'PT' . $offsetMin . 'M' ) );
+		$end   = $start->add( new \DateInterval( 'PT' . $duration . 'M' ) );
+
+		return array(
+			'start_utc'           => self::sql( $start ),
+			'end_utc'             => self::sql( $end ),
+			'block_start_utc'     => self::sql( $start->sub( new \DateInterval( 'PT' . $before . 'M' ) ) ),
+			'block_end_utc'       => self::sql( $end->add( new \DateInterval( 'PT' . $after . 'M' ) ) ),
+			'processing_ends_utc' => 0 === $processing ? null : self::sql( $end->add( new \DateInterval( 'PT' . $processing . 'M' ) ) ),
+			'advance_min'         => $duration + $processing,
+		);
+	}
+
+	/**
 	 * First candidate (ascending id) that is open and has no blocking overlap wins -
 	 * deterministic, so a failure reproduces in tests.
 	 *
@@ -588,7 +620,6 @@ final class HoldBooking {
 	 * @return array<string, mixed>
 	 */
 	private function planAppointment( AppointmentRequest $appointment ): array {
-		$granularity = self::granularity();
 		$items       = array();
 		$candidates  = array();
 		$keys        = array();
@@ -610,16 +641,8 @@ final class HoldBooking {
 				throw new SlotConflict( 'not_found', $index );
 			}
 
-			$duration   = self::roundUp( (int) $service['duration_min'], $granularity );
-			$processing = self::roundUp( (int) $service['processing_time_min'], $granularity );
-			$before     = self::roundUp( (int) $service['buffer_before_min'], $granularity );
-			$after      = self::roundUp( (int) $service['buffer_after_min'], $granularity );
-
-			$start      = $chainStart->add( new \DateInterval( 'PT' . $offsetMin . 'M' ) );
-			$end        = $start->add( new \DateInterval( 'PT' . $duration . 'M' ) );
-			$blockStart = $start->sub( new \DateInterval( 'PT' . $before . 'M' ) );
-			$blockEnd   = $end->add( new \DateInterval( 'PT' . $after . 'M' ) );
-			$offsetMin += $duration + $processing;
+			$geometry   = self::segmentGeometry( $service, $chainStart, $offsetMin );
+			$offsetMin += (int) $geometry['advance_min'];
 
 			// Only active staff are candidates, so a pinned resource that has been deactivated
 			// fails as `no_staff` rather than quietly taking the booking.
@@ -634,11 +657,11 @@ final class HoldBooking {
 				'service_id'          => (int) $service['id'],
 				'resource_id'         => null, // Chosen under the lock, never before.
 				'occurrence_id'       => null,
-				'start_utc'           => self::sql( $start ),
-				'end_utc'             => self::sql( $end ),
-				'block_start_utc'     => self::sql( $blockStart ),
-				'block_end_utc'       => self::sql( $blockEnd ),
-				'processing_ends_utc' => 0 === $processing ? null : self::sql( $end->add( new \DateInterval( 'PT' . $processing . 'M' ) ) ),
+				'start_utc'           => $geometry['start_utc'],
+				'end_utc'             => $geometry['end_utc'],
+				'block_start_utc'     => $geometry['block_start_utc'],
+				'block_end_utc'       => $geometry['block_end_utc'],
+				'processing_ends_utc' => $geometry['processing_ends_utc'],
 				'seats'               => 1,
 				'seat_claim'          => null,
 				'price_minor'         => (int) $service['price_minor'],
@@ -646,7 +669,7 @@ final class HoldBooking {
 			$candidates[] = $segmentCandidates;
 
 			foreach ( $segmentCandidates as $resourceId ) {
-				foreach ( self::daysTouched( self::sql( $blockStart ), self::sql( $blockEnd ) ) as $day ) {
+				foreach ( self::daysTouched( $geometry['block_start_utc'], $geometry['block_end_utc'] ) as $day ) {
 					$keys[] = LockKey::resourceDay( $resourceId, $day );
 				}
 			}
