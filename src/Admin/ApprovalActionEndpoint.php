@@ -142,12 +142,19 @@ final class ApprovalActionEndpoint {
 
 	/**
 	 * Whether this is the confirm page's own form submission rather than the initial link click.
-	 * `REQUEST_METHOD` is authoritative for a real HTTP request; the `$_POST['sig']` check is a
-	 * defensive fallback so a caller that only populates `$_POST` still resolves correctly.
+	 *
+	 * `REQUEST_METHOD` is the only signal, deliberately. This is the sole predicate in the endpoint
+	 * that can turn a request into a state change - a false answer renders the confirm form, a true
+	 * one approves or rejects the booking - which is what makes the link safe to prefetch, to scan,
+	 * and to open from a mail client that follows URLs on the reader's behalf.
+	 *
+	 * There used to be an `|| isset( $_POST['sig'] )` fallback here. Over real HTTP it was
+	 * unreachable, since PHP only populates `$_POST` on a POST, so it never changed an outcome -
+	 * but it was the one clause that could have made a GET mutate, and a security invariant should
+	 * not carry a redundant second way to be satisfied.
 	 */
 	private function isSubmission(): bool {
-		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- a routing signal only; the signature check above is the authorization.
-		return ( isset( $_SERVER['REQUEST_METHOD'] ) && 'POST' === $_SERVER['REQUEST_METHOD'] ) || isset( $_POST['sig'] );
+		return isset( $_SERVER['REQUEST_METHOD'] ) && 'POST' === $_SERVER['REQUEST_METHOD'];
 	}
 
 	/**

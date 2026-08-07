@@ -166,6 +166,43 @@ final class ApprovalActionEndpointTest extends ReservantTestCase {
 		self::assertSame( 'awaiting_approval', ( new BookingRepository( $wpdb ) )->findByUuid( $booking['uuid'] )['status'] );
 	}
 
+	/**
+	 * A GET stays a GET even when `$_POST` is fully populated with a VALID signature.
+	 *
+	 * `isSubmission()` is the only predicate in this endpoint that can turn a request into a state
+	 * change, and it now reads `REQUEST_METHOD` alone - it used to also accept `isset( $_POST['sig'] )`,
+	 * which was unreachable over real HTTP but was the one clause that could have let a GET mutate.
+	 * That matters because these links are opened by prefetchers, mail scanners and clients that
+	 * follow URLs for the reader: a GET has to render the confirm form and nothing else.
+	 */
+	public function testGetWithAPopulatedPostArrayStillOnlyRendersTheConfirmForm(): void {
+		global $wpdb;
+		$booking   = $this->holdAwaitingApproval();
+		$updatedAt = (string) ( new BookingRepository( $wpdb ) )->findByUuid( $booking['uuid'] )['updated_at'];
+		$exp       = $this->farFutureExp();
+		$sig       = SignedAction::sign( wp_salt( 'auth' ), $booking['uuid'], 'approve', $exp, $updatedAt );
+
+		$this->setRequest( 'GET', $booking['uuid'], 'approve', $exp, $sig );
+		$_POST = array(
+			'uuid'     => $booking['uuid'],
+			'decision' => 'approve',
+			'exp'      => (string) $exp,
+			'sig'      => $sig,
+		);
+
+		ob_start();
+		( new ApprovalActionEndpoint() )->handle();
+		$output = (string) ob_get_clean();
+
+		self::assertStringContainsString( '<form', $output, 'the confirm page, not the decision' );
+		self::assertStringNotContainsString( 'Booking approved.', $output );
+		self::assertSame(
+			'awaiting_approval',
+			( new BookingRepository( $wpdb ) )->findByUuid( $booking['uuid'] )['status'],
+			'a GET must never mutate, whatever $_POST happens to hold'
+		);
+	}
+
 	public function testPostWithValidSigApproves(): void {
 		global $wpdb;
 		$booking   = $this->holdAwaitingApproval();
