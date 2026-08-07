@@ -164,6 +164,59 @@ final class AdminCalendarTest extends ReservantTestCase {
 		}
 	}
 
+	/**
+	 * The manager half of the `resource_id` parameter (declared at `AdminRoutes.php`'s
+	 * `/admin/calendar` route): for a caller who holds `reservant_manage_bookings`, it narrows the
+	 * whole schedule down to one staff member's column. No test sent this parameter at all before,
+	 * so the filter was never exercised in either direction.
+	 */
+	public function test_a_manager_can_filter_the_calendar_to_one_resource(): void {
+		$alexUuid  = $this->customerHold( $this->utc( 1, '09:00' ), $this->cutId, $this->staffA );
+		$bellaUuid = $this->customerHold( $this->utc( 1, '11:00' ), $this->cutId, $this->staffB );
+		$this->setStatus( $alexUuid, 'confirmed' );
+		$this->setStatus( $bellaUuid, 'confirmed' );
+
+		$this->asAdmin();
+
+		self::assertSame( array( $alexUuid ), array_column( $this->calendar( 1, 2, $this->staffA )->get_data()['bookings'], 'uuid' ) );
+		self::assertSame( array( $bellaUuid ), array_column( $this->calendar( 1, 2, $this->staffB )->get_data()['bookings'], 'uuid' ) );
+
+		// Omitted (and a non-positive value, which the controller reads as "no filter") means everyone.
+		$unfiltered = array_column( $this->calendar( 1, 2 )->get_data()['bookings'], 'uuid' );
+		self::assertContains( $alexUuid, $unfiltered );
+		self::assertContains( $bellaUuid, $unfiltered );
+		self::assertCount( 2, $unfiltered );
+		self::assertCount( 2, $this->calendar( 1, 2, 0 )->get_data()['bookings'] );
+	}
+
+	/**
+	 * The staff half, and the one that matters for authorization: `CalendarAdminController::index()`
+	 * documents that "a staff-only viewer's scope is their own resource, whatever `resource_id` was
+	 * sent - it is never taken from the request for them". Untested until now, so a regression that
+	 * let the request parameter win would have handed any staff member a colleague's whole schedule
+	 * (customer names included) and passed CI.
+	 */
+	public function test_a_staff_viewers_own_resource_wins_over_any_resource_id_they_send(): void {
+		$alexUuid  = $this->customerHold( $this->utc( 1, '09:00' ), $this->cutId, $this->staffA );
+		$bellaUuid = $this->customerHold( $this->utc( 1, '11:00' ), $this->cutId, $this->staffB );
+		$this->setStatus( $alexUuid, 'confirmed' );
+		$this->setStatus( $bellaUuid, 'confirmed' );
+
+		$this->asStaff( $this->staffA ); // Alex, holding only reservant_view_own_calendar.
+
+		// Asking for Bella's column returns Alex's, not Bella's, and not both.
+		$asked = array_column( $this->calendar( 1, 2, $this->staffB )->get_data()['bookings'], 'uuid' );
+		self::assertSame( array( $alexUuid ), $asked, "A staff-only viewer must never read a colleague's schedule by asking for it." );
+
+		// Asking for their own column, or for none at all, is the same answer.
+		self::assertSame( array( $alexUuid ), array_column( $this->calendar( 1, 2, $this->staffA )->get_data()['bookings'], 'uuid' ) );
+		self::assertSame( array( $alexUuid ), array_column( $this->calendar( 1, 2 )->get_data()['bookings'], 'uuid' ) );
+
+		// And the contact-stripping still applies to the row they are allowed to see.
+		$own = $this->calendar( 1, 2, $this->staffB )->get_data()['bookings'][0];
+		self::assertArrayNotHasKey( 'customer_email', $own );
+	}
+
 	public function test_staff_with_no_linked_resource_sees_an_empty_calendar_but_still_sees_occurrences(): void {
 		global $wpdb;
 		$eventId = ( new ServiceRepository( $wpdb ) )->insert( array( 'name' => 'Seminar', 'type' => 'event', 'price_minor' => 1000, 'payment_mode' => 'onsite' ) );
