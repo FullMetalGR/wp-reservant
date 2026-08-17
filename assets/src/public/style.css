@@ -14,13 +14,17 @@
  * NO `style` field (Task 9 removed it - on a classic theme that handle would enqueue site-wide,
  * and frontend loading has exactly one owner, Assets).
  *
- * Every selector starts with the widget's own class. Rules are scoped under .reservant-widget,
- * with ONE deliberate exception: the bare .reservant-widget--compact modifier, which targets the
- * mount node ITSELF (Block.php writes the class next to reservant-widget on the same div), so it
- * cannot sit under .reservant-widget as a descendant; it stays a bare class at the token block's
- * own specificity, winning by source order (see its comment below). The reservant- prefix keeps
- * it clear of a stranger theme's classes. This stylesheet loads on a stranger's theme and must
- * never reach outside its own mount node: no bare element selectors, and no !important.
+ * Every selector starts with the widget's own class, and that reservant- prefix - not descendant
+ * scoping - is what actually keeps these rules off a stranger theme's markup: today both rules
+ * beyond the root are bare non-descendant selectors. .reservant-widget--compact has to be - it
+ * targets the mount node ITSELF (Block.php writes the class next to reservant-widget on the same
+ * div), so it cannot sit under .reservant-widget as a descendant; it stays a bare class at the
+ * token block's own specificity, winning by source order (see its comment below).
+ * .reservant-widget__panel has no such excuse: both render sites (index.tsx and editor.tsx) only
+ * ever place it inside a .reservant-widget ancestor, so it could be descendant-scoped and simply
+ * is not - the prefix alone keeps it from matching foreign markup. This stylesheet loads on a
+ * stranger's theme and must never reach outside its own mount node: no bare element selectors,
+ * and no !important.
  *
  * The custom properties below are the documented theming surface. They are declared on the widget
  * root, which is also where the block's appearance panel writes its inline overrides
