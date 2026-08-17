@@ -1,0 +1,39 @@
+/*
+ * Public widget styles - builds to build/widget.css.
+ *
+ * Every rule is scoped under .reservant-widget: this stylesheet loads on a stranger's theme and
+ * must never reach outside its own mount node. No bare element selectors, and no !important.
+ *
+ * The custom properties below are the documented theming surface. They are declared on the widget
+ * root, which is also where the block's appearance panel writes its inline overrides
+ * (--reservant-accent, --reservant-radius) - an inline style beats a stylesheet rule, so an
+ * override lands without either side knowing about the other. Themes may set the same properties
+ * from their own stylesheet with a more specific selector.
+ */
+.reservant-widget {
+	--reservant-accent: #2271b1;
+	--reservant-radius: 6px;
+	--reservant-font: inherit;
+	--reservant-space: 12px;
+	--reservant-fg: #1e1e1e;
+	--reservant-bg: transparent;
+	--reservant-muted: #646970;
+	--reservant-border: #dcdcde;
+	--reservant-error: #b32d2e;
+	--reservant-success: #007017;
+	--reservant-focus: var( --reservant-accent );
+	--reservant-max-width: 46rem;
+
+	box-sizing: border-box;
+	max-width: var( --reservant-max-width );
+	font-family: var( --reservant-font );
+	color: var( --reservant-fg );
+	background: var( --reservant-bg );
+}
+
+.reservant-widget__panel {
+	padding: var( --reservant-space );
+	border: 1px solid var( --reservant-border );
+	border-radius: var( --reservant-radius );
+	color: var( --reservant-muted );
+}

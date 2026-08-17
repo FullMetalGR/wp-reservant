@@ -26,6 +26,11 @@ jobs:
         with: { node-version: '20' }
       - run: npm ci
       - run: npm run build
+      # The public widget loads on visitor-facing pages, so its weight is a product decision the
+      # build has to keep proving. `npm run size` reads the bundle `npm run build` just wrote and
+      # fails over 100 KB - and fails just as hard when the file is absent, so it can never pass by
+      # never having built.
+      - run: npm run size
       - run: npm run tsc
       - run: npm run test:js
       # Not a bare `npx fallow --ci`: it emits SARIF and exits 0 even on level:"error" findings, so
