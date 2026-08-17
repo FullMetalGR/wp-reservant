@@ -27,9 +27,14 @@ jobs:
       - run: npm ci
       - run: npm run build
       # The public widget loads on visitor-facing pages, so its weight is a product decision the
-      # build has to keep proving. `npm run size` reads the bundle `npm run build` just wrote and
-      # fails over 100 KB - and fails just as hard when the file is absent, so it can never pass by
-      # never having built.
+      # build has to keep proving. `npm run size` runs two checks against what `npm run build`
+      # just wrote: bin/bundle-budget.mjs fails over 100 KB of bundled bytes, and
+      # bin/widget-contract.mjs fails on any script handle in widget.asset.php outside the
+      # allowed externals (importing @wordpress/components adds ~59 bundled bytes but ~900 KB of
+      # core assets through the wp-components handle - weight a byte count cannot see) and on a
+      # missing build/style-widget.css (wp-scripts can silently rename the style chunk when a new
+      # entry imports style.css). All three fail just as hard when a file is absent, so nothing
+      # here can pass by never having built.
       - run: npm run size
       - run: npm run tsc
       - run: npm run test:js
