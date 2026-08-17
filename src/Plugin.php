@@ -59,6 +59,16 @@ final class Plugin {
 			( new Admin\ApprovalActionEndpoint() )->register();
 		}
 
+		if ( ! is_admin() ) {
+			// The shortcode holds the Assets instance so that rendering a mount point can
+			// force-enqueue the bundle even where content detection cannot see it; Task 10's
+			// ManageRoute takes this same instance for the same reason (its route matches no
+			// post at all) and calls force() before rendering.
+			$assets = new Frontend\Assets();
+			$assets->register();
+			( new Frontend\Shortcode( $assets ) )->register();
+		}
+
 		if ( defined( 'WP_CLI' ) && WP_CLI && self::devToolsAllowed( wp_get_environment_type(), self::devOverride() ) ) {
 			\WP_CLI::add_command( 'reservant', Cli\FixtureCommand::class );
 		}
