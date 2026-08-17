@@ -3,7 +3,7 @@
  * Plugin Name: Reservant
  * Description: Bookings for appointments, chains, and events - with or without WooCommerce.
  * Version: 0.3.0
- * Requires at least: 6.5
+ * Requires at least: 6.6
  * Requires PHP: 8.1
  * Author: ADS Solutions
  * Text Domain: reservant

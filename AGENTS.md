@@ -36,7 +36,7 @@ Works with or without money. WooCommerce is an *optional* payment bridge, never 
 | Cancellation policy | Policy engine per service; slot auto-releases. **Refunds are flagged, never automatic.** |
 | Notifications | **Email + `.ics` + reminders** via Action Scheduler. |
 | Payment modes | Per service: **free / pay online in full / pay on site**. |
-| PHP | **8.1+**, typed, namespaced, Composer PSR-4. WP 6.5+. |
+| PHP | **8.1+**, typed, namespaced, Composer PSR-4. WP 6.6+ (the built bundles depend on the `react-jsx-runtime` core script, registered in 6.6; on older WP the dependency is silently dropped and the widget renders nothing). |
 | Testing | **Unit + integration + Playwright E2E.** PHPCS (WPCS) + PHPStan >=6. |
 
 **Non-goals for v1:** Google/Outlook calendar sync, deposits/partial payments, prepaid packages

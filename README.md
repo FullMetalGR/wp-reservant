@@ -17,7 +17,7 @@ See `AGENTS.md` for the full product spec, invariants, schema, and conventions.
 ## Requirements
 
 - PHP 8.1+
-- WordPress 6.5+
+- WordPress 6.6+
 - MySQL 5.7+ / MariaDB 10.3+ (InnoDB)
 
 ## Development
