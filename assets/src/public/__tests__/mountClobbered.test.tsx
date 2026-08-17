@@ -1,0 +1,27 @@
+import { act } from '@testing-library/react';
+
+/**
+ * `window.reservantWidgetMounted` is a shared global on a public page, and any third-party script
+ * that runs first can have assigned it something that is not a WeakSet (an analytics shim
+ * initialising "missing" globals to 0, say). A bare `??=` would keep that value - it only
+ * replaces null/undefined - and the first `mounted.has()` would then throw inside the module's
+ * import-time self-boot, rendering NOTHING anywhere on the page with no plugin-owned diagnostic.
+ * The guard must treat any non-WeakSet value as absent and replace it.
+ *
+ * This lives in its own file on purpose: the poisoning has to happen before the module's FIRST
+ * evaluation, and every other suite imports `../index` at the top of the file.
+ */
+it( 'boots and mounts even when a foreign script clobbered the registry global', () => {
+	document.body.innerHTML = '<div class="reservant-widget" data-mode="book"></div>';
+	( window as Window & { reservantWidgetMounted?: unknown } ).reservantWidgetMounted = 0;
+
+	// First evaluation of the module: its import-time self-boot must survive the junk value.
+	act( () => {
+		jest.requireActual( '../index' );
+	} );
+
+	expect( document.querySelector( '.reservant-widget__panel' ) ).not.toBeNull();
+	expect(
+		( window as Window & { reservantWidgetMounted?: unknown } ).reservantWidgetMounted
+	).toBeInstanceOf( WeakSet );
+} );

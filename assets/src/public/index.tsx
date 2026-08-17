@@ -105,11 +105,19 @@ function Widget( { config }: { config: WidgetConfig } ): JSX.Element {
  * visitor had in progress (a half-filled form, a running hold countdown).
  *
  * A WeakSet rather than a `data-` marker attribute: an attribute could arrive pre-set in server
- * markup (a page saved from a live DOM, say) and the widget would then never mount at all, while
- * the WeakSet cannot be forged by markup and releases each node with the page.
+ * markup (a page saved from a live DOM, say) and the widget would then never mount at all.
+ * Markup cannot forge the WeakSet, and it releases each node with the page - but a SCRIPT can
+ * still clobber the window property, and on a public page third-party scripts run first. Hence
+ * `instanceof`, not `??=`: a bare `??=` keeps any non-nullish junk (`window.reservantWidgetMounted
+ * = 0` from an analytics shim, say), and the first `mounted.has()` then throws inside the
+ * import-time self-boot - no widget mounts anywhere, with no plugin-owned diagnostic. Treating a
+ * clobbered value as absent risks at worst one duplicate mount; keeping it kills the page.
  */
-const host = window as Window & { reservantWidgetMounted?: WeakSet< HTMLElement > };
-const mounted = ( host.reservantWidgetMounted ??= new WeakSet< HTMLElement >() );
+const host = window as Window & { reservantWidgetMounted?: unknown };
+const mounted: WeakSet< HTMLElement > =
+	host.reservantWidgetMounted instanceof WeakSet
+		? host.reservantWidgetMounted
+		: ( host.reservantWidgetMounted = new WeakSet< HTMLElement >() );
 
 /** Mounts one widget into the node PHP rendered. Mounting the same node again is a no-op. */
 export function mountWidget( el: HTMLElement ): void {

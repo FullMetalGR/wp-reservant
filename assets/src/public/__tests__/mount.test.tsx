@@ -71,6 +71,15 @@ it( 'mounting the same node twice keeps the first render', () => {
  * with it, which is exactly what this test distinguishes: it boots a second, isolated instance of
  * the module (whose import-time self-boot runs `mountAll`, just like a second script tag would)
  * and asserts the first instance's render survives untouched.
+ *
+ * The DOM-identity assertion alone is NOT what discriminates here, and must not be relied on:
+ * `jest.isolateModules` also re-instantiates `react-dom/client`, so the isolated instance renders
+ * through a second React copy whose container marker the first copy cannot see - against a
+ * module-scoped guard the final `toBe( panel )` still passes, and the run only failed
+ * incidentally, on the jest-console rule catching a stray act() warning from that second copy.
+ * The registry assertions below observe the guard itself: a module-scoped guard never touches
+ * `window.reservantWidgetMounted` and fails the `toBeInstanceOf` line on this suite's own
+ * assertion, and a guard that re-CREATES the registry per execution fails the final `toBe`.
  */
 it( 'a second execution of the bundle does not remount the page', () => {
 	document.body.innerHTML = '<div class="reservant-widget" data-mode="book"></div>';
@@ -82,6 +91,11 @@ it( 'a second execution of the bundle does not remount the page', () => {
 	const panel = document.querySelector( '.reservant-widget__panel' );
 	expect( panel ).not.toBeNull();
 
+	// The cross-execution guard must live on window, where the second execution can find it.
+	const registry = ( window as Window & { reservantWidgetMounted?: unknown } )
+		.reservantWidgetMounted;
+	expect( registry ).toBeInstanceOf( WeakSet );
+
 	act( () => {
 		jest.isolateModules( () => {
 			jest.requireActual( '../index' );
@@ -89,6 +103,10 @@ it( 'a second execution of the bundle does not remount the page', () => {
 	} );
 
 	expect( document.querySelector( '.reservant-widget__panel' ) ).toBe( panel );
+	// ...and the second execution ADOPTED the first's registry rather than replacing it.
+	expect(
+		( window as Window & { reservantWidgetMounted?: unknown } ).reservantWidgetMounted
+	).toBe( registry );
 } );
 
 /**
