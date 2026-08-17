@@ -6,6 +6,11 @@
  * Interfaces referenced only through another type here are deliberately not exported (the
  * `index.tsx` `WidgetConfig` precedent): an export nothing imports is invisible dead code, and the
  * first task that needs one from outside adds the `export` keyword alongside its import.
+ *
+ * Expected first importers, so nobody re-derives this: Task 13 (the slot/occurrence picker) is
+ * expected to export `SlotStart` and `OccurrenceOption`; Task 15 (the manage page) `BookingItem`.
+ * Adding `export` then is a one-word diff and the intended path - but adding it BEFORE the
+ * consumer exists trips `fallow/unused-export` at ERROR level and fails the fallow gate.
  */
 
 /**

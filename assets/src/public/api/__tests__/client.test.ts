@@ -1,7 +1,7 @@
 import { createElement, type ReactNode } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, renderHook, waitFor } from '@testing-library/react';
-import { ApiError } from '../../../shared';
+import { ApiError, errorMessage } from '../../../shared';
 import {
 	cancelBooking,
 	confirmBooking,
@@ -201,10 +201,17 @@ describe( 'the client', () => {
 		} );
 	} );
 
+	// The instanceof half matters on its own: a plain-object throw would satisfy `toMatchObject`
+	// above but miss the `error instanceof ApiError` branch in `errorMessage()`, which would then
+	// show the machine `message` instead of the sentence. So both halves are asserted through the
+	// SHARED import - the exact class and the exact function Task 15's manage page will use.
 	it( 'the rejection is the shared ApiError, so errorMessage() reads it unchanged', async () => {
 		mockJson( CONFLICT_ENVELOPE, 409 );
 
-		await expect( createHold( HOLD_BODY ) ).rejects.toBeInstanceOf( ApiError );
+		const thrown: unknown = await createHold( HOLD_BODY ).catch( ( error: unknown ) => error );
+
+		expect( thrown ).toBeInstanceOf( ApiError );
+		expect( errorMessage( thrown ) ).toBe( 'That time was just taken. Please pick another.' );
 	} );
 
 	// The admin client shipped this bug and had to be fixed: under PLAIN permalinks `rest_url()`
@@ -379,10 +386,16 @@ describe( 'the query hooks', () => {
 
 	// The plan's invalidation contract: a successful confirm, cancel or reschedule invalidates
 	// ['booking', uuid] AND ['availability'] - the move just changed what other visitors can book.
+	// The pathname and body are pinned here too, because this is the ONLY place the hook-to-client
+	// wiring is visible: the direct client tests above prove each function's request, but not WHICH
+	// function a hook calls - a confirm hook rewired to cancelBooking, or a reschedule hook leaking
+	// `uuid` into the body, stays green everywhere else.
 	async function expectsManageInvalidation(
 		useHook: () => { mutateAsync: ( variables: never ) => Promise< Booking > },
 		variables: Record< string, unknown >,
-		response: Booking
+		response: Booking,
+		path: string,
+		body: Record< string, unknown >
 	): Promise< void > {
 		const queryClient = hookClient();
 		const invalidate = jest.spyOn( queryClient, 'invalidateQueries' );
@@ -393,23 +406,39 @@ describe( 'the query hooks', () => {
 			await result.current.mutateAsync( variables as never );
 		} );
 
+		expect( fetchUrl().pathname ).toBe( path );
+		expect( JSON.parse( fetchCall()[ 1 ].body as string ) ).toEqual( body );
 		expect( invalidate ).toHaveBeenCalledWith( { queryKey: [ 'booking', UUID ] } );
 		expect( invalidate ).toHaveBeenCalledWith( { queryKey: [ 'availability' ] } );
 	}
 
 	it( 'a successful confirm invalidates the booking and availability', async () => {
-		await expectsManageInvalidation( useConfirm, { uuid: UUID, token: TOKEN }, bookingFixture( { status: 'confirmed' } ) );
+		await expectsManageInvalidation(
+			useConfirm,
+			{ uuid: UUID, token: TOKEN },
+			bookingFixture( { status: 'confirmed' } ),
+			`/wp-json/reservant/v1/bookings/${ UUID }/confirm`,
+			{ token: TOKEN }
+		);
 	} );
 
 	it( 'a successful cancel invalidates the booking and availability', async () => {
-		await expectsManageInvalidation( useCancel, { uuid: UUID, token: TOKEN }, bookingFixture( { status: 'cancelled' } ) );
+		await expectsManageInvalidation(
+			useCancel,
+			{ uuid: UUID, token: TOKEN },
+			bookingFixture( { status: 'cancelled' } ),
+			`/wp-json/reservant/v1/bookings/${ UUID }/cancel`,
+			{ token: TOKEN }
+		);
 	} );
 
 	it( 'a successful reschedule invalidates the booking and availability', async () => {
 		await expectsManageInvalidation(
 			useReschedule,
 			{ uuid: UUID, token: TOKEN, start_utc: '2026-06-02 10:00:00' },
-			bookingFixture()
+			bookingFixture(),
+			`/wp-json/reservant/v1/bookings/${ UUID }/reschedule`,
+			{ token: TOKEN, start_utc: '2026-06-02 10:00:00' }
 		);
 	} );
 } );

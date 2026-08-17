@@ -81,7 +81,8 @@ export function fetchServices(): Promise< PublicService[] > {
 
 /**
  * `GET /availability` for the whole chain. `from`/`to` are `Y-m-d` business dates, `to` exclusive
- * and at most 60 days out. No `tz` is sent: the endpoint's fallback for an absent `tz` is the
+ * and at most 62 days after `from` (`AvailabilityController::MAX_WINDOW_DAYS`, its docblock owning
+ * the sizing). No `tz` is sent: the endpoint's fallback for an absent `tz` is the
  * business timezone (`AvailabilityController::displayZone()`), which is exactly the clock the
  * widget shows - a customer books the salon's 09:00, wherever they sit.
  */
