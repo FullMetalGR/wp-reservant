@@ -11,15 +11,16 @@ use Reservant\Settings;
  * The widget is ~100 KB of script plus a stylesheet, and the second test in ShortcodeTest is the
  * reason this is its own class: those bytes load ONLY on pages that actually carry the widget.
  * Detection runs on `wp_enqueue_scripts` and looks for either registered shortcode or the block
- * in the queried singular post's content. Two surfaces detection cannot see are covered by
- * `force()`: the magic-link manage route (no post exists at all - ManageRoute builds its mount
- * through `MountPoint::render()`, whose `force()` call lands at `template_redirect` time, before
- * the page shell fires `wp_enqueue_scripts`), and a shortcode
- * rendered from outside post content (a template part, a text widget, a page builder module),
- * where `Shortcode::mount()` calls `force()` at render time and WordPress prints the script in
- * the footer and the stylesheet via `print_late_styles()`. The late path trades a flash of
- * unstyled widget for not shipping a dead mount point; head-time detection stays the primary
- * route exactly to keep the stylesheet in `<head>`.
+ * in the queried singular post's content. What detection cannot see is covered by `force()`, and
+ * the call site is `MountPoint::render()`: every surface (shortcode, block, manage route) builds
+ * its mount through the shared renderer, so rendering a mount point IS the enqueue trigger. For
+ * the magic-link manage route (no post exists at all) that call lands at `template_redirect`
+ * time, before the page shell fires `wp_enqueue_scripts`. For a shortcode OR block rendered from
+ * outside the queried post's content (a template part, a text widget, a reusable block, a page
+ * builder module) it lands at render time, past `wp_enqueue_scripts`, and WordPress prints the
+ * script in the footer and the stylesheet via `print_late_styles()`. The late path trades a
+ * flash of unstyled widget for not shipping a dead mount point; head-time detection stays the
+ * primary route exactly to keep the stylesheet in `<head>`.
  *
  * `force()` deliberately keeps NO instance state: "enqueue this request" is recorded by adding a
  * one-shot `wp_enqueue_scripts` action (or enqueuing immediately when the hook already fired).
@@ -39,7 +40,12 @@ final class Assets {
 
 	private const HANDLE = 'reservant-widget';
 
-	/** Task 9 registers this block; detection already covers it so Task 9 adds no enqueue code. */
+	/**
+	 * Task 9's block. `has_block()` detection sees it inside the queried post's content; anywhere
+	 * else (template part, reusable block, page builder) its render callback still enqueues,
+	 * because Task 9 renders through the shared MountPoint whose `render()` calls `force()` - the
+	 * render-time enqueue that closed the dead-mount-point hole for blocks detection cannot see.
+	 */
 	private const BLOCK = 'reservant/booking-widget';
 
 	public function register(): void {
@@ -150,18 +156,23 @@ final class Assets {
 	 *   (`rest_cookie_invalid_nonce`) on EVERY route, fully public ones included - while the same
 	 *   request with no nonce at all simply proceeds unauthenticated.
 	 * - A `wp_rest` nonce dies in 12-24 hours, and a booking page outlives that easily: a tab
-	 *   left open overnight, or a host that caches pages for logged-in users too (Batcache with
-	 *   `cache_logged_in`, LiteSpeed, some Cloudflare setups). The stale nonce then breaks the
-	 *   whole widget precisely for the logged-in shop owner testing it, while a logged-out
-	 *   visitor on the identical page succeeds.
+	 *   left open overnight, or a host that caches pages for logged-in users too (Batcache once
+	 *   the login cookies are listed in `$batcache->noskip_cookies`, LiteSpeed, some Cloudflare
+	 *   setups). The stale nonce then breaks the whole widget precisely for the logged-in shop
+	 *   owner testing it, while a logged-out visitor on the identical page succeeds.
 	 *
 	 * Known trade-off, accepted: without a nonce a logged-in manager using the PUBLIC widget is a
 	 * guest to the REST layer - no `requireTokenOrCap` capability branch, no policy-window
 	 * override in cancel/reschedule. Manager actions belong to the admin SPA, which ships its own
 	 * nonce (`Admin\AdminPage::config()`).
 	 *
-	 * The key itself stays in the shape: the Task 11 client reads all six keys and the contract
-	 * test pins their exact order.
+	 * The key itself stays in the shape: the shipped client (assets/src/public/api/client.ts)
+	 * destructures exactly `restRoot` and `nonce`, branching on the nonce's falsiness to OMIT the
+	 * X-WP-Nonce header entirely - never sending an empty one, which core would reject as an
+	 * invalid nonce. Of the other four keys, `timezone` is read by the pickers (SlotGrid,
+	 * OccurrencePicker); `currency`, `granularityMin` and `checkoutTtlMin` are typed on
+	 * WidgetBootstrap but unread until the Task 14-16 surfaces land. ShortcodeTest pins the exact
+	 * six-key shape and order.
 	 *
 	 * `checkoutTtlMin` is the site default TTL for the CHECKOUT hold class ONLY - the `pending`
 	 * status, `Settings::checkoutTtlMin()`, default 15 minutes. AGENTS.md section 2.3 defines two

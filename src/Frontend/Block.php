@@ -49,9 +49,16 @@ final class Block {
 	public function __construct( private readonly ?MountPoint $renderer = null ) {}
 
 	/**
-	 * Registration must run on `init` (WP warns on earlier calls) and must run in wp-admin too:
-	 * the editor's inserter only lists server-registered block types. Plugin therefore calls
-	 * this OUTSIDE its `is_admin()` split. The immediate branch serves callers arriving after
+	 * Registration must run on `init` and in wp-admin too, so Plugin calls this OUTSIDE its
+	 * `is_admin()` split. The init constraint is NOT the block registry's:
+	 * `WP_Block_Type_Registry::register()` never warns about timing - its `_doing_it_wrong()`
+	 * calls are all about block names and duplicate registration. The pre-init warning comes
+	 * from THIS class's own `wp_register_script()`/`wp_register_style()` in
+	 * registerEditorAssets(), which both call `_wp_scripts_maybe_doing_it_wrong()` - and that
+	 * warns until `init` (or an enqueue hook) has fired. The wp-admin constraint: editor.tsx
+	 * registers the client half with edit/save ONLY, so this block reaches the inserter solely
+	 * through its server registration (`get_block_editor_server_block_settings()` bootstraps
+	 * the definition into the editor). The immediate branch serves callers arriving after
 	 * `init` already fired (the test harness re-booting the plugin mid-request); it is
 	 * idempotent per request - an already-registered block type is left alone rather than
 	 * tripping core's duplicate-registration warning.
@@ -101,13 +108,17 @@ final class Block {
 	 *   keeps the default block markup byte-identical to the shortcode's.
 	 * - `serviceId`/`resourceId` map to `data-service`/`data-staff`, the names index.tsx reads;
 	 *   0 means "not preselected" and collapses to the same empty string the shortcode default
-	 *   produces (readId() treats both as null).
+	 *   produces (readId() treats both as null). Negatives collapse to that same empty string:
+	 *   `max( 0, (int) )`, NOT `absint()` - absint's absolute value would turn a hand-written
+	 *   `{"serviceId":-3}` into `data-service="3"`, silently binding the widget to a DIFFERENT
+	 *   service than the markup names. block.json sets no minimum and the editor's toId() already
+	 *   clamps, so only hand-written markup can reach this branch.
 	 *
 	 * @param array<string, mixed> $attributes Validated block attributes, defaults filled.
 	 */
 	public function render( array $attributes ): string {
-		$service = absint( $attributes['serviceId'] ?? 0 );
-		$staff   = absint( $attributes['resourceId'] ?? 0 );
+		$service = max( 0, (int) ( $attributes['serviceId'] ?? 0 ) );
+		$staff   = max( 0, (int) ( $attributes['resourceId'] ?? 0 ) );
 
 		$css = array();
 

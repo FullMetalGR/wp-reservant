@@ -25,8 +25,6 @@
   },
   "dependencies": {
     "@tanstack/react-query": "^5.101.4",
-    "@wordpress/block-editor": "~14.10.1",
-    "@wordpress/blocks": "~13.10.0",
     "@wordpress/components": "^28.13.0",
     "@wordpress/element": "^6.46.0",
     "@wordpress/i18n": "^5.26.0",

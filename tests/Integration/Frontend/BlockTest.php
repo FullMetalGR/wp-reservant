@@ -68,6 +68,19 @@ final class BlockTest extends ReservantTestCase {
 		$this->assertStringContainsString( 'data-staff="7"', $html );
 	}
 
+	public function test_a_negative_id_means_nothing_preselected_never_the_absolute_value(): void {
+		// block.json sets no minimum, so hand-written markup can deliver a negative id (the
+		// editor's toId() clamps, so the panel never can). absint() would render
+		// {"serviceId":-3} as data-service="3" - silently binding the widget to a DIFFERENT
+		// service than the markup names. The honest reading is max(0, (int)): a negative id
+		// collapses to 0, which is the same "nothing preselected" an absent attribute means.
+		$html = do_blocks( '<!-- wp:reservant/booking-widget {"serviceId":-3,"resourceId":-7} /-->' );
+		$this->assertStringContainsString( 'data-service=""', $html );
+		$this->assertStringContainsString( 'data-staff=""', $html );
+		$this->assertStringNotContainsString( 'data-service="3"', $html );
+		$this->assertStringNotContainsString( 'data-staff="7"', $html );
+	}
+
 	public function test_appearance_attributes_become_inline_custom_properties(): void {
 		$html = do_blocks( '<!-- wp:reservant/booking-widget {"accent":"#c00","radius":2} /-->' );
 		// Inline on the mount div itself: style.css declares the token defaults on

@@ -33,8 +33,13 @@ namespace Reservant\Frontend;
  * has no use for. `$css` lands as an inline `style` attribute ON the mount div itself, because
  * style.css declares the theming tokens on `.reservant-widget` and an inline declaration on that
  * SAME element is what beats them; on a wrapper it would lose. Callers pass already-sanitised
- * values (Block owns sanitisation policy); everything still goes through `esc_attr()` here, so a
- * misbehaving caller degrades to broken CSS, never to an attribute breakout.
+ * values (Block owns sanitisation policy); everything still goes through `esc_attr()` here,
+ * which prevents an ATTRIBUTE breakout - quotes and angle brackets die - but nothing more:
+ * `esc_attr()` leaves ';' and ':' untouched, so a hostile `$css` value is a CSS-DECLARATION
+ * INJECTION, e.g. ['--z' => '1px; background: url(...)'] emits valid extra declarations inside
+ * the style attribute. Today no caller can deliver one (Block sanitises its two properties;
+ * Shortcode and ManageRoute pass no `$css` at all), but whoever next routes user-derived values
+ * into `$css` owns sanitising them BEFORE this renderer - it will not do it for them.
  */
 final class MountPoint {
 

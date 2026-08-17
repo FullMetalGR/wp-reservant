@@ -2,8 +2,16 @@
 	"$schema": "https://unpkg.com/fallow/schema/fallow.schema.json",
 	"entry": [
 		"assets/src/admin/index.tsx",
-		"assets/src/public/index.tsx",
 		"assets/src/public/editor.tsx",
 		"bin/fallow-gate.mjs"
-	]
+	],
+	// editor.tsx imports @wordpress/blocks and @wordpress/block-editor, but the packages are
+	// deliberately NOT in package.json: @wordpress/dependency-extraction-webpack-plugin rewrites
+	// the bare specifiers to the wp.blocks / wp.blockEditor globals WordPress itself ships, and
+	// the npm copies bought nothing (no bundled code, no types - editor-modules.d.ts is the sole
+	// type source) at the cost of 137 transitive packages. Without this list fallow flags both
+	// imports as error-level unlisted-dependency. LATENT HAZARD: the externalisation covers only
+	// the bare package specifier - a DEEP import (@wordpress/blocks/build-module/...) would not
+	// be rewritten and would get bundled into the shipped widget. Keep imports bare.
+	"ignoreDependencies": ["@wordpress/blocks", "@wordpress/block-editor"]
 }

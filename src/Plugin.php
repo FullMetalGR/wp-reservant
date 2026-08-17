@@ -141,7 +141,10 @@ final class Plugin {
 		}
 
 		// Deliberately OUTSIDE the is_admin() split, unlike everything above: the block editor
-		// IS wp-admin, and its inserter only lists server-registered block types - a block
+		// IS wp-admin, and THIS block reaches the inserter only via server registration -
+		// editor.tsx registers the client half with edit/save alone, taking title, category and
+		// attributes from the server-bootstrapped definition (a block shipping its own full
+		// client-side metadata would list regardless; this one deliberately does not). A block
 		// registered under `! is_admin()` would render fine on the front end while being
 		// impossible to insert. Registration itself is cheap and side-effect free on requests
 		// that never render the block.

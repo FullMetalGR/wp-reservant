@@ -7,11 +7,20 @@
  * (the block editor script, say) ever imports it too, the name follows whichever entry comes
  * first on the build command line, and every enqueue hardcoding the old name silently ships
  * nothing. bin/widget-contract.mjs (run by `npm run size`) asserts build/style-widget.css exists
- * after every build, so that rename fails CI instead. Do not rename this source file either: the
- * style-<entry> convention is what block.json's `style` field expects.
+ * after every build, so that rename fails CI instead. Do not rename this source file either:
+ * wp-scripts routes only source files NAMED style.css into the front-end style-<entry> chunk -
+ * renamed, these rules would emit into widget.css, which nothing enqueues. The filename matters
+ * because Assets.php enqueues build/style-widget.css by name; block.json deliberately declares
+ * NO `style` field (Task 9 removed it - on a classic theme that handle would enqueue site-wide,
+ * and frontend loading has exactly one owner, Assets).
  *
- * Every rule is scoped under .reservant-widget: this stylesheet loads on a stranger's theme and
- * must never reach outside its own mount node. No bare element selectors, and no !important.
+ * Every selector starts with the widget's own class. Rules are scoped under .reservant-widget,
+ * with ONE deliberate exception: the bare .reservant-widget--compact modifier, which targets the
+ * mount node ITSELF (Block.php writes the class next to reservant-widget on the same div), so it
+ * cannot sit under .reservant-widget as a descendant; it stays a bare class at the token block's
+ * own specificity, winning by source order (see its comment below). The reservant- prefix keeps
+ * it clear of a stranger theme's classes. This stylesheet loads on a stranger's theme and must
+ * never reach outside its own mount node: no bare element selectors, and no !important.
  *
  * The custom properties below are the documented theming surface. They are declared on the widget
  * root, which is also where the block's appearance panel writes its inline overrides
