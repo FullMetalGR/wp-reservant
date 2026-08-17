@@ -29,9 +29,16 @@ final class Shortcode {
 	}
 
 	/**
-	 * Core passes '' - not an array - when a shortcode is written without attributes. The stubs
-	 * type the callback's first parameter as array only, so this normalization sits behind a
-	 * native union type, which keeps both branches analysable instead of one looking dead.
+	 * Purely defensive - core no longer produces the string shape. Since WP 6.5,
+	 * `shortcode_parse_atts()` always returns an array, so a shortcode written without attributes
+	 * reaches its callback as `array()`, not the historical `''` (core's `pre_do_shortcode_tag`
+	 * docblock: "@since 6.5.0 The `$attr` parameter is always an array"; verified empirically on
+	 * 7.0.4). This plugin's floor is WP 6.6, so through core the string branch is unreachable and
+	 * the stubs' array-only typing of the callback parameter is CORRECT for every supported
+	 * version. The normalization stays as belt-and-braces against a non-core caller (a theme or
+	 * builder invoking the callback directly) still following the pre-6.5 `array|string`
+	 * convention, and its native union type is what keeps PHPStan treating both branches as live
+	 * rather than flagging the array branch's guard as dead code.
 	 *
 	 * @param array<array-key, string>|string $attrs
 	 * @return array<array-key, string>

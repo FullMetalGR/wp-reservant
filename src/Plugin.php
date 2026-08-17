@@ -60,10 +60,13 @@ final class Plugin {
 		}
 
 		if ( ! is_admin() ) {
-			// The shortcode holds the Assets instance so that rendering a mount point can
-			// force-enqueue the bundle even where content detection cannot see it; Task 10's
-			// ManageRoute takes this same instance for the same reason (its route matches no
-			// post at all) and calls force() before rendering.
+			// The shortcode takes an Assets instance so that rendering a mount point can
+			// force-enqueue the bundle even where content detection cannot see it. Sharing THIS
+			// instance is dependency-injection hygiene, not a mechanism requirement: Assets keeps
+			// no instance state (force() records its decision in the hook table - see its
+			// docblock), so a fresh instance behaves identically, and ShortcodeTest proves it by
+			// constructing its own. Task 10's ManageRoute needs force() too (its route matches no
+			// post at all); hand it this same instance for the same hygiene.
 			$assets = new Frontend\Assets();
 			$assets->register();
 			( new Frontend\Shortcode( $assets ) )->register();
