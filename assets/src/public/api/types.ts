@@ -68,13 +68,13 @@ export interface ChainItem {
  * `utc` is exactly the string `POST /holds` expects back, so a chosen slot round-trips without
  * reformatting; `local` is ISO 8601 in the requested display timezone (the business's by default).
  */
-interface SlotStart {
+export interface SlotStart {
 	utc: string;
 	local: string;
 }
 
 /** `AvailabilityController::occurrences()` - `remaining` is advisory, like every availability read. */
-interface OccurrenceOption {
+export interface OccurrenceOption {
 	id: number;
 	start_utc: string;
 	end_utc: string;
