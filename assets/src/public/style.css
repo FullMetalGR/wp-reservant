@@ -1,5 +1,14 @@
 /*
- * Public widget styles - builds to build/widget.css.
+ * Public widget styles - builds to build/style-widget.css (and build/style-widget-rtl.css).
+ *
+ * The emitted name is wp-scripts' choice, not this file's: webpack pulls any source file named
+ * style.css into a shared chunk named style-<entry> after the FIRST entry that imports it. Today
+ * only the `widget` entry imports this file, so it emits style-widget.css - but if a second entry
+ * (the block editor script, say) ever imports it too, the name follows whichever entry comes
+ * first on the build command line, and every enqueue hardcoding the old name silently ships
+ * nothing. bin/widget-contract.mjs (run by `npm run size`) asserts build/style-widget.css exists
+ * after every build, so that rename fails CI instead. Do not rename this source file either: the
+ * style-<entry> convention is what block.json's `style` field expects.
  *
  * Every rule is scoped under .reservant-widget: this stylesheet loads on a stranger's theme and
  * must never reach outside its own mount node. No bare element selectors, and no !important.

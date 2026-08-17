@@ -1,10 +1,18 @@
 /**
- * Public booking widget entry - builds to `build/widget.js` + `build/widget.css`.
+ * Public booking widget entry - builds to `build/widget.js` plus `build/style-widget.css` (and
+ * its RTL twin `build/style-widget-rtl.css`). The stylesheet is NOT `widget.css`: wp-scripts
+ * collects any source file named `style.css` into a shared chunk named `style-<entry>` after the
+ * first entry that imports it. The header of `./style.css` documents the rename hazard; PHP must
+ * enqueue `build/style-widget.css`, and `npm run size` asserts that file exists after every build.
  *
  * This bundle is served to visitors, so its dependency list is deliberately tiny: `wp-element`,
- * `wp-i18n` and React only. `@wordpress/components` may NOT be imported from anywhere reachable
- * here - it alone is bigger than the whole 100 KB budget `npm run size` enforces. The block editor
- * script is a separate entry and may use it.
+ * `wp-i18n` and the React JSX runtime only. `@wordpress/components` may NOT be imported from
+ * anywhere reachable here - it alone is ~800 KB of core script plus ~97 KB of CSS handed to every
+ * visitor. Bundled bytes cannot catch that: every `@wordpress/*` package is a webpack external,
+ * so importing it adds a handle to `build/widget.asset.php`, not weight to `build/widget.js`.
+ * `npm run size` therefore runs two checks - `bin/bundle-budget.mjs` bounds the bundled bytes,
+ * and `bin/widget-contract.mjs` fails the build on any script handle outside the allowed
+ * externals. The block editor script is a separate entry and may use `@wordpress/components`.
  *
  * The mount node is rendered by PHP (`src/Frontend/`), which is the only place that knows the
  * booking context, so every input arrives as a `data-` attribute on that node:
@@ -16,9 +24,14 @@ import { createRoot } from '@wordpress/element';
 import { __ } from '@wordpress/i18n';
 import './style.css';
 
-export type WidgetMode = 'book' | 'manage';
+type WidgetMode = 'book' | 'manage';
 
-export interface WidgetConfig {
+/**
+ * Deliberately not exported: nothing consumes it yet, and an unconsumed export would be invisible
+ * dead code. The first task that needs the shape from outside (the booking flow or the manage
+ * view) adds the `export` keyword alongside its import.
+ */
+interface WidgetConfig {
 	/** Which journey the mount node asked for. Anything unrecognised books. */
 	mode: WidgetMode;
 	/** Preselected service, or null when the visitor picks one. */
@@ -50,7 +63,10 @@ function readText( raw: string | undefined ): string | null {
 
 function readConfig( el: HTMLElement ): WidgetConfig {
 	return {
-		mode: 'manage' === el.dataset.mode ? 'manage' : 'book',
+		// Through readText like uuid and token: shortcode attributes are user text and
+		// `shortcode_atts` does not trim, so `data-mode="manage "` must still mean manage -
+		// matching it exactly would drop a magic-link visitor into the booking flow.
+		mode: 'manage' === readText( el.dataset.mode ) ? 'manage' : 'book',
 		serviceId: readId( el.dataset.service ),
 		resourceId: readId( el.dataset.staff ),
 		uuid: readText( el.dataset.uuid ),
@@ -62,19 +78,46 @@ function readConfig( el: HTMLElement ): WidgetConfig {
  * The scaffold body. It renders the widget shell and the state the real journey starts in; the
  * booking flow and the manage view replace it (plan Tasks 14 and 15), which is why the mode is
  * already read and branched on here rather than later.
+ *
+ * The live region sits on the loading message itself, NOT on `.reservant-widget__panel`: that
+ * class is the widget's generic visual panel, and a polite live region on it would make screen
+ * readers re-announce the entire panel on every keystroke once the real journey renders a form
+ * inside it. The role dies with the loading state, so replacing this body cannot inherit it.
  */
 function Widget( { config }: { config: WidgetConfig } ): JSX.Element {
 	return (
-		<div className="reservant-widget__panel" role="status" aria-live="polite">
-			{ 'manage' === config.mode
-				? __( 'Loading your booking...', 'reservant' )
-				: __( 'Loading booking options...', 'reservant' ) }
+		<div className="reservant-widget__panel">
+			<span role="status" aria-live="polite">
+				{ 'manage' === config.mode
+					? __( 'Loading your booking...', 'reservant' )
+					: __( 'Loading booking options...', 'reservant' ) }
+			</span>
 		</div>
 	);
 }
 
-/** Mounts one widget into the node PHP rendered. */
+/**
+ * Nodes this bundle already mounted, shared across bundle EXECUTIONS through `window`: the
+ * block's `viewScript` and the shortcode's enqueue can register this same file under two handles,
+ * and browsers do not deduplicate classic scripts by URL - so the bundle can run twice on one
+ * page, and the second run gets fresh module scope. A module-scoped guard would reset with it,
+ * and the second `createRoot()` would silently replace the first root and destroy whatever the
+ * visitor had in progress (a half-filled form, a running hold countdown).
+ *
+ * A WeakSet rather than a `data-` marker attribute: an attribute could arrive pre-set in server
+ * markup (a page saved from a live DOM, say) and the widget would then never mount at all, while
+ * the WeakSet cannot be forged by markup and releases each node with the page.
+ */
+const host = window as Window & { reservantWidgetMounted?: WeakSet< HTMLElement > };
+const mounted = ( host.reservantWidgetMounted ??= new WeakSet< HTMLElement >() );
+
+/** Mounts one widget into the node PHP rendered. Mounting the same node again is a no-op. */
 export function mountWidget( el: HTMLElement ): void {
+	if ( mounted.has( el ) ) {
+		return;
+	}
+
+	mounted.add( el );
 	createRoot( el ).render( <Widget config={ readConfig( el ) } /> );
 }
 
