@@ -21,10 +21,14 @@ namespace Reservant\Frontend;
  * Rendering a mount point also force-enqueues the assets (see `Assets::force()`): content
  * detection covers the normal case, but a shortcode or block rendered from a template part or a
  * page builder module lives outside the queried post's content, and a mount point without its
- * bundle is a permanently empty div a site owner cannot diagnose.
+ * bundle is a permanently empty div a site owner cannot diagnose. THE CALL ORDER IS LOAD-BEARING
+ * for callers that print their own page (ManageRoute): build the mount BEFORE the shell starts -
+ * before `get_header()` / before anything fires `wp_head` - or `force()` lands past
+ * `wp_enqueue_scripts` and takes the late path: footer script, stylesheet via
+ * `print_late_styles()` after the mount, a flash of unstyled widget on every visit.
  *
  * The appearance parameters exist for the block's panel and default to "nothing": a caller with
- * no appearance to convey (the shortcodes today, Task 10's manage route tomorrow) passes only
+ * no appearance to convey (the shortcodes and the manage route) passes only
  * mode and data and gets the bare node - it is never forced to thread appearance arguments it
  * has no use for. `$css` lands as an inline `style` attribute ON the mount div itself, because
  * style.css declares the theming tokens on `.reservant-widget` and an inline declaration on that

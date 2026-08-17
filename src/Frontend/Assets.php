@@ -12,8 +12,9 @@ use Reservant\Settings;
  * reason this is its own class: those bytes load ONLY on pages that actually carry the widget.
  * Detection runs on `wp_enqueue_scripts` and looks for either registered shortcode or the block
  * in the queried singular post's content. Two surfaces detection cannot see are covered by
- * `force()`: the magic-link manage route (no post exists at all - Task 10 calls `force()` on
- * `template_redirect`, before its `get_header()` fires `wp_enqueue_scripts`), and a shortcode
+ * `force()`: the magic-link manage route (no post exists at all - ManageRoute builds its mount
+ * through `MountPoint::render()`, whose `force()` call lands at `template_redirect` time, before
+ * the page shell fires `wp_enqueue_scripts`), and a shortcode
  * rendered from outside post content (a template part, a text widget, a page builder module),
  * where `Shortcode::mount()` calls `force()` at render time and WordPress prints the script in
  * the footer and the stylesheet via `print_late_styles()`. The late path trades a flash of

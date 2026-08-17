@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Reservant
  * Description: Bookings for appointments, chains, and events - with or without WooCommerce.
- * Version: 0.3.0
+ * Version: 0.3.1
  * Requires at least: 6.6
  * Requires PHP: 8.1
  * Author: ADS Solutions
@@ -20,7 +20,7 @@ if ( version_compare( PHP_VERSION, '8.1', '<' ) ) {
 	return;
 }
 
-define( 'RESERVANT_VERSION', '0.3.0' );
+define( 'RESERVANT_VERSION', '0.3.1' );
 define( 'RESERVANT_FILE', __FILE__ );
 define( 'RESERVANT_PATH', plugin_dir_path( __FILE__ ) );
 define( 'RESERVANT_URL', plugin_dir_url( __FILE__ ) );

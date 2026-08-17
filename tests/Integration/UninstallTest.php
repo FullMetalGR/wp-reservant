@@ -131,6 +131,7 @@ final class UninstallTest extends ReservantTestCase {
 		Settings::make()->update( array( 'purge_on_uninstall' => true ) );
 		update_option( 'reservant_fixture_ids', array( 'cut' => 1 ), false );
 		update_option( 'reservant_version', '9.9.9', false );
+		update_option( 'reservant_rewrite_version', '9', false );
 		$this->seedRow();
 
 		$this->uninstall();
@@ -141,7 +142,7 @@ final class UninstallTest extends ReservantTestCase {
 			self::assertFalse( $this->tableExists( $table ), "Uninstall left {$table} behind after an opt-in." );
 		}
 
-		foreach ( array( 'reservant_settings', 'reservant_version', 'reservant_db_version', 'reservant_fixture_ids' ) as $option ) {
+		foreach ( array( 'reservant_settings', 'reservant_version', 'reservant_db_version', 'reservant_rewrite_version', 'reservant_fixture_ids' ) as $option ) {
 			self::assertFalse( get_option( $option ), "Uninstall left the {$option} option behind." );
 		}
 

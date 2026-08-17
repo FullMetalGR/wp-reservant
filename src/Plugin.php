@@ -5,6 +5,21 @@ namespace Reservant;
 
 final class Plugin {
 
+	/**
+	 * The rewrite GENERATION this build of the plugin registers. Bump it whenever any
+	 * `add_rewrite_rule()` / `add_rewrite_tag()` this plugin makes changes (today they all live in
+	 * `Frontend\ManageRoute::addRewrite()`), and for nothing else.
+	 *
+	 * Why its own marker and not `RESERVANT_VERSION`: a plugin UPDATE never fires the activation
+	 * hook, so carrying a changed rule set into the stored `rewrite_rules` option depends entirely
+	 * on `maybeFlushRewrites()` noticing a change - and gating that on the plugin version made the
+	 * flush hostage to someone remembering that an unrelated-looking version bump is what arms it
+	 * (the 0.3.0 manage-route release shipped exactly that miss: new rewrite, no bump, every magic
+	 * link 404ing until a manual permalink resave). A marker that exists only for rewrites cannot
+	 * be forgotten for any other reason, and cannot fire spuriously on releases that change none.
+	 */
+	public const REWRITE_VERSION = '1';
+
 	private static ?Plugin $instance = null;
 
 	public static function boot(): void {
@@ -12,17 +27,41 @@ final class Plugin {
 			Infrastructure\Db\Migrations::run();
 			Admin\Capabilities::sync();
 			update_option( 'reservant_version', self::version() );
-			// A plugin UPDATE never fires the activation hook, so a release that changes the
-			// rewrites would leave every existing site 404ing its magic links until a manual
-			// permalink resave - this branch is the update-time twin of activate()'s flush.
-			// Safe this early: core defers a pre-wp_loaded flush to wp_loaded, by which time
-			// register()'s init callback below has re-registered the rule. Once per version
-			// change, never on ordinary requests - flushing on every init is the options-table
-			// write the plan forbids.
-			flush_rewrite_rules();
 		}
 		self::$instance ??= new self();
 		self::$instance->register();
+
+		// After register(): on the immediate branch below the flush snapshots whatever is on
+		// $wp_rewrite RIGHT NOW, so the booking route must already be registered. The deferred
+		// branch (every production request - boot() runs at plugins_loaded) does not care about
+		// this ordering, but the harness re-booting mid-request does.
+		if ( did_action( 'wp_loaded' ) > 0 ) {
+			self::maybeFlushRewrites();
+		} else {
+			add_action( 'wp_loaded', array( self::class, 'maybeFlushRewrites' ) );
+		}
+	}
+
+	/**
+	 * Flushes the stored rewrite rules once per REWRITE_VERSION change - the update-time twin of
+	 * activate()'s flush, for the sites a release reaches without ever firing the activation hook.
+	 *
+	 * Runs at `wp_loaded` so `init` has already re-registered every rule (and so
+	 * `WP_Rewrite::flush_rules()` executes instead of deferring), and the marker option advances
+	 * only AFTER the flush has actually run. That ordering is the point: a request that dies
+	 * anywhere before the flush leaves the marker stale, so the next request simply retries - a
+	 * repeated flush costs one options-table write, a lost one costs every magic link on the site.
+	 * (The previous shape advanced its marker at plugins_loaded while core deferred the flush to
+	 * wp_loaded; one request dying in between - an init-time redirect + exit, a fatal - lost the
+	 * flush permanently.) On ordinary requests this is one autoloaded option read and an early
+	 * return - never the per-request flush the plan forbids.
+	 */
+	public static function maybeFlushRewrites(): void {
+		if ( self::REWRITE_VERSION === get_option( 'reservant_rewrite_version' ) ) {
+			return;
+		}
+		flush_rewrite_rules();
+		update_option( 'reservant_rewrite_version', self::REWRITE_VERSION );
 	}
 
 	public static function activate(): void {
@@ -30,9 +69,13 @@ final class Plugin {
 		Admin\Capabilities::sync();
 		// The activation request included this plugin only after plugins_loaded had fired, so
 		// register() never ran and the rewrite is not on $wp_rewrite yet: register it explicitly
-		// or the flush would store a rules table WITHOUT the booking route.
+		// or the flush would store a rules table WITHOUT the booking route. The flush stays
+		// UNCONDITIONAL (not maybeFlushRewrites()): a reactivation with a current marker still
+		// needs the rules rebuilt, because whatever happened while the plugin was inactive is
+		// unknowable. The marker is set anyway so the next request's check has nothing to redo.
 		( new Frontend\ManageRoute() )->addRewrite();
 		flush_rewrite_rules();
+		update_option( 'reservant_rewrite_version', self::REWRITE_VERSION );
 		update_option( 'reservant_version', self::version() );
 	}
 
@@ -99,7 +142,8 @@ final class Plugin {
 		// stored rewrite_rules from whatever that request's `init` registered. Guarded by
 		// `! is_admin()`, the booking route would silently drop out of the stored table on every
 		// resave and every emailed magic link would 404 until the next activation. Registration
-		// is in-memory only; the flushes live in boot() and activate() above (see ManageRoute).
+		// is in-memory only; the flushes live in maybeFlushRewrites() and activate() above
+		// (see ManageRoute).
 		( new Frontend\ManageRoute( $renderer ) )->register();
 
 		if ( defined( 'WP_CLI' ) && WP_CLI && self::devToolsAllowed( wp_get_environment_type(), self::devOverride() ) ) {

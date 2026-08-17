@@ -230,8 +230,9 @@ final class MigrationsTest extends ReservantTestCase {
 	 * a real site never calls that directly - it goes through `Plugin::boot()`'s
 	 * `reservant_version` option check. This pins that a site whose stored option genuinely reads
 	 * `0.2.0` (not merely absent, which `test_the_upgrade_entry_point_restores_capabilities_it_no_longer_grants_itself`
-	 * already covers below) reaches `Migrations::run()` because `RESERVANT_VERSION` moved to `0.3.0`,
-	 * and ends the request with both the column and the stored option caught up.
+	 * already covers below) reaches `Migrations::run()` because `RESERVANT_VERSION` has moved past
+	 * it (0.3.0 was the release that shipped this schema change; any later version upgrades the
+	 * same way), and ends the request with both the column and the stored option caught up.
 	 */
 	public function test_plugin_boot_upgrades_a_site_whose_stored_version_is_0_2_0(): void {
 		global $wpdb;
