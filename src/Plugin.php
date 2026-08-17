@@ -12,6 +12,14 @@ final class Plugin {
 			Infrastructure\Db\Migrations::run();
 			Admin\Capabilities::sync();
 			update_option( 'reservant_version', self::version() );
+			// A plugin UPDATE never fires the activation hook, so a release that changes the
+			// rewrites would leave every existing site 404ing its magic links until a manual
+			// permalink resave - this branch is the update-time twin of activate()'s flush.
+			// Safe this early: core defers a pre-wp_loaded flush to wp_loaded, by which time
+			// register()'s init callback below has re-registered the rule. Once per version
+			// change, never on ordinary requests - flushing on every init is the options-table
+			// write the plan forbids.
+			flush_rewrite_rules();
 		}
 		self::$instance ??= new self();
 		self::$instance->register();
@@ -20,6 +28,11 @@ final class Plugin {
 	public static function activate(): void {
 		Infrastructure\Db\Migrations::run();
 		Admin\Capabilities::sync();
+		// The activation request included this plugin only after plugins_loaded had fired, so
+		// register() never ran and the rewrite is not on $wp_rewrite yet: register it explicitly
+		// or the flush would store a rules table WITHOUT the booking route.
+		( new Frontend\ManageRoute() )->addRewrite();
+		flush_rewrite_rules();
 		update_option( 'reservant_version', self::version() );
 	}
 
@@ -80,6 +93,14 @@ final class Plugin {
 		// impossible to insert. Registration itself is cheap and side-effect free on requests
 		// that never render the block.
 		( new Frontend\Block( $renderer ) )->register();
+
+		// Also OUTSIDE the is_admin() split, with a sharper failure mode than the block's:
+		// options-permalink.php is an ADMIN request, and a permalink resave there rebuilds the
+		// stored rewrite_rules from whatever that request's `init` registered. Guarded by
+		// `! is_admin()`, the booking route would silently drop out of the stored table on every
+		// resave and every emailed magic link would 404 until the next activation. Registration
+		// is in-memory only; the flushes live in boot() and activate() above (see ManageRoute).
+		( new Frontend\ManageRoute( $renderer ) )->register();
 
 		if ( defined( 'WP_CLI' ) && WP_CLI && self::devToolsAllowed( wp_get_environment_type(), self::devOverride() ) ) {
 			\WP_CLI::add_command( 'reservant', Cli\FixtureCommand::class );
