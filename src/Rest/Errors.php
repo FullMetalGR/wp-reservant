@@ -45,12 +45,16 @@ final class Errors {
 		'stale_state',
 		'not_held',
 		'currency_mismatch',
-		// Infrastructure contention - `LockManager::acquire()` and `ResourceDayRepository::bumpRev()`.
-		// Deliberately NOT `stale_state`: that one means "a rival moved this booking between the plan
-		// and the transaction", which is a benign no-op for a caller that only wanted the booking to
-		// end up decided. A lock that could not be taken is the opposite - nothing happened at all and
-		// the request is worth repeating verbatim. Folding the two together made
-		// `Admin\ApprovalActionEndpoint` render a busy lock as "may already have been handled".
+		// Infrastructure contention - every write or locking read on a section-2.2 mutex path that can
+		// fail at the DB level and refuses rather than being walked past: `LockManager::acquire()`,
+		// `ResourceDayRepository::ensure()`/`bumpRev()`, `BookingRepository` (its `assertNoDbError()`
+		// reads, `reapExpiredTouching()`, `releaseSeatClaims()`), `SeatMapRepository` (`insert()`,
+		// `insertSeats()`, `lockForUpdate()`, `deleteSeats()`), `OccurrenceRepository` and
+		// `AuditLog::record()`. Deliberately NOT `stale_state`: that one means "a rival moved this
+		// booking between the plan and the transaction", which is a benign no-op for a caller that only
+		// wanted the booking to end up decided. A lock that could not be taken is the opposite -
+		// nothing happened at all and the request is worth repeating verbatim. Folding the two together
+		// made `Admin\ApprovalActionEndpoint` render a busy lock as "may already have been handled".
 		'lock_unavailable',
 		// Lifecycle - ApproveBooking, RejectBooking.
 		'not_approvable',
@@ -93,6 +97,14 @@ final class Errors {
 	 * table, column and index names - on a deadlock, a lock-wait timeout or a missing table. Only
 	 * the allow-list below reaches the wire; anything else is an opaque 500, announced on
 	 * `reservant/error` so a site can log it without the plugin choosing a sink.
+	 *
+	 * **`lock_unavailable` fires that same action, even though it reaches the wire as a 409.** Every
+	 * other known reason is an ordinary customer-facing outcome - a booking already decided, a window
+	 * closed - and logging those would just be noise. `lock_unavailable` means the database refused a
+	 * write or a locking read the code expected to work: that is an operational event a site operator
+	 * needs to see, not a customer mistake, and before this the seat-map write path in particular
+	 * traded a logged 500 (`update_conflict`) for a silent 409 the moment it was given this reason
+	 * instead. No other known reason gets this treatment.
 	 */
 	public static function failure( \RuntimeException $exception ): \WP_Error {
 		$reason = $exception->getMessage();
@@ -106,6 +118,9 @@ final class Errors {
 					'detail' => __( 'Something went wrong on our side. Please try again.', 'reservant' ),
 				)
 			);
+		}
+		if ( 'lock_unavailable' === $reason ) {
+			do_action( 'reservant/error', $exception );
 		}
 		$status = match ( $reason ) {
 			'window_closed'           => 403,

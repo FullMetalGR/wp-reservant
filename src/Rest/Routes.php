@@ -253,7 +253,17 @@ final class Routes {
 		if ( $allowCapability && current_user_can( self::CAP_MANAGE ) ) {
 			return true;
 		}
-		$booking = ( new BookingRepository( $this->db ) )->findByUuid( (string) $request->get_param( 'uuid' ) );
+		// findByUuid() now refuses `lock_unavailable` on a DB-level failure rather than returning a
+		// misleading null (BookingRepository::findByUuid()'s docblock). Caught here for the same reason
+		// every handler that calls it directly does: a `WP_Error` is already this method's own return
+		// type, so the fix is answering with the clean 409 instead of letting a permission callback
+		// throw uncaught - which, before this guard, would have been worse than today's behaviour of
+		// silently granting `true` on a failed lookup.
+		try {
+			$booking = ( new BookingRepository( $this->db ) )->findByUuid( (string) $request->get_param( 'uuid' ) );
+		} catch ( \RuntimeException $exception ) {
+			return Errors::failure( $exception );
+		}
 		if ( null === $booking ) {
 			return $hideNotFound ? self::forbidden() : true;
 		}

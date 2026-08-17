@@ -7,9 +7,24 @@ final class AuditLog {
 
 	public function __construct( private readonly \wpdb $db ) {}
 
-	/** @param array<string, mixed> $payload */
+	/**
+	 * **Checked, on the write convention every guarded transaction in this codebase follows
+	 * (`false === $wpdb->insert()`'s return).** `record()` runs as the LAST statement inside every one
+	 * of `HoldBooking`, `CancelBooking`, `ExpireHolds`, `RejectBooking`, `ApproveBooking`,
+	 * `ConfirmBooking`, `MarkBookingOutcome` and `RescheduleBooking`'s transactions - immediately before
+	 * the post-write `findByUuid()`/`findById()` re-read that becomes the 200 response. On a 1213
+	 * deadlock the transaction is already dead server-side by the time this statement runs, and a
+	 * discarded `false` used to let execution walk on into that re-read: it sees the row as it stood
+	 * before the transaction ever started (the deadlock rolled back everything, including the real
+	 * status transition a few lines above), so the caller gets a 200 carrying a snapshot of a change
+	 * that never happened. Refusing here, like every other write on these paths, is what makes the
+	 * transaction's own ROLLBACK visible to the request instead of silently swallowed.
+	 *
+	 * @param array<string, mixed> $payload
+	 * @throws \RuntimeException `lock_unavailable` when the insert failed at the DB level.
+	 */
 	public function record( int $bookingId, string $actor, string $action, array $payload = array() ): void {
-		$this->db->insert(
+		$ok = $this->db->insert(
 			$this->db->prefix . 'reservant_audit_log',
 			array(
 				'booking_id'   => $bookingId,
@@ -19,6 +34,9 @@ final class AuditLog {
 				'created_at'   => gmdate( 'Y-m-d H:i:s' ),
 			)
 		);
+		if ( false === $ok ) {
+			throw new \RuntimeException( 'lock_unavailable' );
+		}
 	}
 
 	/**

@@ -10,6 +10,7 @@ use Reservant\Application\Dto\Customer;
 use Reservant\Application\Dto\EventRequest;
 use Reservant\Application\Dto\HoldRequest;
 use Reservant\Application\Dto\SegmentChoice;
+use Reservant\Application\ExpireHolds;
 use Reservant\Application\HoldBooking;
 use Reservant\Domain\Availability\AvailabilityRule;
 use Reservant\Infrastructure\Db\AvailabilityRepository;
@@ -18,6 +19,7 @@ use Reservant\Infrastructure\Db\LockKey;
 use Reservant\Infrastructure\Db\LockManager;
 use Reservant\Infrastructure\Db\OccurrenceRepository;
 use Reservant\Infrastructure\Db\ResourceRepository;
+use Reservant\Infrastructure\Db\SeatMapRepository;
 use Reservant\Infrastructure\Db\ServiceRepository;
 use Reservant\Infrastructure\Db\TransactionRunner;
 use Reservant\Tests\Integration\ReservantTestCase;
@@ -341,5 +343,157 @@ final class GuardedWritesTest extends ReservantTestCase {
 		$after = ( new BookingRepository( $wpdb ) )->findByUuid( (string) $booking['uuid'] );
 		self::assertSame( 'confirmed', $after['status'], 'a cancellation must never commit while the seat it frees is still claimed' );
 		self::assertSame( $seats[0], $this->seatClaimOf( (string) $booking['uuid'] ), 'the seat must stay coherently claimed by the booking that still holds it' );
+	}
+
+	// ------------------------------------------- IMPORTANT: the audit write
+
+	/**
+	 * A cancellation whose audit write failed must refuse, not commit silently.
+	 *
+	 * `AuditLog::record()` is the LAST statement inside every one of `HoldBooking`, `CancelBooking`,
+	 * `ExpireHolds`, `RejectBooking`, `ApproveBooking`, `ConfirmBooking`, `MarkBookingOutcome` and
+	 * `RescheduleBooking`'s transactions - immediately before the post-write re-read that becomes the
+	 * response. Its return used to be discarded: on a 1213 deadlock the transaction is already dead
+	 * server-side by the time this statement runs, and the following `findByUuid()` re-read sees the row
+	 * exactly as it stood before the transaction started - the caller gets a 200 carrying a cancellation
+	 * that never happened.
+	 */
+	public function test_a_cancel_whose_audit_write_failed_is_refused_rather_than_committed(): void {
+		global $wpdb;
+		$booking = $this->holdAppointment( '10:00' );
+		ConfirmBooking::make( $wpdb )->execute( (string) $booking['uuid'], $this->utc( 0, '00:05' ) );
+
+		$refusal = $this->refusalUnderSabotage(
+			'/^\s*INSERT\s+INTO\s+\S*reservant_audit_log\b/is',
+			'INSERT INTO reservant_no_such_table (id) VALUES (1)',
+			function () use ( $booking, $wpdb ): void {
+				CancelBooking::make( $wpdb )->execute( (string) $booking['uuid'], $this->utc( 0, '00:06' ), true );
+			}
+		);
+		self::assertSame( 'lock_unavailable', $refusal, 'an audit write that failed must abort the cancellation it was recording' );
+
+		$after = ( new BookingRepository( $wpdb ) )->findByUuid( (string) $booking['uuid'] );
+		self::assertSame(
+			'confirmed',
+			$after['status'],
+			'a cancellation must never commit while the audit row recording it failed to write - the 200 would carry a change that never happened'
+		);
+	}
+
+	// ------------------------------------------- the seat map's own insert
+
+	/**
+	 * A seat map creation whose own row insert failed must refuse before any seat is attached to it.
+	 *
+	 * `SeatMapRepository::insert()` used to discard `$wpdb->insert()`'s return and hand the caller
+	 * `(int) $this->db->insert_id` regardless - on a failure that id is either `0` (no prior insert on
+	 * this connection) or the id of whatever DIFFERENT row this connection last inserted, and
+	 * `SeatMapsAdminController::create()` fed it straight into `insertSeats()`: seat rows attached to the
+	 * wrong map, or to no map at all.
+	 */
+	public function test_a_seat_map_whose_own_insert_failed_is_refused_before_any_seat_is_attached(): void {
+		global $wpdb;
+		$refusal = $this->refusalUnderSabotage(
+			'/^\s*INSERT\s+INTO\s+\S*reservant_seat_maps\b/is',
+			'INSERT INTO reservant_no_such_table (id) VALUES (1)',
+			static function () use ( $wpdb ): void {
+				( new SeatMapRepository( $wpdb ) )->insert( 'Hall', 'rows A-B, 2 per row' );
+			}
+		);
+		self::assertSame( 'lock_unavailable', $refusal, 'a seat map row that failed to insert must refuse before any seat is attached to it' );
+
+		$count = (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$wpdb->prefix}reservant_seat_maps" ); // phpcs:ignore WordPress.DB.PreparedSQL
+		self::assertSame( 0, $count, 'no seat map row may exist when its own insert failed' );
+	}
+
+	// ------------------------------------------- Minor: findById()/findByUuid() uniformity
+
+	/**
+	 * `BookingRepository::findByUuid()` is the same `get_row()` statement shape as the guarded
+	 * `findByUuidForUpdate()` - unlocked, but no less unable to tell "no such booking" from "the query
+	 * failed" without `assertNoDbError()`. A masked failure here used to come back as an honest-looking
+	 * `null`, which every caller reads as "row genuinely absent".
+	 */
+	public function test_find_by_uuid_refuses_rather_than_masking_a_db_failure_as_absence(): void {
+		global $wpdb;
+		$booking = $this->holdAppointment( '10:00' );
+
+		// The plain read, never the locking `FOR UPDATE` one `findByUuidForUpdate()` already guards.
+		$refusal = $this->refusalUnderSabotage(
+			'/^\s*SELECT\s+\*\s+FROM\s+\S*reservant_bookings\s+WHERE\s+uuid\s*=(?!.*FOR UPDATE).*$/is',
+			'SELECT * FROM reservant_no_such_table WHERE 1 = 1',
+			function () use ( $booking, $wpdb ): void {
+				( new BookingRepository( $wpdb ) )->findByUuid( (string) $booking['uuid'] );
+			}
+		);
+		self::assertSame(
+			'lock_unavailable',
+			$refusal,
+			'a DB-level failure on this read must never be reported as "no such booking"'
+		);
+	}
+
+	/**
+	 * The follow-up `findById()` needed inside `ExpireHolds::run()`'s own batch loop: guarding
+	 * `findById()` means the pre-transaction batch read can now itself refuse `lock_unavailable`, and
+	 * that must be caught by the exact same "skip this row, not the whole sweep" rule a busy mutex
+	 * already gets - never let one bad row abort every other row in the batch.
+	 */
+	public function test_a_sweep_skips_a_row_whose_batch_read_failed_and_still_reaps_the_rest(): void {
+		global $wpdb;
+		// Both holds are created first, WHILE NEITHER IS LAPSED YET, deliberately: they share a
+		// resource-day mutex (same resource, same day - `HoldBooking`'s lock keys are per resource-day,
+		// not per time-of-day), and `HoldBooking::execute()` runs an inline reap of already-lapsed holds
+		// touching that same mutex before inserting a new one (this file's own CRITICAL 1 tests, above).
+		// Lapsing $lapsedA before creating $lapsedB would let THAT inline reap expire it right there,
+		// leaving only one candidate for the sweep below and defeating the point of this test.
+		$lapsedA = $this->holdAppointment( '09:00' );
+		$lapsedB = $this->holdAppointment( '13:00' );
+		$this->lapse( (string) $lapsedA['uuid'] );
+		$this->lapse( (string) $lapsedB['uuid'] );
+
+		// Sabotage only the FIRST plain `findById()`-shaped read against `reservant_bookings` - never
+		// the row-locking `FOR UPDATE` ones. `expiredHeldIds()`'s own batch-candidate SELECT has no
+		// `id = ` clause at all, and `findById()` is structurally the first such statement `run()` can
+		// reach in either row's iteration (it runs before that row's own `transition()` UPDATE, which
+		// is the only OTHER statement shaped like `id = <n>`), so this always lands on whichever
+		// booking the batch happens to visit first - deliberately not pinned to a specific uuid, since
+		// which of two rows sharing one `hold_expires_at` sorts first is not this test's concern.
+		$hits     = 0;
+		$sabotage = static function ( $query ) use ( &$hits ) {
+			$q = (string) $query;
+			if ( str_contains( $q, 'reservant_bookings' )
+				&& 1 === preg_match( '/\bid\s*=\s*\d+\b/', $q )
+				&& ! str_contains( $q, 'FOR UPDATE' )
+			) {
+				++$hits;
+				if ( 1 === $hits ) {
+					return 'SELECT * FROM reservant_no_such_table WHERE 1 = 1';
+				}
+			}
+			return $query;
+		};
+		$suppressed = $wpdb->suppress_errors( true );
+		add_filter( 'query', $sabotage );
+		try {
+			$processed = ExpireHolds::make( $wpdb )->run();
+		} finally {
+			remove_filter( 'query', $sabotage );
+			$wpdb->suppress_errors( $suppressed );
+		}
+
+		self::assertSame( 1, $processed, 'the one row whose batch read failed must be skipped, not counted' );
+
+		$bookings = new BookingRepository( $wpdb );
+		$statuses = array(
+			$bookings->findByUuid( (string) $lapsedA['uuid'] )['status'],
+			$bookings->findByUuid( (string) $lapsedB['uuid'] )['status'],
+		);
+		sort( $statuses );
+		self::assertSame(
+			array( 'expired', 'pending' ),
+			$statuses,
+			'the row whose batch read failed must stay untouched for the next sweep, and that failure must not abort the other row'
+		);
 	}
 }

@@ -90,8 +90,16 @@ final class SeatMapsAdminController {
 		}
 
 		$repo = new SeatMapRepository( $this->db );
-		$id   = $repo->insert( $name, $specText );
-		$repo->insertSeats( $id, $spec->seats() );
+		// Same catch shape update() uses (this class's docblock): insert()/insertSeats() can now both
+		// refuse `lock_unavailable` on a DB-level failure, and without this the refusal would escape
+		// this REST callback as an uncaught exception instead of the clean 409 every other guarded
+		// write on this path answers with.
+		try {
+			$id = $repo->insert( $name, $specText );
+			$repo->insertSeats( $id, $spec->seats() );
+		} catch ( \RuntimeException $exception ) {
+			return Errors::failure( $exception );
+		}
 
 		return new \WP_REST_Response( self::present( $repo, (array) $repo->find( $id ) ), 201 );
 	}

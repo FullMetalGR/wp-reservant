@@ -12,14 +12,25 @@ final class SeatMapRepository {
 
 	public function __construct( private readonly \wpdb $db ) {}
 
+	/**
+	 * **Checked**: an unchecked failure here left `$this->db->insert_id` holding whatever the PREVIOUS
+	 * successful insert on this connection set it to (or `0` if there had been none), and the caller
+	 * (`SeatMapsAdminController::create()`) fed that id straight into `insertSeats()` - seat rows
+	 * attached to the wrong map, or to no map at all.
+	 *
+	 * @throws \RuntimeException `lock_unavailable` when the insert failed at the DB level.
+	 */
 	public function insert( string $name, string $spec ): int {
-		$this->db->insert(
+		$ok = $this->db->insert(
 			"{$this->db->prefix}reservant_seat_maps",
 			array(
 				'name' => $name,
 				'spec' => $spec,
 			)
 		);
+		if ( false === $ok ) {
+			throw new \RuntimeException( 'lock_unavailable' );
+		}
 		return (int) $this->db->insert_id;
 	}
 

@@ -465,6 +465,40 @@ final class AdminCatalogTest extends ReservantTestCase {
 	}
 
 	/**
+	 * Lock-guard repair wave 3, item 2: `create()`'s only `try` used to wrap the spec parse alone, so
+	 * `SeatMapRepository::insertSeats()`'s guarded `lock_unavailable` throw (added to stop a failed
+	 * insert from feeding `insertSeats()` a stale or zero map id - see that repository's docblock)
+	 * escaped this REST callback as an uncaught exception - a fatal or an opaque 500 - for a failure
+	 * `update()` already answers with a clean 409. `create()` now wraps `insert()`/`insertSeats()` in
+	 * the same catch `update()` uses.
+	 */
+	public function test_seat_map_create_answers_409_not_a_fatal_when_the_seat_insert_fails(): void {
+		global $wpdb;
+		$this->asAdmin();
+
+		$sabotage = static function ( $query ) {
+			return 1 === preg_match( '/^\s*INSERT\s+INTO\s+\S*reservant_seats\b/is', (string) $query )
+				? 'INSERT INTO reservant_no_such_table (id) VALUES (1)'
+				: $query;
+		};
+		$suppressed = $wpdb->suppress_errors( true );
+		add_filter( 'query', $sabotage );
+		try {
+			$response = $this->jsonRequest(
+				'POST',
+				'/reservant/v1/admin/seat-maps',
+				array( 'name' => 'Main Hall', 'spec' => 'rows A-B, 2 per row' )
+			);
+		} finally {
+			remove_filter( 'query', $sabotage );
+			$wpdb->suppress_errors( $suppressed );
+		}
+
+		self::assertSame( 409, $response->get_status(), (string) wp_json_encode( $response->get_data() ) );
+		self::assertSame( 'lock_unavailable', $response->get_data()['message'] );
+	}
+
+	/**
 	 * Task 17 finding: `GET /admin/resources` (the list every catalog screen loads through -
 	 * `useResources()`) used to return bare `reservant_resources` columns, never the
 	 * `service_ids`/`rules` associations `GET /admin/resources/{id}` attaches via `present()`. The

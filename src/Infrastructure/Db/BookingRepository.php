@@ -111,13 +111,23 @@ final class BookingRepository {
 		}
 	}
 
-	/** @return array<string, mixed>|null booking row + 'items' list, ints cast */
+	/**
+	 * **Checked, the same `assertNoDbError()` the row-locking `findByUuidForUpdate()` uses** - this is
+	 * the identical statement shape, unlocked, and `get_row()` cannot tell "no such booking" and "the
+	 * query failed" apart any more here than it can there. Uniform for the reason stated on that
+	 * method's docblock: two reads this similar must not disagree about what a `null` means, or "which
+	 * reads on this path are actually guarded" becomes a question with no single answer.
+	 *
+	 * @return array<string, mixed>|null booking row + 'items' list, ints cast
+	 * @throws \RuntimeException `lock_unavailable` when the read failed at the DB level.
+	 */
 	public function findByUuid( string $uuid ): ?array {
 		$p   = $this->db->prefix;
 		$row = $this->db->get_row(
 			$this->db->prepare( "SELECT * FROM {$p}reservant_bookings WHERE uuid = %s", $uuid ), // phpcs:ignore WordPress.DB.PreparedSQL
 			ARRAY_A
 		);
+		$this->assertNoDbError();
 		return null === $row ? null : $this->hydrate( $row );
 	}
 
@@ -148,13 +158,19 @@ final class BookingRepository {
 		return null === $row ? null : $this->hydrate( $row );
 	}
 
-	/** @return array<string, mixed>|null booking row + 'items' list, ints cast */
+	/**
+	 * Same guard as `findByUuid()`, same reason.
+	 *
+	 * @return array<string, mixed>|null booking row + 'items' list, ints cast
+	 * @throws \RuntimeException `lock_unavailable` when the read failed at the DB level.
+	 */
 	public function findById( int $id ): ?array {
 		$p   = $this->db->prefix;
 		$row = $this->db->get_row(
 			$this->db->prepare( "SELECT * FROM {$p}reservant_bookings WHERE id = %d", $id ), // phpcs:ignore WordPress.DB.PreparedSQL
 			ARRAY_A
 		);
+		$this->assertNoDbError();
 		return null === $row ? null : $this->hydrate( $row );
 	}
 
@@ -163,6 +179,7 @@ final class BookingRepository {
 	 * carries its `service_name`/`resource_name` - a plain LEFT JOIN, not a second per-item query.
 	 *
 	 * @return array<string, mixed>|null
+	 * @throws \RuntimeException `lock_unavailable` - reads through the now-guarded `findByUuid()`.
 	 */
 	public function findDetailByUuid( string $uuid ): ?array {
 		$booking = $this->findByUuid( $uuid );
@@ -181,6 +198,7 @@ final class BookingRepository {
 	 *
 	 * @param array{from?: string, to?: string, status?: string, resource_id?: int, service_id?: int, search?: string} $filters
 	 * @return array{0: int, 1: list<array<string, mixed>>}
+	 * @throws \RuntimeException `lock_unavailable` - each row is read through the now-guarded `findById()`.
 	 */
 	public function search( array $filters, int $limit, int $offset ): array {
 		$p = $this->db->prefix;

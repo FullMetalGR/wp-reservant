@@ -298,6 +298,44 @@ final class RestApiTest extends ReservantTestCase {
 		self::assertSame( 'window_closed', $known->get_error_message() );
 	}
 
+	/**
+	 * Lock-guard repair wave 3, item 4: `lock_unavailable` means the database refused a write or a
+	 * locking read the code expected to work - an operational event a site operator needs to see, not a
+	 * customer mistake. Before this, only the unknown-reason (500) branch below fired `reservant/error`,
+	 * so the seat-map write path traded a logged 500 (`update_conflict`) for a silent 409 the moment it
+	 * was given this reason instead.
+	 */
+	public function test_lock_unavailable_fires_the_error_action_and_still_answers_409(): void {
+		$fired          = array();
+		$lockListener   = static function ( \Throwable $e ) use ( &$fired ): void {
+			$fired[] = $e;
+		};
+		add_action( 'reservant/error', $lockListener );
+		try {
+			$error = Errors::failure( new \RuntimeException( 'lock_unavailable' ) );
+		} finally {
+			remove_action( 'reservant/error', $lockListener );
+		}
+
+		self::assertCount( 1, $fired, 'a lock_unavailable refusal is an infrastructure event and must be logged' );
+		self::assertSame( 'lock_unavailable', $fired[0]->getMessage() );
+		self::assertSame( 409, $error->get_error_data()['status'], 'the retry signal must survive being logged' );
+		self::assertSame( 'lock_unavailable', $error->get_error_message() );
+
+		// No other known reason gets this treatment - logging every ordinary refusal would just be noise.
+		$benign           = array();
+		$benignListener   = static function ( \Throwable $e ) use ( &$benign ): void {
+			$benign[] = $e;
+		};
+		add_action( 'reservant/error', $benignListener );
+		try {
+			Errors::failure( new \RuntimeException( 'window_closed' ) );
+		} finally {
+			remove_action( 'reservant/error', $benignListener );
+		}
+		self::assertCount( 0, $benign, 'an ordinary known refusal must not be logged as an infrastructure event' );
+	}
+
 	public function test_bad_token_is_403_and_missing_uuid_404(): void {
 		$created = $this->hold( $this->sql( 1, '11:00' ) );
 
@@ -409,6 +447,42 @@ final class RestApiTest extends ReservantTestCase {
 		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
 		self::assertTrue( current_user_can( 'reservant_manage_bookings' ) );
 		self::assertSame( 200, $this->request( 'GET', "/reservant/v1/bookings/{$created['uuid']}" )->get_status() );
+	}
+
+	/**
+	 * Lock-guard repair wave 3, item 6: `BookingRepository::findByUuid()` is now guarded for uniformity
+	 * with the rest of the class - a DB-level failure refuses `lock_unavailable` instead of returning a
+	 * misleading null. `show()`'s only statement was that null check, so without its own catch a busy
+	 * read here would have escaped this REST callback as an uncaught exception instead of the clean 409
+	 * every other guarded read on this codebase answers with.
+	 *
+	 * A manager (capability, no token) is used deliberately so the permission callback (`Routes::guard()`)
+	 * takes its short-circuit branch and never itself calls `findByUuid()` - isolating the assertion to
+	 * `show()`'s own guard, not `guard()`'s twin fix.
+	 */
+	public function test_show_answers_409_not_a_fatal_when_the_lookup_fails_at_the_db_level(): void {
+		global $wpdb;
+		$created = $this->hold( $this->sql( 1, '11:00' ) );
+		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
+
+		// The plain `findByUuid()` read, never the locking `FOR UPDATE` one - this request takes no lock.
+		$sabotage = static function ( $query ) {
+			$q = (string) $query;
+			return ( str_contains( $q, 'reservant_bookings' ) && str_contains( $q, 'uuid' ) && ! str_contains( $q, 'FOR UPDATE' ) )
+				? 'SELECT * FROM reservant_no_such_table WHERE 1 = 1'
+				: $query;
+		};
+		$suppressed = $wpdb->suppress_errors( true );
+		add_filter( 'query', $sabotage );
+		try {
+			$response = $this->request( 'GET', "/reservant/v1/bookings/{$created['uuid']}" );
+		} finally {
+			remove_filter( 'query', $sabotage );
+			$wpdb->suppress_errors( $suppressed );
+		}
+
+		self::assertSame( 409, $response->get_status(), (string) wp_json_encode( $response->get_data() ) );
+		self::assertSame( 'lock_unavailable', $response->get_data()['message'] );
 	}
 
 	// ---------------------------------------------------------------- seats

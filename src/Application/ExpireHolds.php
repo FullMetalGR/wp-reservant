@@ -46,9 +46,24 @@ final class ExpireHolds {
 	 * free by time comparison in every query - so aborting and skipping are equally safe, and
 	 * skipping does strictly more work.
 	 *
-	 * The catch is narrowed to `lock_unavailable` on purpose. Anything else - a failed write, an
-	 * unclassified refusal, a listener that threw - is a genuine bug, and a sweeper nobody watches is
-	 * the worst possible place to swallow one.
+	 * The catch is narrowed to `lock_unavailable` on purpose. Anything else - an unclassified refusal, a
+	 * listener that threw - is a genuine bug, and a sweeper nobody watches is the worst possible place
+	 * to swallow one.
+	 *
+	 * **What is actually swallowed here is wider than "the mutex was busy".** `lock_unavailable` is not
+	 * only `LockManager::acquire()` losing a race for a row somebody else holds - it is also the message
+	 * every guarded write and locking read on this transaction's path answers a genuine DB-level failure
+	 * with: `releaseSeatClaims()`, `bumpRev()` and `ensure()` all refuse this way too, and this catch
+	 * cannot tell "somebody else has the mutex" apart from "the database just failed a write it should
+	 * have been able to make". That is the one real cost of narrowing the catch to a single string
+	 * rather than a richer signal: a genuine DB fault on this path becomes completely invisible - no
+	 * exception here, and (because `Rest\Errors::failure()` is never reached; nothing in this call chain
+	 * is a REST response) no `reservant/error` action either, even after this repair adds one for every
+	 * other `lock_unavailable` refusal in the codebase. The consequence stays bounded regardless:
+	 * `TransactionRunner` has already rolled back whatever the failed statement was mid-transaction, so
+	 * nothing corrupts - the row simply stays held-and-lapsed, exactly as it was before this iteration,
+	 * and the next sweep (or a fresh hold's own inline reap) tries it again. AGENTS.md section 2.1 is
+	 * why that is an acceptable place to land: correctness never depends on the sweeper having run.
 	 *
 	 * `expireByUuid()` is deliberately NOT given this catch: it targets exactly one booking, so there
 	 * is no rest-of-the-batch to protect and a swallowed failure would simply be a lost one. Note what
@@ -64,11 +79,16 @@ final class ExpireHolds {
 	public function run( int $batch = 50 ): int {
 		$processed = 0;
 		foreach ( $this->bookings->expiredHeldIds( $batch ) as $id ) {
-			$booking = $this->bookings->findById( $id );
-			if ( null === $booking ) {
-				continue;
-			}
+			// The batch read (`findById()`) is inside the same try as the reap it feeds: guarding
+			// `findById()` for uniformity (this repair's item 6) means a DB failure on THIS read now
+			// refuses `lock_unavailable` too, exactly like a busy mutex, rather than silently returning
+			// null. It must be caught by the very same "skip, not fatal" rule or one bad read would
+			// abort the whole batch instead of just the one row it belongs to.
 			try {
+				$booking = $this->bookings->findById( $id );
+				if ( null === $booking ) {
+					continue;
+				}
 				if ( null !== $this->expireByUuid( (string) $booking['uuid'] ) ) {
 					++$processed;
 				}
@@ -76,7 +96,8 @@ final class ExpireHolds {
 				if ( 'lock_unavailable' !== $e->getMessage() ) {
 					throw $e;
 				}
-				// Somebody else holds this slot's mutex right now. Leave the row exactly as it is and
+				// Somebody else holds this slot's mutex right now - or this row's own read just failed
+				// at the DB level. Either way, leave the row exactly as it is and
 				// let the next sweep have it - the hold is already non-blocking by time comparison.
 			}
 		}

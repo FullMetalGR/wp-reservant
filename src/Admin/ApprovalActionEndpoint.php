@@ -86,7 +86,19 @@ final class ApprovalActionEndpoint {
 		}
 
 		$bookings = new BookingRepository( $wpdb );
-		$booking  = $bookings->findByUuid( $uuid );
+		// findByUuid() now refuses `lock_unavailable` on a DB-level failure rather than returning a
+		// misleading null (BookingRepository's docblock). Handled exactly like every infrastructure
+		// failure from `ApproveBooking`/`RejectBooking` below is: logged on the same channel, rendered
+		// as the retryable failure page - never `badSignature()`'s 403, and never the benign "already
+		// handled" page, both of which would tell the owner something false about a link that was never
+		// actually evaluated.
+		try {
+			$booking = $bookings->findByUuid( $uuid );
+		} catch ( \RuntimeException $e ) {
+			do_action( 'reservant/error', $e, $uuid );
+			$this->renderFailure();
+			return;
+		}
 		if ( null === $booking ) {
 			$this->badSignature();
 		}

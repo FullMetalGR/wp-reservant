@@ -392,16 +392,19 @@ final class ApprovalActionEndpointTest extends ReservantTestCase {
 		};
 		add_action( 'reservant/error', $listener );
 
-		// try/finally, matching every other sabotage test in this codebase: a `\WPDieException` or an
+		// try/finally, matching this file's own idiom at testTamperedSignatureDies403()
+		// (`ob_start()` BEFORE the try, `ob_get_clean()` in the finally): a `\WPDieException` or an
 		// `Error` escaping `handle()` would otherwise leak a query-rewriting filter and an open output
-		// buffer into every test that runs after this one.
+		// buffer into every test that runs after this one. Putting `ob_get_clean()` inside the try, as
+		// this test used to, does not protect against that - the very exception the comment warns about
+		// would skip straight past it, leaving the buffer open.
 		$suppressed = $wpdb->suppress_errors( true );
 		add_filter( 'query', $sabotage );
+		ob_start();
 		try {
-			ob_start();
 			( new ApprovalActionEndpoint() )->handle();
-			$output = (string) ob_get_clean();
 		} finally {
+			$output = (string) ob_get_clean();
 			remove_filter( 'query', $sabotage );
 			$wpdb->suppress_errors( $suppressed );
 			remove_action( 'reservant/error', $listener );
@@ -467,13 +470,16 @@ final class ApprovalActionEndpointTest extends ReservantTestCase {
 		};
 		add_action( 'reservant/error', $listener );
 
+		// Same idiom as the sabotage test above (`ob_start()` before the try, `ob_get_clean()` in the
+		// finally) - not the "both inside the try" form, which a `\WPDieException` or an `Error` would
+		// skip past, leaking the buffer.
 		$suppressed = $wpdb->suppress_errors( true );
 		add_filter( 'query', $sabotage );
+		ob_start();
 		try {
-			ob_start();
 			( new ApprovalActionEndpoint() )->handle();
-			$output = (string) ob_get_clean();
 		} finally {
+			$output = (string) ob_get_clean();
 			remove_filter( 'query', $sabotage );
 			$wpdb->suppress_errors( $suppressed );
 			remove_action( 'reservant/error', $listener );

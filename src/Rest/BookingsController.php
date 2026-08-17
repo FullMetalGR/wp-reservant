@@ -24,7 +24,15 @@ final class BookingsController {
 
 	/** GET /bookings/{uuid} */
 	public function show( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
-		$booking = ( new BookingRepository( $this->db ) )->findByUuid( (string) $request->get_param( 'uuid' ) );
+		// findByUuid() now refuses `lock_unavailable` on a DB-level failure rather than returning a
+		// misleading null (BookingRepository::findByUuid()'s docblock) - caught here so that refusal
+		// reaches the caller as the same clean 409 every other guarded read on this codebase answers
+		// with, not as an exception escaping this REST callback uncaught.
+		try {
+			$booking = ( new BookingRepository( $this->db ) )->findByUuid( (string) $request->get_param( 'uuid' ) );
+		} catch ( \RuntimeException $exception ) {
+			return Errors::failure( $exception );
+		}
 		if ( null === $booking ) {
 			return Errors::notFound();
 		}

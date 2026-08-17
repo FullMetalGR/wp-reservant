@@ -93,8 +93,15 @@ final class HoldsController {
 	 * re-checks them inside the transaction; this is only the cheap path to the same answer.
 	 */
 	public function release( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
-		$uuid    = (string) $request->get_param( 'uuid' );
-		$booking = ( new BookingRepository( $this->db ) )->findByUuid( $uuid );
+		$uuid = (string) $request->get_param( 'uuid' );
+		// findByUuid() now refuses `lock_unavailable` on a DB-level failure (BookingRepository's
+		// docblock) - caught so it reaches the caller as the clean 409 the write below would already
+		// answer with, not as an exception escaping this pre-check uncaught.
+		try {
+			$booking = ( new BookingRepository( $this->db ) )->findByUuid( $uuid );
+		} catch ( \RuntimeException $exception ) {
+			return Errors::failure( $exception );
+		}
 		if ( null === $booking ) {
 			return Errors::notFound();
 		}

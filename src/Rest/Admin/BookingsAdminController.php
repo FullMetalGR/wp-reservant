@@ -45,7 +45,7 @@ final class BookingsAdminController {
 	public function __construct( private readonly \wpdb $db ) {}
 
 	/** GET /admin/bookings */
-	public function index( \WP_REST_Request $request ): \WP_REST_Response {
+	public function index( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
 		$page    = max( 1, (int) $request->get_param( 'page' ) );
 		$perPage = min( self::MAX_PER_PAGE, max( 1, (int) $request->get_param( 'per_page' ) ) );
 
@@ -75,7 +75,14 @@ final class BookingsAdminController {
 			$filters['search'] = $search;
 		}
 
-		list( $total, $rows ) = ( new BookingRepository( $this->db ) )->search( $filters, $perPage, ( $page - 1 ) * $perPage );
+		// search() reads each row through the now-guarded findById() (BookingRepository's docblock) -
+		// caught so a DB-level failure on any one row answers the same clean 409 the detail/lifecycle
+		// routes on this controller already do, instead of escaping this callback uncaught.
+		try {
+			list( $total, $rows ) = ( new BookingRepository( $this->db ) )->search( $filters, $perPage, ( $page - 1 ) * $perPage );
+		} catch ( \RuntimeException $exception ) {
+			return Errors::failure( $exception );
+		}
 
 		return new \WP_REST_Response(
 			array(
@@ -93,7 +100,12 @@ final class BookingsAdminController {
 	 * here - kept for defense in depth, not because a staff-only caller can reach this handler.
 	 */
 	public function show( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
-		$booking = ( new BookingRepository( $this->db ) )->findDetailByUuid( (string) $request->get_param( 'uuid' ) );
+		// findDetailByUuid() reads through the now-guarded findByUuid() - see that method's docblock.
+		try {
+			$booking = ( new BookingRepository( $this->db ) )->findDetailByUuid( (string) $request->get_param( 'uuid' ) );
+		} catch ( \RuntimeException $exception ) {
+			return Errors::failure( $exception );
+		}
 		if ( null === $booking ) {
 			return Errors::notFound();
 		}
@@ -149,8 +161,13 @@ final class BookingsAdminController {
 	 * `reservant_manage_bookings`).
 	 */
 	public function approve( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
-		$uuid    = (string) $request->get_param( 'uuid' );
-		$booking = ( new BookingRepository( $this->db ) )->findByUuid( $uuid );
+		$uuid = (string) $request->get_param( 'uuid' );
+		// findByUuid() now refuses `lock_unavailable` on a DB-level failure - see its docblock.
+		try {
+			$booking = ( new BookingRepository( $this->db ) )->findByUuid( $uuid );
+		} catch ( \RuntimeException $exception ) {
+			return Errors::failure( $exception );
+		}
 		if ( null === $booking ) {
 			return Errors::notFound();
 		}
@@ -173,8 +190,13 @@ final class BookingsAdminController {
 	 * the same contact-stripping for a staff-only caller, as approve.
 	 */
 	public function reject( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
-		$uuid    = (string) $request->get_param( 'uuid' );
-		$booking = ( new BookingRepository( $this->db ) )->findByUuid( $uuid );
+		$uuid = (string) $request->get_param( 'uuid' );
+		// findByUuid() now refuses `lock_unavailable` on a DB-level failure - see its docblock.
+		try {
+			$booking = ( new BookingRepository( $this->db ) )->findByUuid( $uuid );
+		} catch ( \RuntimeException $exception ) {
+			return Errors::failure( $exception );
+		}
 		if ( null === $booking ) {
 			return Errors::notFound();
 		}
@@ -205,7 +227,13 @@ final class BookingsAdminController {
 	 */
 	public function cancel( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
 		$uuid = (string) $request->get_param( 'uuid' );
-		if ( null === ( new BookingRepository( $this->db ) )->findByUuid( $uuid ) ) {
+		// findByUuid() now refuses `lock_unavailable` on a DB-level failure - see its docblock.
+		try {
+			$exists = null !== ( new BookingRepository( $this->db ) )->findByUuid( $uuid );
+		} catch ( \RuntimeException $exception ) {
+			return Errors::failure( $exception );
+		}
+		if ( ! $exists ) {
 			return Errors::notFound();
 		}
 		try {
@@ -234,7 +262,13 @@ final class BookingsAdminController {
 
 	private function outcome( \WP_REST_Request $request, string $outcome ): \WP_REST_Response|\WP_Error {
 		$uuid = (string) $request->get_param( 'uuid' );
-		if ( null === ( new BookingRepository( $this->db ) )->findByUuid( $uuid ) ) {
+		// findByUuid() now refuses `lock_unavailable` on a DB-level failure - see its docblock.
+		try {
+			$exists = null !== ( new BookingRepository( $this->db ) )->findByUuid( $uuid );
+		} catch ( \RuntimeException $exception ) {
+			return Errors::failure( $exception );
+		}
+		if ( ! $exists ) {
 			return Errors::notFound();
 		}
 		$actor = (string) wp_get_current_user()->user_login;
