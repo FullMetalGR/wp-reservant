@@ -16,6 +16,26 @@ final class BookingRepository {
 	public function __construct( private readonly \wpdb $db ) {}
 
 	/**
+	 * Refuse when the statement that just ran failed at the DB level.
+	 *
+	 * The read counterpart of the `false === $ok` check the writes in this class use. `get_col()`,
+	 * `get_row()` and `get_var()` answer an empty array / `null` for BOTH "nothing matched" and "the
+	 * query failed", so on those the return value cannot carry the distinction and `last_error` is the
+	 * only thing that can. wpdb clears it at the start of every statement, so this always reads the
+	 * outcome of the immediately preceding query and never a stale one.
+	 *
+	 * `lock_unavailable` for the reason `LockManager::acquire()` uses it: a 409 the caller should
+	 * retry, never the opaque 500 a decorated message would land on - see that docblock.
+	 *
+	 * @throws \RuntimeException `lock_unavailable`
+	 */
+	private function assertNoDbError(): void {
+		if ( '' !== (string) $this->db->last_error ) {
+			throw new \RuntimeException( 'lock_unavailable' );
+		}
+	}
+
+	/**
 	 * Insert container + items. Call inside a transaction only.
 	 * @param array<string, mixed>       $booking
 	 * @param list<array<string, mixed>> $items
@@ -106,7 +126,17 @@ final class BookingRepository {
 	 * about to guard a status/expiry check and then transition on it. Call inside a transaction
 	 * only - the lock is released at COMMIT/ROLLBACK.
 	 *
+	 * **This is the SECOND half of the codebase's lock order** (`LockManager::acquire()` first, the
+	 * bookings row after - AGENTS.md section 2.2), so it is checked exactly as the first half is. It
+	 * reads through `get_row()`, which answers `null` for a row that is genuinely gone AND for a query
+	 * that failed; every caller maps `null` to `stale_state`, which is a BENIGN refusal - so an
+	 * unchecked 1205 here made `Admin\ApprovalActionEndpoint` tell an owner "this link is no longer
+	 * valid, the booking may already have been handled" about a booking nothing had touched. That
+	 * fails closed, so it was a wrong-reason bug rather than a lost mutex, which is exactly why it
+	 * needed fixing: two statements of one lock sequence must not disagree about what failure means.
+	 *
 	 * @return array<string, mixed>|null booking row + 'items' list, ints cast
+	 * @throws \RuntimeException `lock_unavailable` when the locking read failed at the DB level.
 	 */
 	public function findByUuidForUpdate( string $uuid ): ?array {
 		$p   = $this->db->prefix;
@@ -114,6 +144,7 @@ final class BookingRepository {
 			$this->db->prepare( "SELECT * FROM {$p}reservant_bookings WHERE uuid = %s FOR UPDATE", $uuid ), // phpcs:ignore WordPress.DB.PreparedSQL
 			ARRAY_A
 		);
+		$this->assertNoDbError();
 		return null === $row ? null : $this->hydrate( $row );
 	}
 
@@ -354,8 +385,22 @@ final class BookingRepository {
 	 * X-locked from the re-read to COMMIT, the ids returned here are exactly the ids the guarded
 	 * UPDATE flips.
 	 *
+	 * **Every statement below is checked, on the same rule the rest of this class follows.** wpdb
+	 * reports a DB-level failure - a 1205 lock-wait timeout (only the STATEMENT rolls back) or a 1213
+	 * deadlock (the server rolled the whole transaction back) - by return value alone, and `get_col()`
+	 * reports it as an EMPTY ARRAY, which is indistinguishable from "nothing to reap" unless
+	 * `last_error` is consulted. Unchecked, a failed reap simply did nothing while the caller carried
+	 * on to insert and COMMIT: the lapsed rows keep their `seat_claim`, so the `(occurrence_id,
+	 * seat_claim)` backstop refuses the next customer a seat that is genuinely free, reported as
+	 * `seat_taken` with nothing recording why. Worse, the ids returned here drive
+	 * `HoldBooking::reap()`, which writes `expired` audit rows and fires `reservant/hold/expired` -
+	 * so a silently failed UPDATE announces expiries that never happened.
+	 *
+	 * Zero rows remains an honest answer everywhere here; only a genuine failure is refused.
+	 *
 	 * @param list<LockKey> $keys
 	 * @return list<int> ids moved to expired
+	 * @throws \RuntimeException `lock_unavailable` when any statement failed at the DB level.
 	 */
 	public function reapExpiredTouching( array $keys ): array {
 		$p       = $this->db->prefix;
@@ -391,6 +436,10 @@ final class BookingRepository {
 				...$args
 			)
 		);
+		// `get_col()` answers an empty array both for "no candidates" and for a failed query, so the
+		// error flag is the only thing that tells them apart. wpdb clears it at the start of every
+		// statement, so this reads THIS query's outcome and nothing older.
+		$this->assertNoDbError();
 		if ( array() === $candidates ) {
 			return array();
 		}
@@ -408,6 +457,9 @@ final class BookingRepository {
 			 ORDER BY id ASC
 			 FOR UPDATE" // phpcs:ignore WordPress.DB.PreparedSQL
 		);
+		// The authoritative locking read. An empty array here decides that nothing is reaped, so a
+		// failure that looked like emptiness would silently disarm the whole reap.
+		$this->assertNoDbError();
 		if ( array() === $locked ) {
 			return array();
 		}
@@ -417,16 +469,22 @@ final class BookingRepository {
 		// The guard is repeated a third time so the write is safe even read in isolation: an UPDATE
 		// keyed on `id IN (...)` alone is a foot-gun the moment anyone moves it out from under the
 		// lock.
-		$this->db->query(
+		$expired = $this->db->query(
 			"UPDATE {$p}reservant_bookings
 			 SET status = 'expired', updated_at = UTC_TIMESTAMP()
 			 WHERE id IN ({$in})
 			   AND status IN ('pending','awaiting_approval','awaiting_payment')
 			   AND hold_expires_at <= UTC_TIMESTAMP()" // phpcs:ignore WordPress.DB.PreparedSQL
 		);
+		if ( false === $expired ) {
+			throw new \RuntimeException( 'lock_unavailable' );
+		}
 		// Scoped to the rows that were actually expired - never to the candidate list. Releasing a
 		// seat claim is releasing the seat.
-		$this->db->query( "UPDATE {$p}reservant_booking_items SET seat_claim = NULL WHERE booking_id IN ({$in})" ); // phpcs:ignore WordPress.DB.PreparedSQL
+		$released = $this->db->query( "UPDATE {$p}reservant_booking_items SET seat_claim = NULL WHERE booking_id IN ({$in})" ); // phpcs:ignore WordPress.DB.PreparedSQL
+		if ( false === $released ) {
+			throw new \RuntimeException( 'lock_unavailable' );
+		}
 		return $reaped;
 	}
 
@@ -453,8 +511,24 @@ final class BookingRepository {
 		return 1 === $updated;
 	}
 
+	/**
+	 * Free every seat this booking holds - the release half of a cancellation or an expiry.
+	 *
+	 * **Checked, because this is the live sibling of the `bumpRev()` that sits one line below it in
+	 * `CancelBooking` and `ExpireHolds`.** On a 1205 only this statement rolls back: the status
+	 * transition, the revision bump and the audit row all succeed and the transaction COMMITS a
+	 * cancelled booking whose `seat_claim` is still set. `BLOCKING_SQL` then reports that seat free
+	 * while the `(occurrence_id, seat_claim)` unique index refuses every attempt to rebook it - a seat
+	 * nobody can ever sell again, committed silently, with nothing anywhere recording that it
+	 * happened. Zero rows is honest (a booking with no seats releases none); only `false` is not.
+	 *
+	 * @throws \RuntimeException `lock_unavailable` when the release failed at the DB level.
+	 */
 	public function releaseSeatClaims( int $bookingId ): void {
-		$this->db->update( $this->db->prefix . 'reservant_booking_items', array( 'seat_claim' => null ), array( 'booking_id' => $bookingId ) );
+		$ok = $this->db->update( $this->db->prefix . 'reservant_booking_items', array( 'seat_claim' => null ), array( 'booking_id' => $bookingId ) );
+		if ( false === $ok ) {
+			throw new \RuntimeException( 'lock_unavailable' );
+		}
 	}
 
 	/** @return list<int> */

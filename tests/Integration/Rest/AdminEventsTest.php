@@ -471,6 +471,107 @@ final class AdminEventsTest extends ReservantTestCase {
 		self::assertSame( 404, $this->request( 'DELETE', '/reservant/v1/admin/seat-maps/999999' )->get_status() );
 	}
 
+	// ---------------------------------------------------------------- failed writes under the mutex
+
+	/**
+	 * Run `$body` with one statement rewritten to a table that does not exist.
+	 *
+	 * The same `false`/`null` shape a MariaDB 1205 lock-wait timeout produces, and the same sabotage
+	 * idiom the rest of the suite uses. No assertions inside - the caller owns those.
+	 *
+	 * @param callable(): \WP_REST_Response $body
+	 */
+	private function underSabotage( string $pattern, string $replacement, callable $body ): \WP_REST_Response {
+		global $wpdb;
+		$sabotage = static function ( $query ) use ( $pattern, $replacement ) {
+			return 1 === preg_match( $pattern, (string) $query ) ? $replacement : $query;
+		};
+
+		$suppressed = $wpdb->suppress_errors( true );
+		add_filter( 'query', $sabotage );
+		try {
+			return $body();
+		} finally {
+			remove_filter( 'query', $sabotage );
+			$wpdb->suppress_errors( $suppressed );
+		}
+	}
+
+	/**
+	 * An occurrence edit that failed to write must not answer 200 as though it applied.
+	 *
+	 * `OccurrenceRepository::update()` discarded `$wpdb->update()`'s return inside the occurrence-mutex
+	 * transaction. The controller then re-reads the row and presents it, so a silently failed UPDATE
+	 * produced the UNCHANGED row and a 200 - the owner is told the capacity change took effect while
+	 * the database still holds the old value.
+	 */
+	public function test_an_occurrence_edit_that_could_not_be_written_is_refused_not_reported_as_applied(): void {
+		global $wpdb;
+		$this->asAdmin();
+		$service    = $this->createEventService( 'Seminar', 5 );
+		$occurrence = $this->createOccurrence( (int) $service['id'], 5 );
+
+		$response = $this->underSabotage(
+			'/^\s*UPDATE\s+\S*reservant_occurrences\S*\s+SET/is',
+			'UPDATE reservant_no_such_table SET capacity = 1 WHERE 1 = 1',
+			fn (): \WP_REST_Response => $this->jsonRequest( 'PUT', "/reservant/v1/admin/occurrences/{$occurrence['id']}", array( 'capacity' => 10 ) )
+		);
+
+		self::assertSame( 409, $response->get_status(), 'a write that failed must never be presented as a successful edit' );
+		self::assertSame( 'lock_unavailable', $response->get_data()['message'] );
+
+		$survives = ( new \Reservant\Infrastructure\Db\OccurrenceRepository( $wpdb ) )->find( (int) $occurrence['id'] );
+		self::assertSame( 5, $survives['capacity'], 'the row must be exactly as it was' );
+	}
+
+	/**
+	 * The seat map's own locking existence recheck must answer 409, not an opaque 500.
+	 *
+	 * `SeatMapRepository::lockForUpdate()` reads through `get_var()`, so a DB failure and "the row is
+	 * gone" both arrive as `null`. The controller reads that as gone and throws `update_conflict`,
+	 * which is NOT in `Errors::KNOWN_REASONS` and therefore lands on the opaque 500 arm - a retryable
+	 * contention failure reported as an internal error.
+	 */
+	public function test_a_seat_map_lock_failure_answers_409_rather_than_an_opaque_500(): void {
+		$this->asAdmin();
+		$map = $this->createSeatMap();
+
+		$response = $this->underSabotage(
+			'/^\s*SELECT\s+id\s+FROM\s+\S*reservant_seat_maps\b.*FOR UPDATE/is',
+			'SELECT id FROM reservant_no_such_table WHERE 1 = 1',
+			fn (): \WP_REST_Response => $this->jsonRequest( 'PUT', "/reservant/v1/admin/seat-maps/{$map['id']}", array( 'name' => 'Renamed', 'spec' => self::GRID_SPEC ) )
+		);
+
+		self::assertSame( 409, $response->get_status() );
+		self::assertSame( 'lock_unavailable', $response->get_data()['message'] );
+
+		$after = $this->request( 'GET', "/reservant/v1/admin/seat-maps/{$map['id']}" );
+		self::assertSame( 'Grid hall', $after->get_data()['name'], 'the map must be untouched' );
+	}
+
+	/**
+	 * A seat rewrite is a delete followed by an insert, in one transaction. If the delete fails
+	 * silently the insert lands ON TOP of the rows that should have gone, and the map commits holding
+	 * every seat twice.
+	 */
+	public function test_a_seat_rewrite_whose_delete_failed_does_not_commit_a_doubled_grid(): void {
+		$this->asAdmin();
+		$map      = $this->createSeatMap();
+		$expected = count( $map['seats'] );
+
+		$response = $this->underSabotage(
+			'/^\s*DELETE\s+FROM\s+\S*reservant_seats\b/is',
+			'DELETE FROM reservant_no_such_table WHERE 1 = 1',
+			fn (): \WP_REST_Response => $this->jsonRequest( 'PUT', "/reservant/v1/admin/seat-maps/{$map['id']}", array( 'name' => 'Grid hall', 'spec' => self::GRID_SPEC ) )
+		);
+
+		self::assertSame( 409, $response->get_status() );
+		self::assertSame( 'lock_unavailable', $response->get_data()['message'] );
+
+		$after = $this->request( 'GET', "/reservant/v1/admin/seat-maps/{$map['id']}" );
+		self::assertCount( $expected, $after->get_data()['seats'], 'a half-applied seat rewrite must never commit' );
+	}
+
 	// ---------------------------------------------------------------- helpers
 
 	/**

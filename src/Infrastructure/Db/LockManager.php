@@ -41,13 +41,28 @@ final class LockManager {
 	 * to the opaque 500 arm, and destroy the 409 retry signal that is the entire point of naming this
 	 * reason. The DB text is not lost: that same 500 arm fires `reservant/error` with the exception.
 	 *
-	 * Locking ZERO rows is not a failure and is deliberately not guarded here:
-	 * `0` is an honest answer for a key whose entity is gone, and the guards that read after this
-	 * refuse it as `not_found` on their own. Only `false` is a failure - `deleteItems()`'s convention,
-	 * not a second one.
+	 * **Zero rows is refused for a resource-day key and permitted for an occurrence key.** That is not
+	 * an inconsistency, it is the difference between the two tables:
+	 *
+	 *  - A resource-day row is a PURE MUTEX. `ResourceDayRepository::ensure()` creates it outside and
+	 *    before the transaction, nothing in this codebase ever deletes one (the only statements
+	 *    touching that table are that INSERT IGNORE, `bumpRev()`'s UPDATE and this lock), and nothing
+	 *    ever READS one - so there is no later guard that would notice its absence and answer
+	 *    `not_found`. Locking zero of them is holding no mutex at all while believing otherwise, which
+	 *    is the precise failure this class exists to prevent. It cannot be a legitimately concurrent
+	 *    `ensure()` that has not landed yet: this is a LOCKING read, so it sees the latest committed
+	 *    row rather than the transaction's snapshot, and a rival INSERT still in flight blocks it
+	 *    until that transaction ends rather than hiding the row from it. Zero rows can therefore only
+	 *    mean this request's own `ensure()` never took effect.
+	 *  - An occurrence row is a real entity that the caller goes on to read. Zero rows means it is
+	 *    genuinely gone, and the guards immediately after this answer `not_found` for it, which is
+	 *    both truthful and more specific than anything this method could say.
+	 *
+	 * Only `false` is a DB failure - `deleteItems()`'s convention, not a second one.
 	 *
 	 * @param list<LockKey> $keys
-	 * @throws \RuntimeException `lock_unavailable` when a lock statement failed at the DB level.
+	 * @throws \RuntimeException `lock_unavailable` when a lock statement failed at the DB level, or
+	 *                           when a resource-day mutex row turned out not to exist.
 	 */
 	public function acquire( array $keys ): void {
 		$p = $this->db->prefix;
@@ -60,6 +75,10 @@ final class LockManager {
 						$key->day
 					)
 				);
+				if ( 0 === $ok ) {
+					// A mutex row that is not there is a mutex nobody is holding - see the docblock.
+					throw new \RuntimeException( 'lock_unavailable' );
+				}
 			} else {
 				$ok = $this->db->query(
 					$this->db->prepare(

@@ -392,16 +392,21 @@ final class ApprovalActionEndpointTest extends ReservantTestCase {
 		};
 		add_action( 'reservant/error', $listener );
 
+		// try/finally, matching every other sabotage test in this codebase: a `\WPDieException` or an
+		// `Error` escaping `handle()` would otherwise leak a query-rewriting filter and an open output
+		// buffer into every test that runs after this one.
 		$suppressed = $wpdb->suppress_errors( true );
 		add_filter( 'query', $sabotage );
-		ob_start();
-		( new ApprovalActionEndpoint() )->handle();
-		$output = (string) ob_get_clean();
-		remove_filter( 'query', $sabotage );
-		$wpdb->suppress_errors( $suppressed );
-
-		remove_action( 'reservant/error', $listener );
-		remove_filter( 'pre_wp_mail', '__return_true' );
+		try {
+			ob_start();
+			( new ApprovalActionEndpoint() )->handle();
+			$output = (string) ob_get_clean();
+		} finally {
+			remove_filter( 'query', $sabotage );
+			$wpdb->suppress_errors( $suppressed );
+			remove_action( 'reservant/error', $listener );
+			remove_filter( 'pre_wp_mail', '__return_true' );
+		}
 
 		self::assertStringNotContainsString(
 			'no longer valid',
@@ -417,6 +422,71 @@ final class ApprovalActionEndpointTest extends ReservantTestCase {
 		self::assertSame( 'lock_unavailable', $errors[0]->getMessage() );
 
 		// The committed state, not merely the page: nothing was decided, so the link still works.
+		self::assertSame(
+			'awaiting_approval',
+			( new BookingRepository( $wpdb ) )->findByUuid( $booking['uuid'] )['status'],
+			'a refused approval must leave the booking exactly where it was'
+		);
+	}
+
+	/**
+	 * The SECOND half of the lock order must answer the same way as the first.
+	 *
+	 * `BookingRepository::findByUuidForUpdate()` is the booking-row lock every decision use case takes
+	 * straight after `LockManager::acquire()` (`ApproveBooking:119` then `:124`). It reads through
+	 * `get_row()`, which answers `null` on a DB failure and `null` for a row that is genuinely gone -
+	 * and the caller maps `null` to `stale_state`, which is benign here. So a 1205 on that one
+	 * statement rendered "This link is no longer valid. The booking may already have been handled."
+	 * for a completely untouched booking: the exact false sentence the test above exists to prevent,
+	 * reached through a different statement.
+	 *
+	 * It fails closed, so this was a wrong-reason bug rather than a lost-mutex one - which is
+	 * precisely why it needed the same treatment. Two statements that are both part of one lock
+	 * sequence must not disagree about what a failure means.
+	 */
+	public function testALockFailureOnTheBookingRowAlsoRendersARetryablePage(): void {
+		global $wpdb;
+		add_filter( 'pre_wp_mail', '__return_true' );
+		$booking   = $this->holdAwaitingApproval();
+		$updatedAt = (string) ( new BookingRepository( $wpdb ) )->findByUuid( $booking['uuid'] )['updated_at'];
+		$exp       = $this->farFutureExp();
+		$sig       = SignedAction::sign( wp_salt( 'auth' ), $booking['uuid'], 'approve', $exp, $updatedAt );
+
+		$this->setRequest( 'POST', $booking['uuid'], 'approve', $exp, $sig );
+
+		// The booking-row lock only - the resource-day mutexes above it are left working, so this
+		// isolates the second statement of the lock sequence.
+		$sabotage = static function ( $query ) {
+			return 1 === preg_match( '/^\s*SELECT\s+\*\s+FROM\s+\S*reservant_bookings\s+WHERE\s+uuid\s*=.*FOR UPDATE/is', (string) $query )
+				? 'SELECT * FROM reservant_no_such_table WHERE 1 = 1'
+				: $query;
+		};
+		$errors   = array();
+		$listener = static function ( \Throwable $e ) use ( &$errors ): void {
+			$errors[] = $e;
+		};
+		add_action( 'reservant/error', $listener );
+
+		$suppressed = $wpdb->suppress_errors( true );
+		add_filter( 'query', $sabotage );
+		try {
+			ob_start();
+			( new ApprovalActionEndpoint() )->handle();
+			$output = (string) ob_get_clean();
+		} finally {
+			remove_filter( 'query', $sabotage );
+			$wpdb->suppress_errors( $suppressed );
+			remove_action( 'reservant/error', $listener );
+			remove_filter( 'pre_wp_mail', '__return_true' );
+		}
+
+		self::assertStringNotContainsString( 'no longer valid', $output, 'a busy booking-row lock is not a settled decision either' );
+		self::assertStringContainsString( 'Something went wrong', $output );
+		self::assertStringContainsString( 'try again', $output );
+
+		self::assertCount( 1, $errors );
+		self::assertSame( 'lock_unavailable', $errors[0]->getMessage() );
+
 		self::assertSame(
 			'awaiting_approval',
 			( new BookingRepository( $wpdb ) )->findByUuid( $booking['uuid'] )['status'],

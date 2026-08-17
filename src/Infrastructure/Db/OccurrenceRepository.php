@@ -225,13 +225,23 @@ final class OccurrenceRepository {
 	 * A partial column update - only the given fields change (AGENTS.md Task 12, mirrors
 	 * `ServiceRepository::update()`).
 	 *
+	 * **Checked**, because it runs inside the occurrence-mutex transaction and its caller
+	 * (`Rest\Admin\OccurrencesAdminController::update()`) re-reads the row straight afterwards and
+	 * presents it. A silently failed UPDATE therefore returned the UNCHANGED row with a 200: the owner
+	 * is told the edit applied while the database still holds the old value. Zero rows is honest here
+	 * - writing the values a row already holds legitimately affects nothing - so only `false` refuses.
+	 *
 	 * @param array<string, mixed> $fields
+	 * @throws \RuntimeException `lock_unavailable` when the update failed at the DB level.
 	 */
 	public function update( int $id, array $fields ): void {
 		if ( array() === $fields ) {
 			return;
 		}
-		$this->db->update( "{$this->db->prefix}reservant_occurrences", $fields, array( 'id' => $id ) );
+		$ok = $this->db->update( "{$this->db->prefix}reservant_occurrences", $fields, array( 'id' => $id ) );
+		if ( false === $ok ) {
+			throw new \RuntimeException( 'lock_unavailable' );
+		}
 	}
 
 	/**

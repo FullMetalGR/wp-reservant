@@ -10,7 +10,21 @@ final class ResourceDayRepository {
 	/**
 	 * INSERT IGNORE mutex rows. Call BEFORE the transaction opens.
 	 *
+	 * **Checked, because this statement is what makes the mutex exist at all.** `SELECT ... FOR
+	 * UPDATE` cannot lock a row that is not there, and it does not complain about locking nothing -
+	 * it reports zero rows, which for most tables is an honest answer. So a silently failed INSERT
+	 * IGNORE here used to yield a lock over the empty set: `LockManager::acquire()` returned happily,
+	 * every guard passed, and the capacity write ran with no mutex held whatsoever. Nothing in this
+	 * codebase ever READS a `reservant_resource_days` row, so unlike an occurrence key there is no
+	 * later `not_found` guard to catch it either. `acquire()` now refuses zero rows for resource-day
+	 * keys as well; this is the other half of the same fix, refusing at the point of failure rather
+	 * than one statement later.
+	 *
+	 * Zero rows is normal and correct here - INSERT IGNORE reports `0` when the row already exists,
+	 * which is the usual case. Only `false` is a failure.
+	 *
 	 * @param list<LockKey> $keys
+	 * @throws \RuntimeException `lock_unavailable` when a mutex row could not be created.
 	 */
 	public function ensure( array $keys ): void {
 		$p = $this->db->prefix;
@@ -18,13 +32,16 @@ final class ResourceDayRepository {
 			if ( 'resource_day' !== $key->type ) {
 				continue;
 			}
-			$this->db->query(
+			$ok = $this->db->query(
 				$this->db->prepare(
 					"INSERT IGNORE INTO {$p}reservant_resource_days (resource_id, day_utc, rev) VALUES (%d, %s, 0)", // phpcs:ignore WordPress.DB.PreparedSQL
 					$key->id,
 					$key->day
 				)
 			);
+			if ( false === $ok ) {
+				throw new \RuntimeException( 'lock_unavailable' );
+			}
 		}
 	}
 

@@ -169,8 +169,15 @@ final class LifecycleTest extends ReservantTestCase {
 	 *
 	 * Two holds on two different UTC days, so the sabotage can single out one of the two mutex rows
 	 * by its `day_utc` literal; the contended one is given the earlier `hold_expires_at` so
-	 * `expiredHeldIds()` (ordered ASC) hands it over FIRST. That ordering is what makes this a real
-	 * test: were the contended booking processed last, an aborting sweeper would pass too.
+	 * `expiredHeldIds()` (ordered ASC) hands it over FIRST.
+	 *
+	 * That ordering is load-bearing, though not for the reason it might look like: an aborting sweeper
+	 * fails this test under EITHER ordering, because `run()` is called without a `catch` and the
+	 * exception errors out of the test method. What the ordering actually buys is that
+	 * `assertSame( 'expired', $other )` cannot be satisfied incidentally - if the contended booking
+	 * were processed last, the other one would already have been swept before the abort, and the
+	 * assertion would be describing work an aborting sweeper had done rather than work the skip
+	 * allowed it to reach.
 	 */
 	public function test_sweeper_skips_a_booking_it_cannot_lock_and_finishes_the_batch(): void {
 		global $wpdb;

@@ -48,9 +48,16 @@ final class ExpireHolds {
 	 *
 	 * The catch is narrowed to `lock_unavailable` on purpose. Anything else - a failed write, an
 	 * unclassified refusal, a listener that threw - is a genuine bug, and a sweeper nobody watches is
-	 * the worst possible place to swallow one. `expireByUuid()` itself is deliberately NOT given this
-	 * catch: it targets exactly one booking (`Jobs::timeout()`), where there is no rest-of-the-batch
-	 * to protect and the right answer is to let Action Scheduler see the failure and retry.
+	 * the worst possible place to swallow one.
+	 *
+	 * `expireByUuid()` is deliberately NOT given this catch: it targets exactly one booking, so there
+	 * is no rest-of-the-batch to protect and a swallowed failure would simply be a lost one. Note what
+	 * that means for its caller: `Jobs::timeout()` is scheduled with `as_schedule_single_action()`, a
+	 * ONE-OFF, and Action Scheduler marks a throwing action failed without re-running it - so the
+	 * backstop is this five-minute sweep, not a retry of the timer. The consequence worth naming: for
+	 * `on_approval_timeout = 'auto_approve'`, a `lock_unavailable` out of `ApproveBooking` fails that
+	 * action for good, and the sweeper later EXPIRES the booking instead of auto-approving it. The
+	 * hold is not lost or double-sold, but the owner's chosen timeout policy is not what runs.
 	 *
 	 * @return int bookings actually moved to expired
 	 */

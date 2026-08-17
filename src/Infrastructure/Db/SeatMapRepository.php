@@ -28,13 +28,17 @@ final class SeatMapRepository {
 	 * picker needs to draw, and `OccurrenceRepository::validSeatIds()` filters them out of what a
 	 * customer may claim.
 	 *
+	 * **Checked**, the other half of `deleteSeats()`: a rewrite that inserted only part of the new grid
+	 * and committed would leave a map whose seats are neither the old set nor the new one.
+	 *
 	 * @param list<Seat> $seats
 	 * @return list<int> ids in the order given
+	 * @throws \RuntimeException `lock_unavailable` when a seat insert failed at the DB level.
 	 */
 	public function insertSeats( int $seatMapId, array $seats ): array {
 		$ids = array();
 		foreach ( $seats as $seat ) {
-			$this->db->insert(
+			$ok = $this->db->insert(
 				"{$this->db->prefix}reservant_seats",
 				array(
 					'seat_map_id' => $seatMapId,
@@ -45,6 +49,9 @@ final class SeatMapRepository {
 					'kind'        => $seat->kind,
 				)
 			);
+			if ( false === $ok ) {
+				throw new \RuntimeException( 'lock_unavailable' );
+			}
 			$ids[] = (int) $this->db->insert_id;
 		}
 		return $ids;
@@ -148,18 +155,41 @@ final class SeatMapRepository {
 	 * transaction, so a concurrent DELETE cannot remove it out from under `updateSpec()`/
 	 * `deleteSeats()`/`insertSeats()` and leave orphaned seat rows pointing at a vanished map.
 	 */
+	/**
+	 * @throws \RuntimeException `lock_unavailable` when the locking read failed at the DB level -
+	 *                           `get_var()` answers `null` both for a row that is gone and for a query
+	 *                           that failed, and the caller reads `false` here as "gone" and throws
+	 *                           `update_conflict`, which is NOT in `Rest\Errors::KNOWN_REASONS` and so
+	 *                           lands on the opaque 500 arm. A retryable contention failure must not
+	 *                           be reported as an internal error.
+	 */
 	public function lockForUpdate( int $id ): bool {
 		$p     = $this->db->prefix;
 		$found = $this->db->get_var(
 			$this->db->prepare( "SELECT id FROM {$p}reservant_seat_maps WHERE id = %d FOR UPDATE", $id ) // phpcs:ignore WordPress.DB.PreparedSQL
 		);
+		if ( '' !== (string) $this->db->last_error ) {
+			throw new \RuntimeException( 'lock_unavailable' );
+		}
 		return null !== $found;
 	}
 
-	/** Every seat row of one map, physically removed - only ever called alongside `insertSeats()` (a replace) or `delete()` (a teardown), both inside a transaction. */
+	/**
+	 * Every seat row of one map, physically removed - only ever called alongside `insertSeats()` (a
+	 * replace) or `delete()` (a teardown), both inside a transaction.
+	 *
+	 * **Checked**: a rewrite is this DELETE followed by `insertSeats()`, so a failure here that was
+	 * walked past would let the insert land ON TOP of the rows that should have gone, committing a map
+	 * holding every seat twice.
+	 *
+	 * @throws \RuntimeException `lock_unavailable` when the delete failed at the DB level.
+	 */
 	public function deleteSeats( int $seatMapId ): void {
-		$p = $this->db->prefix;
-		$this->db->query( $this->db->prepare( "DELETE FROM {$p}reservant_seats WHERE seat_map_id = %d", $seatMapId ) ); // phpcs:ignore WordPress.DB.PreparedSQL
+		$p  = $this->db->prefix;
+		$ok = $this->db->query( $this->db->prepare( "DELETE FROM {$p}reservant_seats WHERE seat_map_id = %d", $seatMapId ) ); // phpcs:ignore WordPress.DB.PreparedSQL
+		if ( false === $ok ) {
+			throw new \RuntimeException( 'lock_unavailable' );
+		}
 	}
 
 	/**
