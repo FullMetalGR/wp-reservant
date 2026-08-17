@@ -126,6 +126,12 @@ final class BookingsAdminController {
 	 * who did it - a distinct action name on purpose (AGENTS.md Task 10 fix round 1: reusing
 	 * `admin_create` for both rows made "who created this" ambiguous in the audit trail), so the
 	 * detail view can show both "this was an admin-mode booking" and "created by X".
+	 *
+	 * That second row is written AFTER `HoldBooking::execute()` has returned - i.e. after its
+	 * transaction committed - which is why it goes through `AuditLog::recordAfterCommit()` and not
+	 * `record()`. See that method's docblock for the pre-decision / post-commit split; the short
+	 * version is that a refusal here rolls back nothing and would only turn a booking that exists into
+	 * a 500 inviting the owner to create it twice.
 	 */
 	public function create( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
 		try {
@@ -144,7 +150,7 @@ final class BookingsAdminController {
 
 		$actor = (string) wp_get_current_user()->user_login;
 		if ( '' !== $actor ) {
-			( new AuditLog( $this->db ) )->record( (int) $booking['id'], $actor, 'admin_create_by' );
+			( new AuditLog( $this->db ) )->recordAfterCommit( (int) $booking['id'], $actor, 'admin_create_by' );
 		}
 
 		return new \WP_REST_Response( $this->presentForCaller( $booking ), 201 );
@@ -224,6 +230,11 @@ final class BookingsAdminController {
 	 * is correct); an admin force-cancel through THIS route adds a second row, `admin_cancel`, naming
 	 * the real WP user, so a manager's cancellation is never misattributed to the customer in the
 	 * audit trail (AGENTS.md Task 10 fix round 1).
+	 *
+	 * Like `create()`'s second row, it is written after the use case's transaction has committed and so
+	 * goes through `AuditLog::recordAfterCommit()`: a refusal here would tell a manager their override
+	 * failed while the booking is already cancelled, and the repeat it invites answers
+	 * `not_cancellable`.
 	 */
 	public function cancel( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
 		$uuid = (string) $request->get_param( 'uuid' );
@@ -244,7 +255,7 @@ final class BookingsAdminController {
 
 		$actor = (string) wp_get_current_user()->user_login;
 		if ( '' !== $actor ) {
-			( new AuditLog( $this->db ) )->record( (int) $cancelled['id'], $actor, 'admin_cancel' );
+			( new AuditLog( $this->db ) )->recordAfterCommit( (int) $cancelled['id'], $actor, 'admin_cancel' );
 		}
 
 		return new \WP_REST_Response( $this->presentForCaller( $cancelled ) );

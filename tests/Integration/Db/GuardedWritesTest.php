@@ -12,6 +12,7 @@ use Reservant\Application\Dto\HoldRequest;
 use Reservant\Application\Dto\SegmentChoice;
 use Reservant\Application\ExpireHolds;
 use Reservant\Application\HoldBooking;
+use Reservant\Application\MarkBookingOutcome;
 use Reservant\Domain\Availability\AvailabilityRule;
 use Reservant\Infrastructure\Db\AvailabilityRepository;
 use Reservant\Infrastructure\Db\BookingRepository;
@@ -434,6 +435,36 @@ final class GuardedWritesTest extends ReservantTestCase {
 	}
 
 	/**
+	 * The same guard on `findById()`, asserted DIRECTLY rather than through a caller.
+	 *
+	 * The sweep test below exercises the same read, but it pins the CATCH PLACEMENT in
+	 * `ExpireHolds::run()`, not the guard: remove `assertNoDbError()` from `findById()` and the
+	 * sabotaged read simply answers `null`, the row is `continue`d, and every assertion in that test
+	 * still passes. This one fails the moment the guard is gone, which is the only way "a failed read
+	 * is not an absent row" stays true for the nine callers that read a booking through it.
+	 */
+	public function test_find_by_id_refuses_rather_than_masking_a_db_failure_as_absence(): void {
+		global $wpdb;
+		$booking = $this->holdAppointment( '10:00' );
+		$id      = (int) ( new BookingRepository( $wpdb ) )->findByUuid( (string) $booking['uuid'] )['id'];
+
+		// The plain read, never the locking `FOR UPDATE` one - and never `transition()`'s UPDATE,
+		// which is the only other statement on this table shaped like `id = <n>`.
+		$refusal = $this->refusalUnderSabotage(
+			'/^\s*SELECT\s+\*\s+FROM\s+\S*reservant_bookings\s+WHERE\s+id\s*=(?!.*FOR UPDATE).*$/is',
+			'SELECT * FROM reservant_no_such_table WHERE 1 = 1',
+			static function () use ( $id, $wpdb ): void {
+				( new BookingRepository( $wpdb ) )->findById( $id );
+			}
+		);
+		self::assertSame(
+			'lock_unavailable',
+			$refusal,
+			'a DB-level failure on this read must never be reported as "no such booking"'
+		);
+	}
+
+	/**
 	 * The follow-up `findById()` needed inside `ExpireHolds::run()`'s own batch loop: guarding
 	 * `findById()` means the pre-transaction batch read can now itself refuse `lock_unavailable`, and
 	 * that must be caught by the exact same "skip this row, not the whole sweep" rule a busy mutex
@@ -495,5 +526,189 @@ final class GuardedWritesTest extends ReservantTestCase {
 			$statuses,
 			'the row whose batch read failed must stay untouched for the next sweep, and that failure must not abort the other row'
 		);
+	}
+
+	// ------------------------- POST-COMMIT: a committed change is never a failure report
+
+	/**
+	 * Count how often each of `$hooks` fires while `$body` runs.
+	 *
+	 * @param list<string>     $hooks
+	 * @param callable(): void $body
+	 * @return array<string, int> keyed by hook name
+	 */
+	private function countingHooks( array $hooks, callable $body ): array {
+		$counts    = array_fill_keys( $hooks, 0 );
+		$listeners = array();
+		foreach ( $hooks as $hook ) {
+			$listeners[ $hook ] = static function () use ( &$counts, $hook ): void {
+				++$counts[ $hook ];
+			};
+			add_action( $hook, $listeners[ $hook ] );
+		}
+		try {
+			$body();
+		} finally {
+			foreach ( $listeners as $hook => $listener ) {
+				remove_action( $hook, $listener );
+			}
+		}
+		return $counts;
+	}
+
+	/**
+	 * A confirmation whose audit row failed to write must still BE a confirmation.
+	 *
+	 * `ConfirmBooking` has NO transaction - `make()` builds a `BookingRepository` and an `AuditLog`,
+	 * nothing else, and `BookingRepository::reapExpiredTouching()`'s docblock leans on exactly that
+	 * ("ConfirmBooking takes no lock at all, it is a single guarded UPDATE"). So by the time
+	 * `record()` runs, `transition()` has ALREADY autocommitted: a refusal here rolls back nothing.
+	 * It only converts a booking that IS confirmed into a 409, skips
+	 * `do_action( 'reservant/booking/confirmed' )` so no confirmation email is ever sent, and leaves
+	 * the customer with a retry that answers `not_confirmable` forever, because the status the retry
+	 * re-reads is already `confirmed`.
+	 *
+	 * The audit row is bookkeeping ABOUT a fact, not part of the fact. Losing it is reported on
+	 * `reservant/error` - the same treatment `Notifications\Mailer` already gives a post-commit
+	 * delivery failure - and swallowed.
+	 */
+	public function test_a_confirm_whose_audit_write_failed_still_confirms_and_still_fires_its_hook(): void {
+		global $wpdb;
+		$booking = $this->holdAppointment( '10:00' );
+
+		$refusal = null;
+		$counts  = $this->countingHooks(
+			array( 'reservant/booking/confirmed', 'reservant/error' ),
+			function () use ( $booking, $wpdb, &$refusal ): void {
+				$refusal = $this->refusalUnderSabotage(
+					'/^\s*INSERT\s+INTO\s+\S*reservant_audit_log\b/is',
+					'INSERT INTO reservant_no_such_table (id) VALUES (1)',
+					function () use ( $booking, $wpdb ): void {
+						ConfirmBooking::make( $wpdb )->execute( (string) $booking['uuid'], $this->utc( 0, '00:05' ) );
+					}
+				);
+			}
+		);
+
+		self::assertNull( $refusal, 'an audit row lost AFTER the transition committed must not be reported as a failed confirm' );
+		self::assertSame(
+			'confirmed',
+			( new BookingRepository( $wpdb ) )->findByUuid( (string) $booking['uuid'] )['status'],
+			'the transition autocommitted before the audit row was even attempted - a refusal here rolls back nothing'
+		);
+		self::assertSame( 1, $counts['reservant/booking/confirmed'], 'the confirmation hook - and so the customer\'s confirmation email - must still fire' );
+		self::assertSame( 1, $counts['reservant/error'], 'the lost audit row must be visible to an operator rather than silent' );
+	}
+
+	/**
+	 * The OTHER post-commit statement on the same two paths: the re-read that becomes the response.
+	 *
+	 * Guarding `findByUuid()` (wave 3) armed this one identically - and it sits three lines after the
+	 * transition, so a DB fault that kills the audit insert will very often kill this read too. Fixing
+	 * only the audit row would have left the same 409-for-a-committed-change reachable by the same
+	 * fault. `BookingRepository::findByUuidAfterCommit()` reconstructs the post-transition row from the
+	 * one this request already read plus the columns the transition wrote, so the response and the hook
+	 * still carry the truth.
+	 *
+	 * Only the SECOND plain `uuid =` read is sabotaged: the first is `execute()`'s own PRE-DECISION
+	 * read, which must keep refusing - it is what the status and expiry checks are decided on.
+	 */
+	public function test_a_confirm_whose_post_commit_reread_failed_still_confirms_and_still_answers(): void {
+		global $wpdb;
+		$booking = $this->holdAppointment( '10:00' );
+
+		$hits     = 0;
+		$sabotage = static function ( $query ) use ( &$hits ) {
+			$q = (string) $query;
+			if ( str_contains( $q, 'reservant_bookings' ) && str_contains( $q, 'uuid' ) && ! str_contains( $q, 'FOR UPDATE' ) ) {
+				++$hits;
+				if ( 2 === $hits ) {
+					return 'SELECT * FROM reservant_no_such_table WHERE 1 = 1';
+				}
+			}
+			return $query;
+		};
+
+		$snapshot   = null;
+		$counts     = array();
+		$suppressed = $wpdb->suppress_errors( true );
+		add_filter( 'query', $sabotage );
+		try {
+			$counts = $this->countingHooks(
+				array( 'reservant/booking/confirmed' ),
+				function () use ( $booking, $wpdb, &$snapshot ): void {
+					$snapshot = ConfirmBooking::make( $wpdb )->execute( (string) $booking['uuid'], $this->utc( 0, '00:05' ) );
+				}
+			);
+		} finally {
+			remove_filter( 'query', $sabotage );
+			$wpdb->suppress_errors( $suppressed );
+		}
+
+		self::assertSame( 1, $counts['reservant/booking/confirmed'], 'the confirmation hook must still fire' );
+		self::assertSame( 'confirmed', $snapshot['status'], 'the reconstructed snapshot must carry the status the transition wrote' );
+		self::assertNull( $snapshot['hold_expires_at'], 'and the hold columns the transition released' );
+		self::assertNull( $snapshot['hold_class'] );
+		self::assertSame( (string) $booking['uuid'], (string) $snapshot['uuid'] );
+		self::assertCount( 1, $snapshot['items'], 'everything the transition did not touch comes from the row already in hand' );
+
+		// And the DB agrees, once it is readable again.
+		self::assertSame( 'confirmed', ( new BookingRepository( $wpdb ) )->findByUuid( (string) $booking['uuid'] )['status'] );
+	}
+
+	/**
+	 * The same shape for `MarkBookingOutcome`, which is the same "one guarded UPDATE, no transaction"
+	 * class of use case (its own docblock says so) and whose hook - `reservant/booking/completed` or
+	 * `/no_show` - was skipped identically.
+	 */
+	public function test_an_outcome_whose_audit_write_failed_still_completes_and_still_fires_its_hook(): void {
+		global $wpdb;
+		$booking = $this->holdAppointment( '10:00' );
+		ConfirmBooking::make( $wpdb )->execute( (string) $booking['uuid'], $this->utc( 0, '00:05' ) );
+
+		$refusal = null;
+		$counts  = $this->countingHooks(
+			array( 'reservant/booking/completed', 'reservant/error' ),
+			function () use ( $booking, $wpdb, &$refusal ): void {
+				$refusal = $this->refusalUnderSabotage(
+					'/^\s*INSERT\s+INTO\s+\S*reservant_audit_log\b/is',
+					'INSERT INTO reservant_no_such_table (id) VALUES (1)',
+					static function () use ( $booking, $wpdb ): void {
+						MarkBookingOutcome::make( $wpdb )->execute( (string) $booking['uuid'], 'completed', 'manager' );
+					}
+				);
+			}
+		);
+
+		self::assertNull( $refusal, 'an audit row lost AFTER the transition committed must not be reported as a failed outcome' );
+		self::assertSame(
+			'completed',
+			( new BookingRepository( $wpdb ) )->findByUuid( (string) $booking['uuid'] )['status'],
+			'the transition autocommitted before the audit row was even attempted'
+		);
+		self::assertSame( 1, $counts['reservant/booking/completed'], 'the outcome hook must still fire' );
+		self::assertSame( 1, $counts['reservant/error'], 'the lost audit row must be visible to an operator rather than silent' );
+	}
+
+	/**
+	 * The inverse must stay true, or this repair has undone wave 3: an audit row that fails INSIDE a
+	 * transaction is still a refusal, because there the change has NOT committed and the ROLLBACK is
+	 * real. `CancelBooking` is the in-transaction case, pinned above; this asserts the two rules
+	 * cannot be collapsed into one by "just never throwing from record()".
+	 */
+	public function test_the_in_transaction_audit_write_still_refuses(): void {
+		global $wpdb;
+		$booking = $this->holdAppointment( '10:00' );
+		ConfirmBooking::make( $wpdb )->execute( (string) $booking['uuid'], $this->utc( 0, '00:05' ) );
+
+		$refusal = $this->refusalUnderSabotage(
+			'/^\s*INSERT\s+INTO\s+\S*reservant_audit_log\b/is',
+			'INSERT INTO reservant_no_such_table (id) VALUES (1)',
+			function () use ( $booking, $wpdb ): void {
+				CancelBooking::make( $wpdb )->execute( (string) $booking['uuid'], $this->utc( 0, '00:06' ), true );
+			}
+		);
+		self::assertSame( 'lock_unavailable', $refusal, 'a pre-commit audit write must still abort the change it was recording' );
+		self::assertSame( 'confirmed', ( new BookingRepository( $wpdb ) )->findByUuid( (string) $booking['uuid'] )['status'] );
 	}
 }

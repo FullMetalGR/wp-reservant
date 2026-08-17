@@ -485,6 +485,57 @@ final class RestApiTest extends ReservantTestCase {
 		self::assertSame( 'lock_unavailable', $response->get_data()['message'] );
 	}
 
+	/**
+	 * A permission lookup that FAILED must refuse, never grant.
+	 *
+	 * `Routes::guard()` is the SOLE authorization on `GET /bookings/{uuid}`, `DELETE /holds/{uuid}`,
+	 * `POST .../confirm` and `POST .../cancel` (`BookingsController`'s own class docblock says so).
+	 * It reads the booking to compare the caller's token against `manage_token_hash`, and its `null`
+	 * branch returns `true` - permission GRANTED - on the default, non-`hideNotFound` path, because an
+	 * unknown uuid is deliberately left to the handler's own 404. Before `findByUuid()` was guarded,
+	 * a read that FAILED at the DB level was also `null`: an anonymous caller with no token at all was
+	 * therefore admitted, free to read `customer_name`/`customer_email`/`customer_phone` off somebody
+	 * else's booking, or to confirm or cancel it.
+	 *
+	 * Only the FIRST plain `uuid =` read is sabotaged - `guard()`'s. The handler's own read, which
+	 * comes second, is left working on purpose: that is what makes this test discriminating rather
+	 * than decorative. Sabotage both and `show()`'s catch answers 409 whatever `guard()` decided,
+	 * which is exactly the trap `test_show_answers_409...` above sidesteps in the other direction (it
+	 * takes the capability short-circuit so `guard()` never runs at all). Here `guard()` must run, and
+	 * must refuse.
+	 */
+	public function test_a_failed_permission_lookup_refuses_instead_of_granting_access(): void {
+		global $wpdb;
+		$created = $this->hold( $this->sql( 1, '11:00' ) );
+		wp_set_current_user( 0 ); // No capability, and the request below carries no token either.
+
+		$hits     = 0;
+		$sabotage = static function ( $query ) use ( &$hits ) {
+			$q = (string) $query;
+			if ( str_contains( $q, 'reservant_bookings' ) && str_contains( $q, 'uuid' ) && ! str_contains( $q, 'FOR UPDATE' ) ) {
+				++$hits;
+				if ( 1 === $hits ) {
+					return 'SELECT * FROM reservant_no_such_table WHERE 1 = 1';
+				}
+			}
+			return $query;
+		};
+		$suppressed = $wpdb->suppress_errors( true );
+		add_filter( 'query', $sabotage );
+		try {
+			$response = $this->request( 'GET', "/reservant/v1/bookings/{$created['uuid']}" );
+		} finally {
+			remove_filter( 'query', $sabotage );
+			$wpdb->suppress_errors( $suppressed );
+		}
+
+		$data = $response->get_data();
+		self::assertNotSame( 200, $response->get_status(), 'a failed permission lookup must never be read as "no such booking, let it through"' );
+		self::assertSame( 409, $response->get_status(), (string) wp_json_encode( $data ) );
+		self::assertSame( 'lock_unavailable', $data['message'] );
+		self::assertArrayNotHasKey( 'customer_email', $data, 'a tokenless caller must not receive the customer\'s contact details' );
+	}
+
 	// ---------------------------------------------------------------- seats
 
 	public function test_occurrence_seats_lists_the_grid_and_its_claims(): void {

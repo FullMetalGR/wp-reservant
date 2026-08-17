@@ -12,6 +12,19 @@ use Reservant\Infrastructure\Db\BookingRepository;
 /**
  * The free / pay-on-site confirmation path (AGENTS.md section 2.3). Online payments are confirmed by
  * the WooCommerce bridge once the order is paid, never here.
+ *
+ * **This use case has NO transaction and takes no lock: it is one guarded UPDATE**, and
+ * `BookingRepository::reapExpiredTouching()` and `CancelBooking::execute()` both build their own
+ * correctness arguments on exactly that. `transition()` is itself the atomic, race-safe step, so
+ * there is nothing for a transaction to make atomic *with*.
+ *
+ * That has a consequence for everything after it: once `transition()` returns true, the change is
+ * COMMITTED - there is no open transaction to roll back. Every statement below that line is
+ * therefore post-commit, and none of them may refuse (`AuditLog::record()`'s docblock states the
+ * pre-decision / post-commit split in full). A refusal there would answer 409 for a booking that IS
+ * confirmed, skip `reservant/booking/confirmed` so the confirmation email never goes out, and leave
+ * the retry it invites answering `not_confirmable` forever. Hence `recordAfterCommit()` and
+ * `findByUuidAfterCommit()` below - the post-commit halves of the two statements that used to throw.
  */
 final class ConfirmBooking {
 
@@ -52,10 +65,15 @@ final class ConfirmBooking {
 		if ( ! $this->bookings->transition( (int) $booking['id'], $from, BookingStatus::Confirmed, $released ) ) {
 			throw new \RuntimeException( 'stale_state' );
 		}
-		$this->audit->record( (int) $booking['id'], 'customer', 'confirmed' );
+		// ---- Everything below this line runs AFTER the transition committed. See the class docblock:
+		// ---- no statement here may turn that committed transition into a failure report.
+		$this->audit->recordAfterCommit( (int) $booking['id'], 'customer', 'confirmed' );
 
-		/** @var array<string, mixed> $snapshot */
-		$snapshot = $this->bookings->findByUuid( $uuid );
+		$snapshot = $this->bookings->findByUuidAfterCommit(
+			$uuid,
+			array( 'status' => BookingStatus::Confirmed->value ) + $released,
+			$booking
+		);
 		do_action( 'reservant/booking/confirmed', BookingSnapshot::fromArray( $snapshot ) );
 		return $snapshot;
 	}

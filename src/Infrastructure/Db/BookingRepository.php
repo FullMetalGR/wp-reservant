@@ -132,6 +132,45 @@ final class BookingRepository {
 	}
 
 	/**
+	 * **The POST-COMMIT twin of `findByUuid()`: the re-read whose result IS the response, on a path
+	 * where the change has already committed.** See `AuditLog::record()` for the pre-decision /
+	 * post-commit split in full; this is that split applied to a read rather than a write.
+	 *
+	 * Every other post-write re-read in this codebase happens INSIDE the transaction that made the
+	 * write, so it is still a pre-commit statement: a failure there rolls the whole change back and
+	 * refusing is exactly right. `ConfirmBooking` and `MarkBookingOutcome` are the only two use cases
+	 * with no transaction at all (both are one guarded UPDATE - their own docblocks say so), so for
+	 * them alone this read runs AFTER the transition is durable. Refusing there would answer 409 for a
+	 * transition that happened, skip the `reservant/booking/confirmed`|`/completed`|`/no_show` hook
+	 * that sends the customer's confirmation, and leave a retry answering `not_confirmable`/
+	 * `stale_state` forever.
+	 *
+	 * So a fault (or, defensively, a `null`) falls back to the row this request already read plus the
+	 * columns the committed write set - which is the true post-transition state, reconstructed rather
+	 * than re-read. The one field the fallback cannot reproduce is `updated_at`: it keeps its
+	 * pre-transition value, since the exact timestamp `transition()` wrote is not knowable here.
+	 * Nothing on these two paths reads it (the signed approval links that DO bind to it are built on
+	 * the `held`/`nag` hooks, not these), and a stale timestamp in a response field is not worth
+	 * discarding the transition over.
+	 *
+	 * @param array<string, mixed> $applied the columns the committed write set - status, plus whatever
+	 *                                      `transition()`'s `$extra` carried.
+	 * @param array<string, mixed> $before  the row as this request read it before that write.
+	 * @return array<string, mixed> booking row + 'items' list, ints cast
+	 */
+	public function findByUuidAfterCommit( string $uuid, array $applied, array $before ): array {
+		try {
+			$fresh = $this->findByUuid( $uuid );
+		} catch ( \RuntimeException $exception ) {
+			do_action( 'reservant/error', $exception );
+			$fresh = null;
+		}
+		// Left-hand keys win in a PHP array union, so `$applied` overrides the stale columns and
+		// everything else - uuid, customer, items - comes from the row already in hand.
+		return null === $fresh ? $applied + $before : $fresh;
+	}
+
+	/**
 	 * Same shape as `findByUuid()`, but row-locking: the authoritative read for a use case that is
 	 * about to guard a status/expiry check and then transition on it. Call inside a transaction
 	 * only - the lock is released at COMMIT/ROLLBACK.

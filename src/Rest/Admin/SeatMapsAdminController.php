@@ -40,6 +40,10 @@ use Reservant\Rest\Input;
  * `UPDATE`'s own affected-rows count cannot distinguish "the row is gone" from "the row exists but
  * already held the values being written", so existence is proven by a dedicated locking read
  * instead of inferred from the write.
+ *
+ * POST needs no guard at all (there is no existing row to protect) but does need the transaction, for
+ * a different reason: it writes the map row and its seats in two statements, and a 409 from the second
+ * one has to mean the first never happened - see `create()`.
  */
 final class SeatMapsAdminController {
 
@@ -90,13 +94,26 @@ final class SeatMapsAdminController {
 		}
 
 		$repo = new SeatMapRepository( $this->db );
-		// Same catch shape update() uses (this class's docblock): insert()/insertSeats() can now both
-		// refuse `lock_unavailable` on a DB-level failure, and without this the refusal would escape
-		// this REST callback as an uncaught exception instead of the clean 409 every other guarded
-		// write on this path answers with.
+		// Same catch shape update() uses (this class's docblock): insert()/insertSeats() can both refuse
+		// `lock_unavailable` on a DB-level failure, and without this the refusal would escape this REST
+		// callback as an uncaught exception instead of the clean 409 every other guarded write on this
+		// path answers with.
+		//
+		// And inside the same TransactionRunner update()/destroy() already use, because the two writes
+		// are one act. Without it, `insert()` had already committed by the time `insertSeats()` refused:
+		// the caller got a 409 - whose whole meaning is "nothing happened, the request is worth
+		// repeating verbatim" (`LockManager::acquire()`'s docblock) - alongside a committed, seatless map
+		// that no screen can use and nothing will ever clean up, and every retry minted another one. A
+		// compensating DELETE would be the alternative, but it can fail for exactly the reason that
+		// brought us here; a transaction cannot.
 		try {
-			$id = $repo->insert( $name, $specText );
-			$repo->insertSeats( $id, $spec->seats() );
+			$id = ( new TransactionRunner( $this->db ) )->run(
+				static function () use ( $repo, $name, $specText, $spec ): int {
+					$id = $repo->insert( $name, $specText );
+					$repo->insertSeats( $id, $spec->seats() );
+					return $id;
+				}
+			);
 		} catch ( \RuntimeException $exception ) {
 			return Errors::failure( $exception );
 		}

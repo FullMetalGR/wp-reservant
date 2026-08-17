@@ -39,8 +39,8 @@ final class ExpireHolds {
 	/**
 	 * Sweep a batch of lapsed holds.
 	 *
-	 * **A booking whose mutex is busy is SKIPPED, not fatal.** One contended row must not stop the
-	 * sweep: a lock lost this minute is one the next run will very likely take, and every other
+	 * **A booking this iteration could not take is SKIPPED, not fatal.** One bad row must not stop the
+	 * sweep: whatever went wrong this minute is very likely fine on the next run, and every other
 	 * booking in the batch is independent of it. AGENTS.md section 2.1 permits this in both
 	 * directions - correctness never depends on the sweeper having run, and a lapsed hold is already
 	 * free by time comparison in every query - so aborting and skipping are equally safe, and
@@ -50,12 +50,17 @@ final class ExpireHolds {
 	 * listener that threw - is a genuine bug, and a sweeper nobody watches is the worst possible place
 	 * to swallow one.
 	 *
-	 * **What is actually swallowed here is wider than "the mutex was busy".** `lock_unavailable` is not
-	 * only `LockManager::acquire()` losing a race for a row somebody else holds - it is also the message
-	 * every guarded write and locking read on this transaction's path answers a genuine DB-level failure
-	 * with: `releaseSeatClaims()`, `bumpRev()` and `ensure()` all refuse this way too, and this catch
-	 * cannot tell "somebody else has the mutex" apart from "the database just failed a write it should
-	 * have been able to make". That is the one real cost of narrowing the catch to a single string
+	 * **What is actually swallowed here is wider than "the mutex was busy" - and narrower than the name
+	 * suggests, because `acquire()` never refuses for ordinary contention at all.** `LockManager::acquire()`
+	 * takes its mutex with a plain, blocking `SELECT ... FOR UPDATE`: a row somebody else already holds
+	 * makes this transaction WAIT, not fail. So `lock_unavailable` out of `acquire()` means one of only
+	 * two things - the wait itself ended badly (1205 lock-wait timeout, or 1213 deadlock, both of which
+	 * come back as `false`), or the resource-day mutex row was not there to lock (see that method's
+	 * docblock on why zero rows is refused for a resource-day key). And `acquire()` is not even the
+	 * main source: `lock_unavailable` is also the message every guarded write and locking read on this
+	 * transaction's path answers a genuine DB-level failure with - `releaseSeatClaims()`, `bumpRev()`,
+	 * `ensure()` and `findById()` all refuse this way too, and this catch cannot tell any of them apart
+	 * from the others. That is the one real cost of narrowing the catch to a single string
 	 * rather than a richer signal: a genuine DB fault on this path becomes completely invisible - no
 	 * exception here, and (because `Rest\Errors::failure()` is never reached; nothing in this call chain
 	 * is a REST response) no `reservant/error` action either, even after this repair adds one for every
@@ -81,9 +86,9 @@ final class ExpireHolds {
 		foreach ( $this->bookings->expiredHeldIds( $batch ) as $id ) {
 			// The batch read (`findById()`) is inside the same try as the reap it feeds: guarding
 			// `findById()` for uniformity (this repair's item 6) means a DB failure on THIS read now
-			// refuses `lock_unavailable` too, exactly like a busy mutex, rather than silently returning
-			// null. It must be caught by the very same "skip, not fatal" rule or one bad read would
-			// abort the whole batch instead of just the one row it belongs to.
+			// refuses `lock_unavailable` too, rather than silently returning null. It must be caught by
+			// the very same "skip, not fatal" rule or one bad read would abort the whole batch instead
+			// of just the one row it belongs to.
 			try {
 				$booking = $this->bookings->findById( $id );
 				if ( null === $booking ) {
@@ -96,9 +101,10 @@ final class ExpireHolds {
 				if ( 'lock_unavailable' !== $e->getMessage() ) {
 					throw $e;
 				}
-				// Somebody else holds this slot's mutex right now - or this row's own read just failed
-				// at the DB level. Either way, leave the row exactly as it is and
-				// let the next sweep have it - the hold is already non-blocking by time comparison.
+				// A lock statement, a guarded write or this row's own read just failed at the DB level
+				// (ordinary contention would have WAITED, not landed here - see the docblock). Either
+				// way, leave the row exactly as it is and let the next sweep have it: the hold is
+				// already non-blocking by time comparison.
 			}
 		}
 		return $processed;

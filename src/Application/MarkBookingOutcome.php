@@ -12,6 +12,12 @@ use Reservant\Infrastructure\Db\BookingRepository;
  * Attendance bookkeeping on a booking that already happened (AGENTS.md status diagram: `confirmed`
  * -> `completed`/`no_show`). Like `ConfirmBooking`, this is one guarded UPDATE - `transition()` is
  * itself the atomic, race-safe step, so no lock is needed to serialise it against a rival writer.
+ *
+ * And like `ConfirmBooking`, having no transaction means everything after `transition()` returns true
+ * is POST-COMMIT and may not refuse: a 409 there would report a failure for an outcome already
+ * recorded, and skip `reservant/booking/completed`|`/no_show` on the way out.
+ * `AuditLog::record()`'s docblock states that split in full; `recordAfterCommit()` and
+ * `findByUuidAfterCommit()` below are its post-commit halves.
  */
 final class MarkBookingOutcome {
 
@@ -44,10 +50,10 @@ final class MarkBookingOutcome {
 		if ( ! $this->bookings->transition( (int) $booking['id'], $from, $to ) ) {
 			throw new \RuntimeException( 'stale_state' );
 		}
-		$this->audit->record( (int) $booking['id'], $actor, $outcome );
+		// ---- Everything below this line runs AFTER the transition committed. See the class docblock.
+		$this->audit->recordAfterCommit( (int) $booking['id'], $actor, $outcome );
 
-		/** @var array<string, mixed> $snapshot */
-		$snapshot = $this->bookings->findByUuid( $uuid );
+		$snapshot = $this->bookings->findByUuidAfterCommit( $uuid, array( 'status' => $to->value ), $booking );
 		do_action( 'reservant/booking/' . $outcome, BookingSnapshot::fromArray( $snapshot ) );
 		return $snapshot;
 	}
