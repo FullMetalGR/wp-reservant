@@ -40,6 +40,18 @@
 	background: var( --reservant-bg );
 }
 
+/*
+ * The block's "density" attribute travels as this modifier CLASS on the mount node itself -
+ * never as a data- attribute (index.tsx deliberately reads no density; it is presentation, not
+ * configuration) and never as an inline property (what "compact" MEANS belongs to the
+ * stylesheet, so themes can retune it without touching PHP). Declared after the token block
+ * above so it wins the same-specificity fight on the same element. Task 16 documents this as
+ * part of the theming surface.
+ */
+.reservant-widget--compact {
+	--reservant-space: 8px;
+}
+
 .reservant-widget__panel {
 	padding: var( --reservant-space );
 	border: 1px solid var( --reservant-border );

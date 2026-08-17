@@ -59,18 +59,27 @@ final class Plugin {
 			( new Admin\ApprovalActionEndpoint() )->register();
 		}
 
+		// The mount-point renderer wraps an Assets instance so that rendering a mount point can
+		// force-enqueue the bundle even where content detection cannot see it. Sharing THIS
+		// instance is dependency-injection hygiene, not a mechanism requirement: Assets keeps
+		// no instance state (force() records its decision in the hook table - see its
+		// docblock), so a fresh instance behaves identically, and ShortcodeTest proves it by
+		// constructing its own. Task 10's ManageRoute needs force() too (its route matches no
+		// post at all); hand it this same renderer for the same hygiene.
+		$assets   = new Frontend\Assets();
+		$renderer = new Frontend\MountPoint( $assets );
+
 		if ( ! is_admin() ) {
-			// The shortcode takes an Assets instance so that rendering a mount point can
-			// force-enqueue the bundle even where content detection cannot see it. Sharing THIS
-			// instance is dependency-injection hygiene, not a mechanism requirement: Assets keeps
-			// no instance state (force() records its decision in the hook table - see its
-			// docblock), so a fresh instance behaves identically, and ShortcodeTest proves it by
-			// constructing its own. Task 10's ManageRoute needs force() too (its route matches no
-			// post at all); hand it this same instance for the same hygiene.
-			$assets = new Frontend\Assets();
 			$assets->register();
-			( new Frontend\Shortcode( $assets ) )->register();
+			( new Frontend\Shortcode( $renderer ) )->register();
 		}
+
+		// Deliberately OUTSIDE the is_admin() split, unlike everything above: the block editor
+		// IS wp-admin, and its inserter only lists server-registered block types - a block
+		// registered under `! is_admin()` would render fine on the front end while being
+		// impossible to insert. Registration itself is cheap and side-effect free on requests
+		// that never render the block.
+		( new Frontend\Block( $renderer ) )->register();
 
 		if ( defined( 'WP_CLI' ) && WP_CLI && self::devToolsAllowed( wp_get_environment_type(), self::devOverride() ) ) {
 			\WP_CLI::add_command( 'reservant', Cli\FixtureCommand::class );

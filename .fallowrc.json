@@ -2,6 +2,8 @@
 	"$schema": "https://unpkg.com/fallow/schema/fallow.schema.json",
 	"entry": [
 		"assets/src/admin/index.tsx",
+		"assets/src/public/index.tsx",
+		"assets/src/public/editor.tsx",
 		"bin/fallow-gate.mjs"
 	]
 }
