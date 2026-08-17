@@ -26,12 +26,13 @@ use Reservant\Settings;
  * harness, so the decision can never leak across tests the way a latched boolean on a shared
  * instance would.
  *
- * The script/style URLs name the files the build REALLY emits, which the plan's Task 7 interface
- * line got wrong twice (see assets/src/public/index.tsx): the stylesheet is
- * `build/style-widget.css`, not `widget.css` - wp-scripts collects any source `style.css` into a
- * `style-<entry>` chunk - and `build/widget.asset.php` lists exactly three handles
- * (react-jsx-runtime, wp-element, wp-i18n; react and react-dom arrive transitively through
- * wp-element). The asset file is read dynamically, never hardcoded, mirroring Admin\AdminPage.
+ * The script/style URLs name the files the build REALLY emits, which the plan's Task 7 got wrong
+ * in two places (see assets/src/public/index.tsx): its Interfaces line names `widget.css` where
+ * the build emits `build/style-widget.css` - wp-scripts collects any source `style.css` into a
+ * `style-<entry>` chunk - and its Step 5 expects five dependencies where `build/widget.asset.php`
+ * lists exactly three handles (react-jsx-runtime, wp-element, wp-i18n; react and react-dom
+ * arrive transitively through wp-element). The asset file is read dynamically, never hardcoded,
+ * mirroring Admin\AdminPage.
  */
 final class Assets {
 
@@ -75,7 +76,13 @@ final class Assets {
 		if ( ! is_singular() ) {
 			return false;
 		}
-		$post = get_post();
+		// get_queried_object(), NOT get_post(): is_singular() just answered from the main query,
+		// while get_post() reads $GLOBALS['post'] - and the two can disagree here. A plugin that
+		// runs a secondary WP_Query + setup_postdata() early in the head without
+		// wp_reset_postdata() leaves its last post in the global, and detection would then
+		// inspect the wrong post's content. The instanceof guard stays: get_queried_object() is
+		// typed to also return terms, users, post types or null.
+		$post = get_queried_object();
 		if ( ! $post instanceof \WP_Post ) {
 			return false;
 		}
@@ -130,15 +137,40 @@ final class Assets {
 	/**
 	 * The widget's boot object, consumed by the Task 11 API client as `window.reservantWidget`.
 	 *
-	 * `nonce` is EMPTY for a logged-out visitor, on purpose, and the client must not send an
-	 * X-WP-Nonce header when it is. This page is public and routinely served from a full-page
-	 * cache for days, while a `wp_rest` nonce dies in 12-24 hours - and WordPress treats a
-	 * supplied-but-invalid nonce as a hard 403 (`rest_cookie_invalid_nonce`) on EVERY route,
-	 * public ones included, where the same request with no nonce at all simply proceeds
-	 * unauthenticated, which is exactly what the guest booking routes are designed for. A cached
-	 * nonce would therefore convert requests that succeed into requests that fail. Logged-in
-	 * pageviews bypass page caches by convention, so there the nonce is safe and useful: it lets
-	 * WordPress recognise the user it already knows on every REST call the widget makes.
+	 * `nonce` is ALWAYS the empty string, and the client must not send an X-WP-Nonce header when
+	 * it is empty. Do not "fix" this back to `wp_create_nonce( 'wp_rest' )` for logged-in users:
+	 *
+	 * - No route the widget calls needs cookie authentication. They are either public
+	 *   (`Routes::allowPublic()`) or authorized by the magic-link manage token, which the
+	 *   `POST /holds` response hands the client (`manage_token`, shown exactly once).
+	 * - Core validates any nonce the client DOES send before every permission callback:
+	 *   `WP_REST_Server::serve_request()` runs `check_authentication()` before `dispatch()`, and
+	 *   `rest_cookie_check_errors()` turns a supplied-but-invalid nonce into a hard 403
+	 *   (`rest_cookie_invalid_nonce`) on EVERY route, fully public ones included - while the same
+	 *   request with no nonce at all simply proceeds unauthenticated.
+	 * - A `wp_rest` nonce dies in 12-24 hours, and a booking page outlives that easily: a tab
+	 *   left open overnight, or a host that caches pages for logged-in users too (Batcache with
+	 *   `cache_logged_in`, LiteSpeed, some Cloudflare setups). The stale nonce then breaks the
+	 *   whole widget precisely for the logged-in shop owner testing it, while a logged-out
+	 *   visitor on the identical page succeeds.
+	 *
+	 * Known trade-off, accepted: without a nonce a logged-in manager using the PUBLIC widget is a
+	 * guest to the REST layer - no `requireTokenOrCap` capability branch, no policy-window
+	 * override in cancel/reschedule. Manager actions belong to the admin SPA, which ships its own
+	 * nonce (`Admin\AdminPage::config()`).
+	 *
+	 * The key itself stays in the shape: the Task 11 client reads all six keys and the contract
+	 * test pins their exact order.
+	 *
+	 * `checkoutTtlMin` is the site default TTL for the CHECKOUT hold class ONLY - the `pending`
+	 * status, `Settings::checkoutTtlMin()`, default 15 minutes. AGENTS.md section 2.3 defines two
+	 * more hold classes with much longer TTLs (`awaiting_approval` ~48 h, `awaiting_payment`
+	 * ~24 h, both service- or settings-configurable), and a booking on a `requires_approval`
+	 * service is held for the approval TTL, not this one. Task 14's countdown must therefore
+	 * anchor on `hold_expires_at` from the `POST /holds` response - the authority for the hold
+	 * actually created - and use this value only as a pre-hold hint. A countdown driven by this
+	 * number would tick 15 minutes to zero and block confirm while an approval hold lives on for
+	 * two days.
 	 *
 	 * @return array{restRoot:string,nonce:string,currency:string,timezone:string,granularityMin:int,checkoutTtlMin:int}
 	 */
@@ -147,7 +179,7 @@ final class Assets {
 
 		return array(
 			'restRoot'       => esc_url_raw( rest_url() ),
-			'nonce'          => is_user_logged_in() ? wp_create_nonce( 'wp_rest' ) : '',
+			'nonce'          => '',
 			'currency'       => $settings->currency(),
 			'timezone'       => wp_timezone_string(),
 			'granularityMin' => max( 1, (int) apply_filters( 'reservant/granularity_min', 5 ) ),

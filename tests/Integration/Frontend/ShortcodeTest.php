@@ -88,6 +88,49 @@ final class ShortcodeTest extends ReservantTestCase {
 		$this->assertTrue( wp_style_is( self::HANDLE, 'enqueued' ) );
 	}
 
+	public function test_detection_and_a_rendered_shortcode_together_attach_the_bootstrap_once(): void {
+		// The commonest production request drives enqueue() TWICE: detection fires it on
+		// wp_enqueue_scripts, then the_content renders the shortcode and mount() calls force(),
+		// which - after the hook - enqueues on the spot. The guard in enqueue() is what keeps the
+		// second pass from attaching a second inline bootstrap; without it the page would carry
+		// two `window.reservantWidget = ...` statements.
+		$this->visitPostWith( 'Book here: [reservant_booking service="3"]' );
+		do_action( 'wp_enqueue_scripts' );
+		$this->assertTrue( wp_script_is( self::HANDLE, 'enqueued' ) );
+
+		do_shortcode( '[reservant_booking service="3"]' );
+
+		$this->assertTrue( wp_script_is( self::HANDLE, 'enqueued' ) );
+		$this->assertTrue( wp_style_is( self::HANDLE, 'enqueued' ) );
+		$before = wp_scripts()->get_data( self::HANDLE, 'before' );
+		$this->assertIsArray( $before );
+		$this->assertCount( 1, array_filter( $before, 'is_string' ), 'The inline bootstrap must be attached exactly once per request.' );
+		$this->assertCount( 1, array_keys( wp_scripts()->queue, self::HANDLE, true ) );
+	}
+
+	public function test_granularity_reaches_the_bootstrap_through_its_filter(): void {
+		// Asserting only the default would prove nothing - 5 is what the fallback produces too,
+		// so a renamed filter passes every default-value assertion. The name and default must
+		// stay identical to AdminPage::granularityMin() and AvailabilityQuery::DEFAULT_GRANULARITY:
+		// one time grid, three emitting sites.
+		add_filter( 'reservant/granularity_min', static fn (): int => 10 );
+		$this->visitPostWith( '[reservant_booking]' );
+		do_action( 'wp_enqueue_scripts' );
+		$this->assertSame( 10, $this->bootstrapPayload()['granularityMin'] );
+	}
+
+	public function test_the_widget_script_declares_its_translations(): void {
+		// wp_set_script_translations() is what makes wp.i18n load the reservant catalog for this
+		// handle (plan Task 8 Step 3, AGENTS.md section 7). Nothing else fails when it is missing -
+		// every widget string just silently renders untranslated on non-English sites - so the
+		// registered textdomain is pinned here.
+		$this->visitPostWith( '[reservant_booking]' );
+		do_action( 'wp_enqueue_scripts' );
+		$script = wp_scripts()->registered[ self::HANDLE ] ?? null;
+		$this->assertNotNull( $script );
+		$this->assertSame( 'reservant', $script->textdomain );
+	}
+
 	public function test_the_manage_shortcode_renders_manage_mode_and_escapes_its_attributes(): void {
 		$html = do_shortcode( '[reservant_manage uuid="abc-123" token="a&b"]' );
 		$this->assertStringContainsString( 'class="reservant-widget"', $html );
@@ -146,25 +189,41 @@ final class ShortcodeTest extends ReservantTestCase {
 		$this->assertSame( wp_timezone_string(), $payload['timezone'] );
 		$this->assertSame( 5, $payload['granularityMin'] );
 		$this->assertSame( 15, $payload['checkoutTtlMin'] );
-		// A logged-out visitor gets NO nonce, deliberately: page caches serve this HTML for days,
-		// a wp_rest nonce dies in 12-24 hours, and WordPress hard-fails any request carrying an
-		// invalid nonce (rest_cookie_invalid_nonce, 403) even on fully public routes - where the
-		// same request with no nonce at all would have succeeded. Empty string means "do not send
-		// the X-WP-Nonce header" to the Task 11 client.
+		// NOBODY gets a nonce, deliberately: page caches serve this HTML for days, a wp_rest
+		// nonce dies in 12-24 hours, and WordPress hard-fails any request carrying an invalid
+		// nonce (rest_cookie_invalid_nonce, 403) even on fully public routes - where the same
+		// request with no nonce at all would have succeeded. Empty string means "do not send the
+		// X-WP-Nonce header" to the Task 11 client. The logged-in case is pinned separately below.
 		$this->assertSame( '', $payload['nonce'] );
 	}
 
-	public function test_a_logged_in_visitor_gets_a_real_nonce(): void {
-		// Logged-in pageviews bypass full-page caches by convention, so a nonce is safe here -
-		// and useful: it authenticates the REST calls as the user WordPress already knows.
+	public function test_a_logged_in_visitor_gets_no_nonce_either(): void {
+		// Deliberately the same empty string a visitor gets. No route the widget calls requires
+		// cookie authentication (they are public or token-authorized), while core validates any
+		// nonce the client DOES send before every permission callback - so the only thing a nonce
+		// can add here is a failure mode: a page left open past nonce expiry (or cached for
+		// logged-in users) starts sending a stale nonce and 403s even fully public routes. See
+		// Assets::config() for the full reasoning; this test is what keeps the nonce from being
+		// "fixed" back.
 		wp_set_current_user( self::factory()->user->create( array( 'role' => 'subscriber' ) ) );
 		$this->visitPostWith( '[reservant_booking]' );
 		do_action( 'wp_enqueue_scripts' );
 
 		$payload = $this->bootstrapPayload();
-		$this->assertIsString( $payload['nonce'] );
-		$this->assertNotSame( '', $payload['nonce'] );
-		$this->assertNotFalse( wp_verify_nonce( $payload['nonce'], 'wp_rest' ) );
+		$this->assertSame( '', $payload['nonce'] );
+	}
+
+	public function test_detection_reads_the_main_query_not_the_post_global(): void {
+		// `is_singular()` reads the main query; `get_post()` reads `$GLOBALS['post']` - and the
+		// two can disagree at `wp_enqueue_scripts` time: an SEO or schema plugin that runs a
+		// secondary WP_Query + setup_postdata() from an early `wp_head`-adjacent hook without
+		// `wp_reset_postdata()` leaves a FOREIGN post in the global. The queried page still
+		// carries the widget, so detection must inspect the object the main query resolved
+		// (get_queried_object()), not whatever happens to sit in the global.
+		$this->visitPostWith( '[reservant_booking]' );
+		$GLOBALS['post'] = get_post( self::factory()->post->create( array( 'post_content' => 'no widget here' ) ) );
+		do_action( 'wp_enqueue_scripts' );
+		$this->assertTrue( wp_script_is( self::HANDLE, 'enqueued' ) );
 	}
 
 	public function test_the_enqueued_urls_point_at_files_the_build_emits(): void {
