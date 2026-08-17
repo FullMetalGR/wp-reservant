@@ -25,12 +25,22 @@ interface ServicePickerProps {
  * currency replace any hardcoded 100.
  */
 function formatPrice( minor: number, currency: string ): string {
-	const formatter = new Intl.NumberFormat( undefined, { style: 'currency', currency } );
-	// Present at runtime whenever no significant-digits options are set (ECMA-402 resolvedOptions);
-	// TypeScript types it optional to cover the significant-digits case, so the `?? 2` is only for
-	// the compiler, falling back to ISO 4217's most common minor-unit scale.
-	const digits = formatter.resolvedOptions().maximumFractionDigits ?? 2;
-	return formatter.format( minor / 10 ** digits );
+	try {
+		const formatter = new Intl.NumberFormat( undefined, { style: 'currency', currency } );
+		// Present at runtime whenever no significant-digits options are set (ECMA-402
+		// resolvedOptions); TypeScript types it optional to cover the significant-digits case, so
+		// the `?? 2` is only for the compiler, falling back to ISO 4217's most common minor-unit
+		// scale.
+		const digits = formatter.resolvedOptions().maximumFractionDigits ?? 2;
+		return formatter.format( minor / 10 ** digits );
+	} catch {
+		// A currency `Intl` refuses - unreachable through the admin path, which enforces
+		// /^[A-Z]{3}$/, but reachable by direct SQL - must not throw: no error boundary wraps the
+		// widget yet (Task 16), so a RangeError here would blank the whole thing. Only in this
+		// fallback is a fixed scale defensible: with no formatter there are no resolved fraction
+		// digits to derive, so ISO 4217's most common 2-decimal scale is all that is left.
+		return `${ ( minor / 100 ).toFixed( 2 ) } ${ currency }`;
+	}
 }
 
 export function ServicePicker( { value, onChange }: ServicePickerProps ): JSX.Element {
@@ -44,7 +54,11 @@ export function ServicePicker( { value, onChange }: ServicePickerProps ): JSX.El
 		);
 	}
 
-	if ( error ) {
+	// Destructive only when there is nothing better to show. React Query keeps `data` intact
+	// through a background refetch failure (its error reducer spreads the previous state), and
+	// `useServices()` refetches on every window focus - so a transient blip mid-choice must
+	// degrade to the notice below, never wipe the list the visitor is using.
+	if ( error && undefined === data ) {
 		return (
 			<p className="reservant-service-picker__status" role="alert">
 				{ errorMessage( error ) }
@@ -53,33 +67,40 @@ export function ServicePicker( { value, onChange }: ServicePickerProps ): JSX.El
 	}
 
 	return (
-		<ul className="reservant-service-picker">
-			{ ( data ?? [] ).map( ( service ) => (
-				<li key={ service.id } className="reservant-service-picker__item">
-					<button
-						type="button"
-						className={
-							value === service.id
-								? 'reservant-service-picker__choice reservant-service-picker__choice--selected'
-								: 'reservant-service-picker__choice'
-						}
-						aria-pressed={ value === service.id }
-						onClick={ () => onChange( service.id ) }
-					>
-						<span className="reservant-service-picker__name">{ service.name }</span>
-						<span className="reservant-service-picker__duration">
-							{ sprintf(
-								/* translators: %d: duration in minutes. */
-								__( '%d min', 'reservant' ),
-								service.duration_min
-							) }
-						</span>
-						<span className="reservant-service-picker__price">
-							{ formatPrice( service.price_minor, service.currency ) }
-						</span>
-					</button>
-				</li>
-			) ) }
-		</ul>
+		<>
+			{ null !== error && (
+				<p className="reservant-service-picker__notice" role="status">
+					{ __( 'The service list could not be refreshed and may be out of date.', 'reservant' ) }
+				</p>
+			) }
+			<ul className="reservant-service-picker">
+				{ ( data ?? [] ).map( ( service ) => (
+					<li key={ service.id } className="reservant-service-picker__item">
+						<button
+							type="button"
+							className={
+								value === service.id
+									? 'reservant-service-picker__choice reservant-service-picker__choice--selected'
+									: 'reservant-service-picker__choice'
+							}
+							aria-pressed={ value === service.id }
+							onClick={ () => onChange( service.id ) }
+						>
+							<span className="reservant-service-picker__name">{ service.name }</span>
+							<span className="reservant-service-picker__duration">
+								{ sprintf(
+									/* translators: %d: duration in minutes. */
+									__( '%d min', 'reservant' ),
+									service.duration_min
+								) }
+							</span>
+							<span className="reservant-service-picker__price">
+								{ formatPrice( service.price_minor, service.currency ) }
+							</span>
+						</button>
+					</li>
+				) ) }
+			</ul>
+		</>
 	);
 }
