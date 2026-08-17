@@ -6,19 +6,25 @@ namespace Reservant;
 final class Plugin {
 
 	/**
-	 * The rewrite GENERATION this build of the plugin registers. Bump it whenever any
-	 * `add_rewrite_rule()` / `add_rewrite_tag()` this plugin makes changes (today they all live in
-	 * `Frontend\ManageRoute::addRewrite()`), and for nothing else.
+	 * The marker that arms maybeFlushRewrites(): the exact rewrite registration this build
+	 * ships - `Frontend\ManageRoute::RULE_PATTERN` and `::RULE_REDIRECT`, joined verbatim -
+	 * stored into `reservant_rewrite_version` once a flush has run. A stored copy that differs
+	 * means the stored `rewrite_rules` table may predate the rule this build registers, so the
+	 * next request re-flushes. DERIVED, NEVER HAND-TYPED: a hand-bumped counter has to be
+	 * remembered, and the 0.3.0 manage-route release shipped exactly that forgetting (new
+	 * rewrite, no bump of the version that then armed the flush, every magic link 404ing until
+	 * a manual permalink resave). A marker that IS the rule cannot be forgotten when the rule
+	 * changes, cannot fire spuriously on releases that change no rewrite, and makes a rollback
+	 * self-correcting - the older build's rule text differs too, so its flush re-arms the same
+	 * way. `ManageRouteTest::test_the_rewrite_marker_is_derived_from_the_rule_it_arms` pins the
+	 * derivation against what addRewrite() actually registers.
 	 *
-	 * Why its own marker and not `RESERVANT_VERSION`: a plugin UPDATE never fires the activation
-	 * hook, so carrying a changed rule set into the stored `rewrite_rules` option depends entirely
-	 * on `maybeFlushRewrites()` noticing a change - and gating that on the plugin version made the
-	 * flush hostage to someone remembering that an unrelated-looking version bump is what arms it
-	 * (the 0.3.0 manage-route release shipped exactly that miss: new rewrite, no bump, every magic
-	 * link 404ing until a manual permalink resave). A marker that exists only for rewrites cannot
-	 * be forgotten for any other reason, and cannot fire spuriously on releases that change none.
+	 * Why its own marker and not `RESERVANT_VERSION`: a plugin UPDATE never fires the
+	 * activation hook, so carrying a changed rule set into the stored `rewrite_rules` option
+	 * depends entirely on `maybeFlushRewrites()` noticing a change - and the plugin version
+	 * moves for reasons that have nothing to do with rewrites.
 	 */
-	public const REWRITE_VERSION = '1';
+	public const REWRITE_VERSION = Frontend\ManageRoute::RULE_PATTERN . '|' . Frontend\ManageRoute::RULE_REDIRECT;
 
 	private static ?Plugin $instance = null;
 
@@ -32,9 +38,13 @@ final class Plugin {
 		self::$instance->register();
 
 		// After register(): on the immediate branch below the flush snapshots whatever is on
-		// $wp_rewrite RIGHT NOW, so the booking route must already be registered. The deferred
-		// branch (every production request - boot() runs at plugins_loaded) does not care about
-		// this ordering, but the harness re-booting mid-request does.
+		// $wp_rewrite RIGHT NOW, so the booking route must already be registered. That holds
+		// only because ManageRoute::register() carries the symmetric immediate branch - past
+		// init it calls addRewrite() directly instead of hooking it; simplified back to an
+		// unconditional add_action('init', ...), the flush below would store a table WITHOUT
+		// the route and then advance the marker, a permanent wedge. The deferred branch (every
+		// production request - boot() runs at plugins_loaded) does not care about this
+		// ordering, but the harness re-booting mid-request does.
 		if ( did_action( 'wp_loaded' ) > 0 ) {
 			self::maybeFlushRewrites();
 		} else {

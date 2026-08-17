@@ -26,8 +26,9 @@ use Reservant\Rest\Input;
  * `plugins_loaded`, so `register()` never ran there) and `maybeFlushRewrites()`, which runs at
  * `wp_loaded` (after `init` has re-registered the rule) whenever `Plugin::REWRITE_VERSION` no
  * longer matches its stored marker - the path a plugin UPDATE takes, since updates never fire
- * the activation hook. Changing the rule or the tag below therefore REQUIRES bumping
- * `Plugin::REWRITE_VERSION`, or no existing install ever stores the change.
+ * the activation hook. `Plugin::REWRITE_VERSION` is DERIVED from the `RULE_PATTERN` and
+ * `RULE_REDIRECT` constants below, so changing the registration changes the marker itself and
+ * the flush re-arms on existing installs with nothing for anyone to remember.
  *
  * The `query_vars` FILTER below duplicates what `add_rewrite_tag()` already does through
  * `$wp->add_query_var()` - on a live request the filter is redundant. It is kept deliberately:
@@ -62,6 +63,14 @@ final class ManageRoute {
 	private const UUID_PATTERN = '[0-9a-f-]{36}';
 
 	/**
+	 * What addRewrite() registers, as constants rather than inline literals because
+	 * `Plugin::REWRITE_VERSION` - the marker that re-arms the stored-rules flush on existing
+	 * installs - is derived from them. See addRewrite().
+	 */
+	public const RULE_PATTERN  = '^booking/(' . self::UUID_PATTERN . ')/?$';
+	public const RULE_REDIRECT = 'index.php?' . self::QUERY_VAR . '=$matches[1]';
+
+	/**
 	 * Unlike Shortcode and Block, the no-argument fallback here wires Assets in: this page
 	 * matches no post, so content detection can never see it and the renderer's `force()` is the
 	 * ONLY channel through which the bundle loads - a bare `new MountPoint()` would render a
@@ -72,10 +81,19 @@ final class ManageRoute {
 	 * the default (`exit`), tests inject a thrower so the `template_redirect` wiring can be
 	 * driven end-to-end without killing the PHPUnit process. `exit` cannot be caught or stubbed
 	 * any other way.
+	 *
+	 * `$nocache` is how `render()` sends its cache-forbidding headers - production uses the
+	 * default, core's `nocache_headers()` verbatim, so the emission can never drift from
+	 * core's. Injectable for the same reason as `$terminator`: under the CLI SAPI a PHPUnit
+	 * process has always already "sent" headers (the progress output), so core's function
+	 * early-returns without firing even its `nocache_headers` filter and leaves no trace a
+	 * test could pin - only a spy standing in for the whole call can go red when the call is
+	 * deleted.
 	 */
 	public function __construct(
 		private readonly ?MountPoint $renderer = null,
-		private readonly ?\Closure $terminator = null
+		private readonly ?\Closure $terminator = null,
+		private readonly ?\Closure $nocache = null
 	) {}
 
 	public function register(): void {
@@ -94,15 +112,16 @@ final class ManageRoute {
 
 	/**
 	 * Registers the rewrite rule and its query var on the in-memory `$wp_rewrite`/`$wp`. Never
-	 * flushes - see the class docblock for the two places that do. Any change to the rule or the
-	 * tag MUST bump `Plugin::REWRITE_VERSION`, or existing installs never store it.
+	 * flushes - see the class docblock for the two places that do. Everything registered here
+	 * must flow through `RULE_PATTERN` / `RULE_REDIRECT` (the tag's two inputs, `QUERY_VAR` and
+	 * `UUID_PATTERN`, are those constants' own inputs): `Plugin::REWRITE_VERSION` is derived
+	 * from them, and that derivation is what carries a changed registration into the stored
+	 * rules of existing installs. A literal registered past the constants would ship without
+	 * ever being stored -
+	 * `ManageRouteTest::test_the_rewrite_marker_is_derived_from_the_rule_it_arms` pins this.
 	 */
 	public function addRewrite(): void {
-		add_rewrite_rule(
-			'^booking/(' . self::UUID_PATTERN . ')/?$',
-			'index.php?' . self::QUERY_VAR . '=$matches[1]',
-			'top'
-		);
+		add_rewrite_rule( self::RULE_PATTERN, self::RULE_REDIRECT, 'top' );
 		add_rewrite_tag( '%' . self::QUERY_VAR . '%', '(' . self::UUID_PATTERN . ')' );
 	}
 
@@ -199,36 +218,41 @@ final class ManageRoute {
 
 	/**
 	 * Whether the active theme itself ships a header.php - the condition under which
-	 * get_header() produces the theme's real page. Checked with file_exists() against the theme
-	 * directories, child first, NOT with locate_template(): its fallback chain ends in
-	 * wp-includes/theme-compat/header.php, which exists on every install, so it "finds" a
-	 * header for every theme ever and the check would never say no.
+	 * get_header() produces the theme's real page. Answered by running core's own lookup and
+	 * rejecting only its terminal fallback: locate_template()'s chain ends in
+	 * wp-includes/theme-compat/header.php, which exists on every install, so its bare return
+	 * value "finds" a header for every theme ever and could never say no - the compat hit had
+	 * to be excluded, not the lookup abandoned. Asking anything OTHER than locate_template()
+	 * can disagree with the get_header() call in render() that this predicate predicts:
+	 * get_header() reads the $wp_stylesheet_path/$wp_template_path globals, which core
+	 * snapshots only at load time and inside switch_theme(), while
+	 * get_stylesheet_directory()/get_template_directory() recompute on every call through the
+	 * stylesheet_directory-family filters - so a filter registered after the snapshot (a
+	 * theme's functions.php, after_setup_theme, init) or a switch_to_blog() still open at
+	 * template_redirect makes a file_exists() predicate describe a different theme than
+	 * get_header() will read, and in the predicate-true direction that ships the deprecated
+	 * kubrick relic to a customer. Same globals, same is_child_theme() gate, same branch order
+	 * as the call it predicts, by construction - and immune to any future change in core's
+	 * search order. ($load stays at its default false: core loads nothing and fires nothing on
+	 * that path.)
 	 */
 	private function themeProvidesHeader(): bool {
-		return file_exists( get_stylesheet_directory() . '/header.php' )
-			|| file_exists( get_template_directory() . '/header.php' );
+		$located = locate_template( array( 'header.php' ) );
+		// The defined() guard is the Plugin::version() idiom: WPINC is a core runtime constant
+		// (unconditionally 'wp-includes', wp-settings.php defines it before any plugin loads),
+		// unknown only to static analysis of src/ in isolation.
+		$compat = ABSPATH . ( defined( 'WPINC' ) ? WPINC : 'wp-includes' ) . '/theme-compat/';
+		return '' !== $located && ! str_starts_with( $located, $compat );
 	}
 
 	/**
-	 * Core's `nocache_headers()` body with the `headers_sent()` guard applied AFTER the filter
-	 * instead of before everything. Same emission on every real request (at the top of render()
-	 * nothing has been output, so the guard never triggers in production), but the
-	 * `nocache_headers` filter - the API a site's cache policy hooks, and the only
-	 * CLI-observable trace of this call - now fires unconditionally. Calling core's function
-	 * directly would make this line untestable: a PHPUnit CLI process has always already
-	 * "sent" headers (the progress output), so core's early return would swallow the entire
-	 * call, filter included, and no test could go red when the call is deleted.
+	 * Sends core's nocache headers - Expires, Cache-Control (no-cache/no-store/private) and
+	 * the Last-Modified removal, all of them core's own semantics through core's own function,
+	 * so the emission cannot drift from core's. The call is injectable (constructor, see
+	 * `$nocache`) for testability only, exactly like `$terminator` one screen up.
 	 */
 	private function sendNocacheHeaders(): void {
-		$headers = wp_get_nocache_headers();
-		unset( $headers['Last-Modified'] );
-		if ( headers_sent() ) {
-			return;
-		}
-		header_remove( 'Last-Modified' );
-		foreach ( $headers as $name => $value ) {
-			header( "{$name}: {$value}" );
-		}
+		( $this->nocache ?? 'nocache_headers' )();
 	}
 
 	/**

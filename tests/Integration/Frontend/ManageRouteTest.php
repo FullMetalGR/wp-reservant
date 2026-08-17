@@ -208,6 +208,30 @@ final class ManageRouteTest extends ReservantTestCase {
 		$this->assertSame( Plugin::REWRITE_VERSION, get_option( 'reservant_rewrite_version' ) );
 	}
 
+	public function test_the_rewrite_marker_is_derived_from_the_rule_it_arms(): void {
+		// The 0.3.0 defect had a HUMAN half the tests above cannot reach: a hand-bumped marker
+		// constant must be REMEMBERED whenever the rule changes, and this project has already
+		// shipped the forgetting once. The marker is therefore DERIVED - it IS the registered
+		// pattern and redirect - so any change to what addRewrite() registers changes the
+		// marker by construction, maybeFlushRewrites() re-arms with nobody remembering
+		// anything, and a rollback re-arms the same way (the older build's rule text differs).
+		// Pinned against the ACTUAL registration on a fresh $wp_rewrite, not recomputed from
+		// the constants the marker is built from - that would be circular - so rewiring
+		// addRewrite() past those constants goes red here.
+		$GLOBALS['wp_rewrite'] = new \WP_Rewrite();
+
+		( new ManageRoute() )->addRewrite();
+		$registered = (array) $GLOBALS['wp_rewrite']->extra_rules_top;
+
+		$this->assertCount( 1, $registered, 'addRewrite() registers exactly one rule - a second would have to join the marker derivation' );
+		$pattern = (string) array_key_first( $registered );
+		$this->assertSame(
+			$pattern . '|' . $registered[ $pattern ],
+			Plugin::REWRITE_VERSION,
+			'the marker must BE the registered rule - derived, never hand-typed, so changing the rule re-arms the flush on its own'
+		);
+	}
+
 	public function test_a_block_theme_still_gets_a_full_page_with_head_and_assets(): void {
 		// On a theme without header.php - every bundled block theme, including the defaults a
 		// fresh site activates - get_header() does not print the theme's design: it falls back
@@ -273,37 +297,76 @@ final class ManageRouteTest extends ReservantTestCase {
 		$this->assertStringNotContainsString( '<!DOCTYPE html>', $body );
 	}
 
+	public function test_a_header_core_finds_only_in_theme_compat_counts_as_no_header(): void {
+		// The shell predicate must ask THE SAME oracle the get_header() call it predicts will
+		// ask. locate_template() reads the $wp_stylesheet_path/$wp_template_path globals, which
+		// core snapshots in exactly two places (wp-settings.php, before the theme's functions.php
+		// loads, and inside switch_theme()); get_stylesheet_directory() recomputes on every call
+		// THROUGH the stylesheet_directory filter. So a filter registered after the snapshot -
+		// the theme's functions.php, after_setup_theme, init; white-label and multi-tenant
+		// plugins do exactly this - moves what a file_exists() predicate sees and NOT what
+		// get_header() reads. Reproduce that divergence: the active theme (twentytwentyfive)
+		// ships no header.php, so core resolves header.php ONLY to wp-includes/theme-compat/,
+		// while the filter points the recomputed directory at the stub theme, which HAS one.
+		// A file_exists() predicate answers "the theme provides a header" and get_header() then
+		// loads the deprecated kubrick relic to a customer; the page must print its own shell.
+		$stubDirectory = get_stylesheet_directory();
+		$this->assertFileExists( $stubDirectory . '/header.php', 'the stub theme must have a header.php for the divergence to exist' );
+		switch_theme( 'twentytwentyfive' );
+		$filter = static function () use ( $stubDirectory ): string {
+			return $stubDirectory;
+		};
+		add_filter( 'stylesheet_directory', $filter );
+
+		// The divergence, pinned before rendering: the recomputed directory has a header.php...
+		$this->assertFileExists( get_stylesheet_directory() . '/header.php' );
+		// ...while core's own lookup - the one get_header() runs - finds only the compat relic.
+		$this->assertStringStartsWith( ABSPATH . WPINC . '/theme-compat/', locate_template( array( 'header.php' ) ) );
+
+		list( $status, $body ) = $this->renderManagePage( self::UUID, self::WRONG_TOKEN );
+		remove_filter( 'stylesheet_directory', $filter );
+
+		$this->assertSame( 200, $status );
+		$this->assertStringContainsString( 'data-mode="manage"', $body );
+		$this->assertStringContainsString( '<!DOCTYPE html>', $body, 'the self shell must render - never silence, never the relic' );
+		// Not the kubrick-era theme-compat header (its banner div, its XFN profile link):
+		// shipping that relic plus its _deprecated_file() notice is the exact bug the
+		// predicate exists to prevent.
+		$this->assertStringNotContainsString( 'id="header"', $body );
+		$this->assertStringNotContainsString( 'gmpg.org/xfn/11', $body );
+	}
+
 	public function test_the_page_whose_url_is_the_credential_forbids_caching(): void {
 		// The magic-link token rides in this page's URL, so a cached copy of the response IS a
 		// leaked credential - and core sends no cache headers here on its own
 		// (WP::send_headers() emits them only for logged-in users, feeds, errors and
 		// password-protected posts). Sharpest under plain permalinks: the page is served at `/`
 		// distinguished only by query args, so a CDN rule that ignores unknown query args would
-		// cache the manage page, token baked in, as the site's home page. The probe hooks the
-		// nocache_headers filter inside wp_get_nocache_headers() - the one CLI-observable trace
-		// of the header emission (see ManageRoute::sendNocacheHeaders() on why core's own
-		// nocache_headers() would be invisible here) - and records how much body had already
-		// been printed when it fired.
+		// cache the manage page, token baked in, as the site's home page. The probe is an
+		// injected spy standing in for core's nocache_headers() - the production default, see
+		// the constructor - because under the CLI SAPI PHPUnit's banner has already "sent"
+		// headers, so core's function early-returns leaving no observable trace and deleting
+		// the call could never go red. WHAT the headers say is core's by construction (the
+		// default calls nocache_headers() verbatim); this test pins THAT they are asked for,
+		// exactly once, and before any body byte.
 		$this->go_to( home_url( '/?reservant_booking=' . self::UUID . '&token=' . self::WRONG_TOKEN ) );
 
-		$sent        = null;
+		$calls       = 0;
 		$bodyAlready = -1;
-		$probe       = static function ( array $headers ) use ( &$sent, &$bodyAlready ): array {
-			$sent        = $headers;
-			$bodyAlready = (int) ob_get_length();
-			return $headers;
-		};
-		add_filter( 'nocache_headers', $probe );
+		$route       = new ManageRoute(
+			null,
+			null,
+			static function () use ( &$calls, &$bodyAlready ): void {
+				++$calls;
+				$bodyAlready = (int) ob_get_length();
+			}
+		);
 
 		ob_start();
-		( new ManageRoute() )->render();
+		$route->render();
 		ob_end_clean();
-		remove_filter( 'nocache_headers', $probe );
 
-		$this->assertIsArray( $sent, 'render() must call nocache_headers() - nothing else will on this page' );
-		$this->assertArrayHasKey( 'Cache-Control', $sent );
-		$this->assertStringContainsString( 'no-cache', $sent['Cache-Control'] );
-		$this->assertStringContainsString( 'no-store', $sent['Cache-Control'] );
+		$this->assertSame( 1, $calls, 'render() must send the nocache headers exactly once - nothing else will on this page' );
 		$this->assertSame( 0, $bodyAlready, 'headers must be sent before the first body byte, or PHP has already flushed the status line without them' );
 	}
 
