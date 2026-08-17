@@ -1,5 +1,6 @@
 import { act } from '@testing-library/react';
 import { mountAll, mountWidget } from '../index';
+import type { WidgetBootstrap } from '../api/types';
 
 /**
  * `mountWidget` renders through a React 18 concurrent root, whose work is scheduled rather than
@@ -12,6 +13,27 @@ function mount( el: HTMLElement ): void {
 		mountWidget( el );
 	} );
 }
+
+/**
+ * Book mode mounts the real journey (Task 14), whose catalog query reads the bootstrap and calls
+ * `fetch` - so this suite, which is about MOUNTING and not the journey, provides both. The fetch
+ * never settles on purpose: every book-mode mount then rests on its stable first frame (the
+ * catalog loading state), no state ever updates outside `act()`, and no retry timers arm.
+ */
+beforeEach( () => {
+	const bootstrap: WidgetBootstrap = {
+		restRoot: '/wp-json/',
+		nonce: '',
+		currency: 'EUR',
+		timezone: 'Pacific/Kiritimati',
+		granularityMin: 5,
+		checkoutTtlMin: 15,
+	};
+	window.reservantWidget = bootstrap;
+	global.fetch = jest.fn(
+		() => new Promise< Response >( () => {} )
+	) as unknown as typeof fetch;
+} );
 
 it( 'renders into the element it is given', () => {
 	const el = document.createElement( 'div' );
@@ -125,6 +147,7 @@ it( 'mounts every widget node on the page', () => {
 
 	const mounted = document.querySelectorAll( '.reservant-widget__panel' );
 	expect( mounted ).toHaveLength( 2 );
-	expect( mounted[ 0 ]?.textContent ).toBe( 'Loading booking options...' );
+	// Book mode mounts the real journey (Task 14): its first frame is the catalog loading state.
+	expect( mounted[ 0 ]?.textContent ).toBe( 'Loading services...' );
 	expect( mounted[ 1 ]?.textContent ).toBe( 'Loading your booking...' );
 } );

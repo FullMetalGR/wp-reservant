@@ -6,7 +6,9 @@
  * enqueue `build/style-widget.css`, and `npm run size` asserts that file exists after every build.
  *
  * This bundle is served to visitors, so its dependency list is deliberately tiny: `wp-element`,
- * `wp-i18n` and the React JSX runtime only. `@wordpress/components` may NOT be imported from
+ * `wp-i18n`, `react` (already a dependency of core's wp-element, so it costs nothing extra) and
+ * the React JSX runtime. `@tanstack/react-query` is a real BUNDLED dependency, counted by the
+ * byte budget. `@wordpress/components` may NOT be imported from
  * anywhere reachable here - it alone is ~800 KB of core script plus ~97 KB of CSS handed to every
  * visitor. Bundled bytes cannot catch that: every `@wordpress/*` package is a webpack external,
  * so importing it adds a handle to `build/widget.asset.php`, not weight to `build/widget.js`.
@@ -22,16 +24,19 @@
  */
 import { createRoot } from '@wordpress/element';
 import { __ } from '@wordpress/i18n';
+import { BookingFlow } from './BookingFlow';
 import './style.css';
 
 type WidgetMode = 'book' | 'manage';
 
 /**
- * Deliberately not exported: nothing consumes it yet, and an unconsumed export would be invisible
- * dead code. The first task that needs the shape from outside (the booking flow or the manage
- * view) adds the `export` keyword alongside its import.
+ * Exported because `BookingFlow` (Task 14) consumes it. Under the current fallow config (8e519d1
+ * dropped this file from `.fallowrc.json`'s entries) an export with NO consumer is an ERROR-level
+ * `fallow/unused-export` that fails the build - so this export exists exactly as long as a real
+ * importer does, and a test file counts as a real consumer (the adjudicated precedent on this
+ * branch). The manage view (Task 15) is expected to be the next importer.
  */
-interface WidgetConfig {
+export interface WidgetConfig {
 	/** Which journey the mount node asked for. Anything unrecognised books. */
 	mode: WidgetMode;
 	/** Preselected service, or null when the visitor picks one. */
@@ -75,23 +80,25 @@ function readConfig( el: HTMLElement ): WidgetConfig {
 }
 
 /**
- * The scaffold body. It renders the widget shell and the state the real journey starts in; the
- * booking flow and the manage view replace it (plan Tasks 14 and 15), which is why the mode is
- * already read and branched on here rather than later.
+ * The widget body. Book mode mounts the real journey (`BookingFlow`, plan Task 14); manage mode
+ * still renders the scaffold state the manage view (plan Task 15) will replace.
  *
- * The live region sits on the loading message itself, NOT on `.reservant-widget__panel`: that
- * class is the widget's generic visual panel, and a polite live region on it would make screen
- * readers re-announce the entire panel on every keystroke once the real journey renders a form
- * inside it. The role dies with the loading state, so replacing this body cannot inherit it.
+ * The manage live region sits on the loading message itself, NOT on `.reservant-widget__panel`:
+ * that class is the widget's generic visual panel, and a polite live region on it would make
+ * screen readers re-announce the entire panel on every keystroke once a journey renders a form
+ * inside it - which the book branch now does. The role dies with the loading state, so the manage
+ * view cannot inherit it.
  */
 function Widget( { config }: { config: WidgetConfig } ): JSX.Element {
 	return (
 		<div className="reservant-widget__panel">
-			<span role="status" aria-live="polite">
-				{ 'manage' === config.mode
-					? __( 'Loading your booking...', 'reservant' )
-					: __( 'Loading booking options...', 'reservant' ) }
-			</span>
+			{ 'manage' === config.mode ? (
+				<span role="status" aria-live="polite">
+					{ __( 'Loading your booking...', 'reservant' ) }
+				</span>
+			) : (
+				<BookingFlow config={ config } />
+			) }
 		</div>
 	);
 }

@@ -23,8 +23,11 @@ interface ServicePickerProps {
  * state a price the row never held. The divisor comes from the currency too: minor units scale
  * per currency (EUR hundredths, JPY ones, BHD thousandths), so `Intl`'s fraction digits for the
  * currency replace any hardcoded 100.
+ *
+ * Exported for the review step (Task 14), which formats the held booking's `total_minor` with
+ * these exact rules - the types module's "first consumer adds the export" pattern.
  */
-function formatPrice( minor: number, currency: string ): string {
+export function formatPrice( minor: number, currency: string ): string {
 	try {
 		const formatter = new Intl.NumberFormat( undefined, { style: 'currency', currency } );
 		// Present at runtime whenever no significant-digits options are set (ECMA-402
