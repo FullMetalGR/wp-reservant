@@ -59,4 +59,45 @@ describe( 'Outcome', () => {
 		render( <Outcome booking={ booking( 'awaiting_approval', false ) } /> );
 		expect( screen.queryByText( /confirmed/i ) ).not.toBeInTheDocument();
 	} );
+
+	it( 'mounts its region empty - the sentence arrives only once the region exists', () => {
+		// The deferral itself, pinned on DOM-write ORDER (the same technique as the flow
+		// suite's conflict-region test): rendering the sentence on the mounting commit would
+		// leave a single insertion record and no later text write - a region born pre-filled,
+		// announcing nothing. render() cannot observe this (effects flush inside act, so the
+		// end state always carries the text); the MutationObserver sees the raw writes.
+		// Records are collected in the callback AND drained with takeRecords(): anything that
+		// yields to microtasks between observe() and the read hands pending records to the
+		// callback, and takeRecords() alone would then answer an empty list.
+		const records: MutationRecord[] = [];
+		const observer = new MutationObserver( ( batch ) => records.push( ...batch ) );
+		observer.observe( document.body, {
+			childList: true,
+			subtree: true,
+			characterData: true,
+		} );
+		render( <Outcome booking={ booking( 'confirmed', true ) } /> );
+		records.push( ...observer.takeRecords() );
+		observer.disconnect();
+
+		const region = screen.getByRole( 'status' );
+		expect( region ).toHaveTextContent( 'Your booking is confirmed.' );
+		const insertedAt = records.findIndex( ( record ) =>
+			Array.from( record.addedNodes ).some(
+				( node ) =>
+					node === region || ( node instanceof Element && node.contains( region ) )
+			)
+		);
+		const textAt = records.findIndex(
+			( record ) =>
+				( 'characterData' === record.type && region.contains( record.target ) ) ||
+				( 'childList' === record.type &&
+					record.target === region &&
+					Array.from( record.addedNodes ).some(
+						( node ) => Node.TEXT_NODE === node.nodeType
+					) )
+		);
+		expect( insertedAt ).toBeGreaterThanOrEqual( 0 );
+		expect( textAt ).toBeGreaterThan( insertedAt );
+	} );
 } );

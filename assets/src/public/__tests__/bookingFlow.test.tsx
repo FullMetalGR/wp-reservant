@@ -1005,4 +1005,59 @@ describe( 'BookingFlow', () => {
 		expect( screen.getByText( totalLabel, EXACT_TEXT ) ).toBeInTheDocument();
 		expect( screen.getByText( 'Ada (ada@example.com)' ) ).toBeInTheDocument();
 	} );
+
+	it( 'mounts the conflict region empty - the sentence arrives only once the region exists', async () => {
+		// The live-region discipline, pinned on DOM-write ORDER: render() cannot see it
+		// (Testing Library flushes effects inside act, so by assertion time the region always
+		// holds its text), so a MutationObserver watches the raw writes. The record sequence
+		// must show the role="status" node entering the document first and the sentence landing
+		// in it in a LATER write: a region born pre-filled produces one insertion record, no
+		// text record at all, and no announcement for a screen reader.
+		installFetch( {
+			availability: () => APPOINTMENT_AVAILABILITY,
+			hold: () => conflictResponse(),
+		} );
+		renderFlow();
+		await pickTodaySlot();
+
+		// Records are COLLECTED IN THE CALLBACK, not only via takeRecords(): the awaits below
+		// run microtasks, and jsdom delivers every pending record to the callback then -
+		// takeRecords() after the fact answers an empty list (verified the hard way).
+		const records: MutationRecord[] = [];
+		const observer = new MutationObserver( ( batch ) => records.push( ...batch ) );
+		observer.observe( document.body, {
+			childList: true,
+			subtree: true,
+			characterData: true,
+		} );
+		await submitDetails();
+		const region = await screen.findByText(
+			'That time was just taken. Please pick another.'
+		);
+		records.push( ...observer.takeRecords() );
+		observer.disconnect();
+
+		// findByText answers the element holding the sentence - the polite region itself. Its
+		// insertion MUST be inside the observation window: the when step mounts its own
+		// StepNotice, so no region survives the step change to carry the announcement - which
+		// is exactly why the mount-empty deferral has to exist.
+		expect( region ).toHaveAttribute( 'role', 'status' );
+		const insertedAt = records.findIndex( ( record ) =>
+			Array.from( record.addedNodes ).some(
+				( node ) =>
+					node === region || ( node instanceof Element && node.contains( region ) )
+			)
+		);
+		const textAt = records.findIndex(
+			( record ) =>
+				( 'characterData' === record.type && region.contains( record.target ) ) ||
+				( 'childList' === record.type &&
+					record.target === region &&
+					Array.from( record.addedNodes ).some(
+						( node ) => Node.TEXT_NODE === node.nodeType
+					) )
+		);
+		expect( insertedAt ).toBeGreaterThanOrEqual( 0 );
+		expect( textAt ).toBeGreaterThan( insertedAt );
+	} );
 } );
