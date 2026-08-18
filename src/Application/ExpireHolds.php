@@ -7,6 +7,7 @@ use Reservant\Application\Dto\BookingSnapshot;
 use Reservant\Domain\Enum\BookingStatus;
 use Reservant\Infrastructure\Db\AuditLog;
 use Reservant\Infrastructure\Db\BookingRepository;
+use Reservant\Infrastructure\Db\LockKey;
 use Reservant\Infrastructure\Db\LockManager;
 use Reservant\Infrastructure\Db\ResourceDayRepository;
 use Reservant\Infrastructure\Db\TransactionRunner;
@@ -126,7 +127,7 @@ final class ExpireHolds {
 		}
 		/** @var list<array<string, mixed>> $items */
 		$items = $booking['items'];
-		$keys  = HoldBooking::lockKeysForItems( $items );
+		$keys  = LockKey::forItems( $items );
 		$this->resourceDays->ensure( $keys );
 
 		$snapshot = $this->txn->run( fn (): ?array => $this->expire( $keys, $uuid ) );

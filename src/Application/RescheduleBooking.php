@@ -236,7 +236,7 @@ final class RescheduleBooking {
 	 * The union of the keys guarding the slots being freed and the slots being taken, deduplicated and
 	 * globally ordered by `LockKey::sorted()`.
 	 *
-	 * Both halves come from `HoldBooking::lockKeysForItems()`, so a reschedule locks precisely what a
+	 * Both halves come from `LockKey::forItems()`, so a reschedule locks precisely what a
 	 * hold of either placement would have locked - never a set derived some other way.
 	 *
 	 * @param array<string, mixed>                                                 $booking
@@ -246,7 +246,7 @@ final class RescheduleBooking {
 	private static function union( array $booking, array $plan ): array {
 		/** @var list<array<string, mixed>> $items */
 		$items = $booking['items'];
-		return LockKey::sorted( array_merge( HoldBooking::lockKeysForItems( $items ), HoldBooking::lockKeysForItems( $plan['items'] ) ) );
+		return LockKey::sorted( array_merge( LockKey::forItems( $items ), LockKey::forItems( $plan['items'] ) ) );
 	}
 
 	/**

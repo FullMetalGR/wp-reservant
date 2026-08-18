@@ -320,32 +320,8 @@ final class HoldBooking {
 	}
 
 	/**
-	 * Lock keys for an already-planned or persisted set of items: every UTC day the block range
-	 * touches, per resource, plus the occurrence row for event items.
-	 *
-	 * @param list<array<string, mixed>> $items
-	 * @return list<LockKey>
-	 */
-	public static function lockKeysForItems( array $items ): array {
-		$keys = array();
-		foreach ( $items as $item ) {
-			if ( null !== ( $item['occurrence_id'] ?? null ) ) {
-				$keys[] = LockKey::occurrence( (int) $item['occurrence_id'] );
-				continue;
-			}
-			if ( null === ( $item['resource_id'] ?? null ) ) {
-				continue;
-			}
-			foreach ( self::daysTouched( (string) $item['block_start_utc'], (string) $item['block_end_utc'] ) as $day ) {
-				$keys[] = LockKey::resourceDay( (int) $item['resource_id'], $day );
-			}
-		}
-		return LockKey::sorted( $keys );
-	}
-
-	/**
 	 * The geometry of ONE chain segment on the granularity grid: the customer-facing span, the
-	 * buffer-widened block range that actually contends (and that `lockKeysForItems()` reads), the
+	 * buffer-widened block range that actually contends (and that `LockKey::forItems()` reads), the
 	 * processing tail, and how far the chain advances before the next segment may start.
 	 *
 	 * Extracted verbatim from `planAppointment()` so `RescheduleBooking` can place a moved chain on
@@ -492,7 +468,7 @@ final class HoldBooking {
 		$open = array();
 		foreach ( $items as $index => $item ) {
 			foreach ( $candidates[ $index ] as $resourceId ) {
-				foreach ( self::daysTouched( (string) $item['start_utc'], (string) $item['end_utc'] ) as $day ) {
+				foreach ( LockKey::daysTouched( (string) $item['start_utc'], (string) $item['end_utc'] ) as $day ) {
 					$key = $resourceId . '|' . $day;
 					if ( ! isset( $open[ $key ] ) ) {
 						$open[ $key ] = $expander->openIntervalsForUtcDay(
@@ -527,7 +503,7 @@ final class HoldBooking {
 		}
 
 		$intervals = array();
-		foreach ( self::daysTouched( (string) $item['start_utc'], (string) $item['end_utc'] ) as $day ) {
+		foreach ( LockKey::daysTouched( (string) $item['start_utc'], (string) $item['end_utc'] ) as $day ) {
 			foreach ( $open[ $resourceId . '|' . $day ] ?? array() as $interval ) {
 				$intervals[] = $interval;
 			}
@@ -726,7 +702,7 @@ final class HoldBooking {
 			$candidates[] = $segmentCandidates;
 
 			foreach ( $segmentCandidates as $resourceId ) {
-				foreach ( self::daysTouched( $geometry['block_start_utc'], $geometry['block_end_utc'] ) as $day ) {
+				foreach ( LockKey::daysTouched( $geometry['block_start_utc'], $geometry['block_end_utc'] ) as $day ) {
 					$keys[] = LockKey::resourceDay( $resourceId, $day );
 				}
 			}
@@ -855,20 +831,6 @@ final class HoldBooking {
 			return PaymentMode::Onsite->value;
 		}
 		return PaymentMode::Free->value;
-	}
-
-	/** @return list<string> Y-m-d of every UTC day the half-open range touches. */
-	private static function daysTouched( string $blockStartUtc, string $blockEndUtc ): array {
-		$utc   = new \DateTimeZone( 'UTC' );
-		$start = new \DateTimeImmutable( $blockStartUtc, $utc );
-		$end   = new \DateTimeImmutable( $blockEndUtc, $utc );
-		$last  = max( $start, $end->modify( '-1 second' ) );
-
-		$days = array();
-		for ( $day = $start->setTime( 0, 0 ); $day <= $last; $day = $day->modify( '+1 day' ) ) {
-			$days[] = $day->format( 'Y-m-d' );
-		}
-		return $days;
 	}
 
 	private static function roundUp( int $minutes, int $granularity ): int {

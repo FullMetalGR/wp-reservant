@@ -7,6 +7,7 @@ use Reservant\Application\Dto\BookingSnapshot;
 use Reservant\Domain\Enum\BookingStatus;
 use Reservant\Infrastructure\Db\AuditLog;
 use Reservant\Infrastructure\Db\BookingRepository;
+use Reservant\Infrastructure\Db\LockKey;
 use Reservant\Infrastructure\Db\LockManager;
 use Reservant\Infrastructure\Db\ResourceDayRepository;
 use Reservant\Infrastructure\Db\TransactionRunner;
@@ -108,7 +109,7 @@ final class ApproveBooking {
 
 		/** @var list<array<string, mixed>> $items */
 		$items = $booking['items'];
-		$keys  = HoldBooking::lockKeysForItems( $items );
+		$keys  = LockKey::forItems( $items );
 		// Mutex rows must exist before the transaction opens - SELECT ... FOR UPDATE cannot lock a
 		// row that is not there (AGENTS.md section 2.2).
 		$this->resourceDays->ensure( $keys );
