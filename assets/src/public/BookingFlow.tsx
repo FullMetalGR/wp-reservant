@@ -72,9 +72,18 @@
  */
 import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { __ } from '@wordpress/i18n';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { ApiError, errorMessage, parseUtc, siteNow, utcToSite } from '../shared';
+import { QueryClientProvider } from '@tanstack/react-query';
+import {
+	ApiError,
+	availabilityWindow,
+	errorMessage,
+	parseUtc,
+	siteNow,
+	utcToSite,
+	ymd,
+} from '../shared';
 import { fetchBooking, widgetBootstrap } from './api/client';
+import { newQueryClient } from './api/queryClient';
 import {
 	useAvailability,
 	useConfirm,
@@ -98,6 +107,8 @@ import { CustomerForm } from './components/CustomerForm';
 import type { CustomerDraft } from './components/CustomerForm';
 import { DateStrip } from './components/DateStrip';
 import { HoldCountdown } from './components/HoldCountdown';
+import { NoticeRegion, noticeOf } from './components/Notice';
+import type { Notice } from './components/Notice';
 import { OccurrencePicker } from './components/OccurrencePicker';
 import { Outcome } from './components/Outcome';
 import { ReviewStep } from './components/ReviewStep';
@@ -107,24 +118,6 @@ import { StaffPicker } from './components/StaffPicker';
 import type { WidgetConfig } from './index';
 
 type Step = 'service' | 'staff' | 'when' | 'details' | 'review' | 'done';
-
-/** One rendered notice: polite (`role="status"`) for a server-worded refusal, alert otherwise. */
-interface FlowNotice {
-	text: string;
-	alert: boolean;
-}
-
-/** How many days one availability request covers - the DateStrip's own strip length. */
-const WINDOW_DAYS = 14;
-
-function pad( n: number ): string {
-	return String( n ).padStart( 2, '0' );
-}
-
-/** The `Y-m-d` business date of a site-packed Date, read through the local getters that unpack it. */
-function ymd( day: Date ): string {
-	return `${ day.getFullYear() }-${ pad( day.getMonth() + 1 ) }-${ pad( day.getDate() ) }`;
-}
 
 function initialStep( config: WidgetConfig ): Step {
 	if ( null === config.serviceId ) {
@@ -176,18 +169,6 @@ function prevOf(
 		return 'when';
 	}
 	return null;
-}
-
-/**
- * A 4xx carries a sentence the server worded for the visitor (`data.detail`), a polite answer to
- * what they just did; anything else (network, 5xx) is a genuine failure with nothing better to
- * show, which is the one case the widget's live-region convention reserves `role="alert"` for.
- */
-function noticeOf( error: unknown ): FlowNotice {
-	return {
-		text: errorMessage( error ),
-		alert: ! ( error instanceof ApiError && error.status < 500 ),
-	};
 }
 
 /**
@@ -251,7 +232,7 @@ interface HoldActions {
 	onOutcome: ( booking: HeldBooking ) => void;
 	/** A 409: the server's own sentence; the availability refetch is the hook's, never repeated. */
 	onConflict: ( sentence: string ) => void;
-	onRefusal: ( notice: FlowNotice ) => void;
+	onRefusal: ( notice: Notice ) => void;
 }
 
 /** How a hold answer routes the journey - the branching lives here, the state changes in Flow. */
@@ -283,42 +264,13 @@ function holdCallbacks( actions: HoldActions ): {
  */
 function confirmCallbacks( actions: {
 	onDone: ( booking: Booking ) => void;
-	onRefusal: ( notice: FlowNotice, holdGone: boolean ) => void;
+	onRefusal: ( notice: Notice, holdGone: boolean ) => void;
 } ): { onSuccess: ( booking: Booking ) => void; onError: ( error: Error ) => void } {
 	return {
 		onSuccess: actions.onDone,
 		onError: ( error ) =>
 			actions.onRefusal( noticeOf( error ), error instanceof ApiError && 410 === error.status ),
 	};
-}
-
-/**
- * The always-mounted polite region plus a conditional alert (the ChainBuilder precedent: the
- * status region exists before its message so the announcement lands in a region that was already
- * there; an alert announces on appearance, so it may mount with its text).
- *
- * "Exists before its message" must hold on the MOUNTING render too: a step that mounts with a
- * notice already in hand (the 409 sentence arriving with the when step) would otherwise paint
- * the region pre-filled, and a region born with text announces nothing. The polite text is
- * therefore held back until one effect after mount; from then on, notices render immediately.
- */
-function StepNotice( { notice }: { notice: FlowNotice | null } ): JSX.Element {
-	const [ settled, setSettled ] = useState( false );
-	useEffect( () => {
-		setSettled( true );
-	}, [] );
-	return (
-		<>
-			<p className="reservant-flow__notice" role="status">
-				{ settled && null !== notice && ! notice.alert ? notice.text : '' }
-			</p>
-			{ null !== notice && notice.alert && (
-				<p className="reservant-flow__alert" role="alert">
-					{ notice.text }
-				</p>
-			) }
-		</>
-	);
 }
 
 /**
@@ -437,7 +389,7 @@ function StaffStep( {
 	if ( null !== error && undefined === catalog ) {
 		// Through noticeOf, like every refusal in the flow: a 4xx carries a worded answer and
 		// lands politely; only network/5xx earns the alert.
-		return <StepNotice notice={ noticeOf( error ) } />;
+		return <NoticeRegion classBase="reservant-flow" notice={ noticeOf( error ) } />;
 	}
 	return (
 		<>
@@ -536,8 +488,8 @@ function WhenStep( {
 			: null;
 	return (
 		<>
-			<StepNotice notice={ notice } />
-			<StepNotice notice={ staleNotice } />
+			<NoticeRegion classBase="reservant-flow" notice={ notice } />
+			<NoticeRegion classBase="reservant-flow" notice={ staleNotice } />
 			{ pending && (
 				<p className="reservant-flow__status" role="status">
 					{ __( 'Checking availability...', 'reservant' ) }
@@ -589,7 +541,7 @@ interface ReviewPanelProps {
 	confirmPending: boolean;
 	/** True while a refusal's booking re-read is in flight - the restart stays reachable. */
 	recovering: boolean;
-	notice: FlowNotice | null;
+	notice: Notice | null;
 	onExpire: () => void;
 	onConfirm: () => void;
 	onStartOver: () => void;
@@ -627,7 +579,7 @@ function ReviewPanel( {
 				onConfirm={ onConfirm }
 				confirmDisabled={ expired || confirmPending }
 			/>
-			<StepNotice notice={ notice } />
+			<NoticeRegion classBase="reservant-flow" notice={ notice } />
 			{ ( expired || null !== notice || recovering ) && (
 				<button
 					type="button"
@@ -720,8 +672,8 @@ function Flow( { config }: { config: WidgetConfig } ): JSX.Element {
 	const [ outcome, setOutcome ] = useState< Booking | null >( null );
 	const [ expired, setExpired ] = useState( false );
 	const [ conflictNotice, setConflictNotice ] = useState< string | null >( null );
-	const [ detailsNotice, setDetailsNotice ] = useState< FlowNotice | null >( null );
-	const [ reviewNotice, setReviewNotice ] = useState< FlowNotice | null >( null );
+	const [ detailsNotice, setDetailsNotice ] = useState< Notice | null >( null );
+	const [ reviewNotice, setReviewNotice ] = useState< Notice | null >( null );
 	/** True while a refused confirm's booking re-read is in flight - Confirm stays disabled. */
 	const [ recovering, setRecovering ] = useState( false );
 
@@ -745,15 +697,12 @@ function Flow( { config }: { config: WidgetConfig } ): JSX.Element {
 	const recoveryTicket = useRef( 0 );
 
 	// The window starts on the SITE's own today (`siteNow`, never `new Date()` - an evening
-	// visitor west of the salon is often a day behind it) and spans the strip's fourteen days,
-	// `to` exclusive. The hook stays subscribed across every step, so useCreateHold's 409
-	// invalidation refetches an ACTIVE query the moment a conflict answers - the second GET the
-	// suite observes is that path working end to end.
+	// visitor west of the salon is often a day behind it) and spans the strip's fourteen days
+	// (`availabilityWindow`, `to` exclusive). The hook stays subscribed across every step, so
+	// useCreateHold's 409 invalidation refetches an ACTIVE query the moment a conflict answers -
+	// the second GET the suite observes is that path working end to end.
 	const today = siteNow( timezone );
-	const fromDay = ymd( today );
-	const toDay = ymd(
-		new Date( today.getFullYear(), today.getMonth(), today.getDate() + WINDOW_DAYS )
-	);
+	const { from: fromDay, to: toDay } = availabilityWindow( today );
 	const availability = useAvailability( toChainItems( segments ), fromDay, toDay );
 
 	const expiresAt = useMemo( () => expiryOf( held ), [ held ] );
@@ -848,7 +797,7 @@ function Flow( { config }: { config: WidgetConfig } ): JSX.Element {
 	 */
 	const recoverRefusedConfirm = async (
 		credentials: ManageCredentials,
-		notice: FlowNotice,
+		notice: Notice,
 		holdGone: boolean
 	): Promise< void > => {
 		recoveryTicket.current += 1;
@@ -975,7 +924,7 @@ function Flow( { config }: { config: WidgetConfig } ): JSX.Element {
 						onSubmit={ handleDetails }
 						busy={ createHold.isPending }
 					/>
-					<StepNotice notice={ detailsNotice } />
+					<NoticeRegion classBase="reservant-flow" notice={ detailsNotice } />
 				</>
 			) }
 			{ 'review' === step && null !== held && (
@@ -1017,33 +966,9 @@ function Flow( { config }: { config: WidgetConfig } ): JSX.Element {
 	);
 }
 
-/**
- * The widget's one QueryClient (none existed before this task), created ONCE per mount through a
- * `useState` initializer - a render-body `new QueryClient()` would throw the whole cache away on
- * every render. `retry` is a PREDICATE, not a count: no 4xx is ever retried - a validation 400
- * fails identically forever, a 409 is a real answer the flow handles, a 404 means gone, and a 429
- * is the rate limiter saying stop, the one response retrying is guaranteed to make worse. Network
- * failures and 5xx keep the default three attempts. Mutations keep TanStack's no-retry default: a
- * blind second `POST /holds` could double-hold. `staleTime` is DELIBERATELY left at its default -
- * Task 16 owns that tuning.
- */
-function newWidgetClient(): QueryClient {
-	return new QueryClient( {
-		defaultOptions: {
-			queries: {
-				retry: ( failureCount: number, error: Error ): boolean => {
-					if ( error instanceof ApiError && error.status >= 400 && error.status < 500 ) {
-						return false;
-					}
-					return failureCount < 3;
-				},
-			},
-		},
-	} );
-}
-
 export function BookingFlow( { config }: { config: WidgetConfig } ): JSX.Element {
-	const [ client ] = useState( newWidgetClient );
+	// Created ONCE per mount - `newQueryClient`'s docblock owns the retry and staleTime policy.
+	const [ client ] = useState( newQueryClient );
 	return (
 		<QueryClientProvider client={ client }>
 			<Flow config={ config } />

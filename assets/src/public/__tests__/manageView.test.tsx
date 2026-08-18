@@ -822,6 +822,29 @@ describe( 'ManageView', () => {
 		expect( screen.getByRole( 'button', { name: 'Keep the current time' } ) ).toBeInTheDocument();
 	} );
 
+	it( 'refreshes the dialog slot list when the reschedule 409s', async () => {
+		// The policy `useCreateHold` pins on the booking side, applied to the move's own
+		// re-hold: a 409 is the server saying the offer this widget rendered is already stale,
+		// so every cached availability read is invalidated - and the dialog's still-subscribed
+		// query refetches while the visitor is looking at the slot list that just lied to them.
+		// Only a 409 does this; a 400 or 429 says nothing about availability.
+		const fetchMock = installFetch( {
+			booking: () => jsonResponse( chainBooking() ),
+			availability: () => CHAIN_AVAILABILITY,
+			reschedule: () => conflictResponse(),
+		} );
+		renderManage();
+		await screen.findByText( FIRST_TIME, EXACT_TEXT );
+
+		await pickNewSlot();
+		expect( callsTo( fetchMock, '/availability' ) ).toHaveLength( 1 );
+
+		await screen.findByText( CONFLICT_SENTENCE );
+		// The second GET is useReschedule's own 409-only invalidation refetching the ACTIVE
+		// dialog query - the manage twin of the bookingFlow suite's hold-409 pin.
+		await waitFor( () => expect( callsTo( fetchMock, '/availability' ) ).toHaveLength( 2 ) );
+	} );
+
 	it( 'sends exactly one reschedule when the slot is clicked twice in one beat', async () => {
 		let bookingNow = chainBooking();
 		const fetchMock = installFetch( {

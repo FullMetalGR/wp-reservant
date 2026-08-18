@@ -189,3 +189,30 @@ export function siteToUtc( dateStr: string, timeStr: string, tz: string ): strin
 export function siteNow( tz: string ): Date {
 	return utcToSite( new Date().toISOString().slice( 0, 19 ).replace( 'T', ' ' ), tz );
 }
+
+/** The `Y-m-d` business date of a site-packed Date, read through the local getters that unpack it. */
+export function ymd( day: Date ): string {
+	return `${ day.getFullYear() }-${ pad( day.getMonth() + 1 ) }-${ pad( day.getDate() ) }`;
+}
+
+/**
+ * How many days one widget availability request covers - and the DateStrip's default strip
+ * length, the same number ON PURPOSE: every day the strip renders must sit inside the window the
+ * parent fetched, or its slots would silently never load. Two weeks is enough for "next free
+ * morning" planning while staying far inside `AvailabilityController::MAX_WINDOW_DAYS` (62).
+ */
+export const WINDOW_DAYS = 14;
+
+/**
+ * The widget's availability request window off a site-packed `today` (`siteNow`): `from` is
+ * today's own business date, `to` the day `WINDOW_DAYS` later, EXCLUSIVE - the `Y-m-d` pair
+ * `GET /availability` speaks. Day arithmetic uses local-constructor overflow
+ * (`new Date( y, m, d + n )`), which normalizes month and year rollover by the calendar itself -
+ * packed dates carry no instant, so there is no DST to be off by an hour over.
+ */
+export function availabilityWindow( today: Date ): { from: string; to: string } {
+	return {
+		from: ymd( today ),
+		to: ymd( new Date( today.getFullYear(), today.getMonth(), today.getDate() + WINDOW_DAYS ) ),
+	};
+}

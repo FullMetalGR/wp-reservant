@@ -69,25 +69,22 @@
  * - The document title and the page's caching are PHP's (`ManageRoute::render()` sends core's
  *   nocache headers and applies `wp_robots_sensitive_page`); nothing here touches either.
  *
- * `newManageClient` and the notice mechanism mirror BookingFlow's `newWidgetClient` and
- * `StepNotice`/`noticeOf` - deliberately unexported there and out of this task's territory, so
- * the manage bundle carries its own copies (the notice pair lives in `RescheduleDialog.tsx`,
- * the `formatPrice`-in-ServicePicker precedent).
+ * The QueryClient comes from the journeys' shared factory (`api/queryClient.ts`) and the notice
+ * mechanism from the shared notice module (`components/Notice.tsx`) - Tasks 14 and 15 each
+ * carried private copies behind their territory fences, and this view once imported the manage
+ * copies from its own child dialog; both now have one home.
  */
 import { useEffect, useRef, useState } from 'react';
 import { __, _n, sprintf } from '@wordpress/i18n';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { QueryClientProvider } from '@tanstack/react-query';
 import { ApiError, utcToSite } from '../shared';
 import { widgetBootstrap } from './api/client';
+import { newQueryClient } from './api/queryClient';
 import { useBooking, useCancel, useReschedule, useServices } from './api/queries';
 import type { Booking, ChainItem, PublicService, RescheduleTarget } from './api/types';
-import {
-	NoticeRegion,
-	ProgressStatus,
-	RescheduleDialog,
-	noticeOf,
-} from './components/RescheduleDialog';
-import type { ManageNotice } from './components/RescheduleDialog';
+import { NoticeRegion, ProgressStatus, noticeOf } from './components/Notice';
+import type { Notice } from './components/Notice';
+import { RescheduleDialog } from './components/RescheduleDialog';
 import { formatPrice } from './components/ServicePicker';
 import type { WidgetConfig } from './index';
 
@@ -457,9 +454,9 @@ function Manage( { config }: { config: WidgetConfig } ): JSX.Element {
 	const [ confirmingCancel, setConfirmingCancel ] = useState( false );
 	const [ dialogOpen, setDialogOpen ] = useState( false );
 	/** Details-level notices: a cancel refusal, or the moved confirmation. */
-	const [ actionNotice, setActionNotice ] = useState< ManageNotice | null >( null );
+	const [ actionNotice, setActionNotice ] = useState< Notice | null >( null );
 	/** The dialog's own notice: a reschedule refusal, shown where the visitor is. */
-	const [ dialogNotice, setDialogNotice ] = useState< ManageNotice | null >( null );
+	const [ dialogNotice, setDialogNotice ] = useState< Notice | null >( null );
 	// The VISIBLE in-flight affordances - deliberately NOT the mutations' own `isPending`, which
 	// describes the observer's latest mutation rather than this journey: an abandoned flight
 	// (dialog closed mid-move, confirmation left mid-cancel) keeps `isPending` true until it
@@ -646,7 +643,7 @@ function Manage( { config }: { config: WidgetConfig } ): JSX.Element {
 	// non-confirmed state it is simply the state of things; after a cancel resolves, the
 	// refreshed query lands the cancelled sentence in a region that already existed, which is
 	// exactly what announces it.
-	const statusNotice: ManageNotice | null =
+	const statusNotice: Notice | null =
 		null === sentence ? null : { text: sentence, alert: false };
 	// The availability request for a move, staff pinned AS SOLD from the booking's own items -
 	// `RescheduleBooking::planAppointment()` keeps the sold resource, so any-staff starts could
@@ -671,8 +668,8 @@ function Manage( { config }: { config: WidgetConfig } ): JSX.Element {
 			<p className="reservant-manage__customer">
 				{ data.customer_name } ({ data.customer_email })
 			</p>
-			<NoticeRegion notice={ statusNotice } />
-			<NoticeRegion notice={ actionNotice } />
+			<NoticeRegion classBase="reservant-manage" notice={ statusNotice } />
+			<NoticeRegion classBase="reservant-manage" notice={ actionNotice } />
 			<ManageActions
 				cancellable={ cancellable }
 				reschedulable={ reschedulable }
@@ -698,30 +695,9 @@ function Manage( { config }: { config: WidgetConfig } ): JSX.Element {
 	);
 }
 
-/**
- * The manage bundle's QueryClient, the BookingFlow twin (unexported there, out of this task's
- * territory): created ONCE per mount, `retry` a predicate that never retries a 4xx - a 403/404
- * read is the neutral panel, immediately, and a 429 told us to stop. Network and 5xx keep the
- * default three attempts; mutations keep TanStack's no-retry default (a blind second cancel or
- * move could act twice). `staleTime` stays default - Task 16 owns that tuning.
- */
-function newManageClient(): QueryClient {
-	return new QueryClient( {
-		defaultOptions: {
-			queries: {
-				retry: ( failureCount: number, error: Error ): boolean => {
-					if ( error instanceof ApiError && error.status >= 400 && error.status < 500 ) {
-						return false;
-					}
-					return failureCount < 3;
-				},
-			},
-		},
-	} );
-}
-
 export function ManageView( { config }: { config: WidgetConfig } ): JSX.Element {
-	const [ client ] = useState( newManageClient );
+	// Created ONCE per mount - `newQueryClient`'s docblock owns the retry and staleTime policy.
+	const [ client ] = useState( newQueryClient );
 	return (
 		<QueryClientProvider client={ client }>
 			<Manage config={ config } />

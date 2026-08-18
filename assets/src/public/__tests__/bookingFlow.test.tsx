@@ -1048,6 +1048,26 @@ describe( 'BookingFlow', () => {
 		expect( screen.getByLabelText( 'Name' ) ).toHaveValue( 'Ada' );
 	} );
 
+	it( 'never shows browser jargon when the hold dies on the network', async () => {
+		// A dead connection rejects the fetch with TypeError('Failed to fetch') - developer
+		// jargon no guest should be handed, least of all in an alert region. The manage journey
+		// pinned this rule in Task 15; the shared noticeOf makes it one rule for both journeys.
+		installFetch( {
+			availability: () => APPOINTMENT_AVAILABILITY,
+			hold: () => Promise.reject( new TypeError( 'Failed to fetch' ) ),
+		} );
+		renderFlow();
+
+		await pickTodaySlot();
+		await submitDetails();
+
+		const alert = await screen.findByRole( 'alert' );
+		expect( alert ).toHaveTextContent(
+			'We could not reach the server. Please check your connection and try again.'
+		);
+		expect( screen.queryByText( 'Failed to fetch' ) ).not.toBeInTheDocument();
+	} );
+
 	it( 'disables Back while the hold request is in flight', async () => {
 		// Back live during the POST would let the answer land on whatever step the visitor
 		// reached. The never-settling response keeps the request in flight for the whole test.

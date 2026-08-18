@@ -26,112 +26,22 @@
  * pickers, so the click handler parks focus on the dialog container first - focus must never die
  * on <body> mid-journey.
  *
- * `NoticeRegion` and `noticeOf` are exported from HERE for the manage view to share (the
- * `formatPrice`-in-ServicePicker precedent): they mirror BookingFlow's `StepNotice`/`noticeOf`,
- * which are deliberately unexported and out of this task's territory. Same discipline: the
- * polite region mounts EMPTY and takes its text one effect later, so a message always lands in a
- * region that already existed - a region born with text announces nothing.
+ * Notices and progress lines come from the shared notice module (`./Notice`), one home for the
+ * whole widget: the polite region mounts EMPTY and takes its text one effect later, so a message
+ * always lands in a region that already existed - a region born with text announces nothing.
  */
 import { useEffect, useId, useRef, useState } from 'react';
 import type { KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { __ } from '@wordpress/i18n';
-import { ApiError, errorMessage, siteNow, utcToSite } from '../../shared';
+import { availabilityWindow, siteNow, utcToSite, ymd } from '../../shared';
 import { widgetBootstrap } from '../api/client';
 import { useAvailability } from '../api/queries';
 import type { ChainItem, RescheduleTarget, SlotStart } from '../api/types';
 import { DateStrip } from './DateStrip';
+import { NoticeRegion, ProgressStatus, noticeOf } from './Notice';
+import type { Notice } from './Notice';
 import { OccurrencePicker } from './OccurrencePicker';
 import { SlotGrid } from './SlotGrid';
-
-/** One rendered notice: polite (`role="status"`) for a server-worded refusal, alert otherwise. */
-export interface ManageNotice {
-	text: string;
-	alert: boolean;
-}
-
-/**
- * A 4xx carries a sentence the server worded for the visitor (`data.detail`), a polite answer to
- * what they just did; anything else (network, 5xx) is a genuine failure with nothing better to
- * show - the one case the widget's live-region convention reserves `role="alert"` for. A
- * non-`ApiError` never reaches `errorMessage()`: its `.message` is browser jargon ("Failed to
- * fetch") no guest should be handed, so it gets a fixed human sentence instead - handled here
- * rather than in `shared/errors.ts`, which is outside this surface's territory and serves
- * screens that want the raw message.
- */
-export function noticeOf( error: unknown ): ManageNotice {
-	if ( ! ( error instanceof ApiError ) ) {
-		return {
-			text: __(
-				'We could not reach the server. Please check your connection and try again.',
-				'reservant'
-			),
-			alert: true,
-		};
-	}
-	return { text: errorMessage( error ), alert: error.status >= 500 };
-}
-
-/**
- * The always-mounted polite region plus a conditional alert (the StepNotice mechanism from
- * BookingFlow, which is unexported): the status region exists before its message so the
- * announcement lands in a region that was already there, held back until one effect after mount
- * so a region mounting with a notice already in hand still announces; an alert announces on
- * appearance, so it may mount with its text.
- */
-export function NoticeRegion( { notice }: { notice: ManageNotice | null } ): JSX.Element {
-	const [ settled, setSettled ] = useState( false );
-	useEffect( () => {
-		setSettled( true );
-	}, [] );
-	return (
-		<>
-			<p className="reservant-manage__notice" role="status">
-				{ settled && null !== notice && ! notice.alert ? notice.text : '' }
-			</p>
-			{ null !== notice && notice.alert && (
-				<p className="reservant-manage__alert" role="alert">
-					{ notice.text }
-				</p>
-			) }
-		</>
-	);
-}
-
-/**
- * A progress line that mounts EMPTY and takes its text one effect later - the NoticeRegion
- * mechanism above, for the same reason: a region born with text announces nothing, and every
- * progress line on this surface mounts at the exact moment its work starts. Exported for the
- * manage view's loading and cancelling lines (the NoticeRegion/noticeOf precedent).
- */
-export function ProgressStatus( {
-	text,
-	className,
-}: {
-	text: string;
-	className: string;
-} ): JSX.Element {
-	const [ settled, setSettled ] = useState( false );
-	useEffect( () => {
-		setSettled( true );
-	}, [] );
-	return (
-		<p className={ className } role="status">
-			{ settled ? text : '' }
-		</p>
-	);
-}
-
-/** How many days one availability request covers - the DateStrip's own strip length. */
-const WINDOW_DAYS = 14;
-
-function pad( n: number ): string {
-	return String( n ).padStart( 2, '0' );
-}
-
-/** The `Y-m-d` business date of a site-packed Date, read through the local getters that unpack it. */
-function ymd( day: Date ): string {
-	return `${ day.getFullYear() }-${ pad( day.getMonth() + 1 ) }-${ pad( day.getDate() ) }`;
-}
 
 function startsOnDay( starts: SlotStart[], day: string, timezone: string ): SlotStart[] {
 	return starts.filter( ( start ) => ymd( utcToSite( start.utc, timezone ) ) === day );
@@ -144,7 +54,7 @@ interface RescheduleDialogProps {
 	 */
 	items: ChainItem[];
 	/** The current move refusal, shown politely inside the dialog; null when there is none. */
-	notice: ManageNotice | null;
+	notice: Notice | null;
 	/** True while the move is in flight - replaces the pickers, never the way out. */
 	busy: boolean;
 	/** A picked target, exactly one field set - `{start_utc}` off a slot, `{occurrence_id}` off an occurrence. */
@@ -166,13 +76,10 @@ export function RescheduleDialog( {
 	const [ selectedDay, setSelectedDay ] = useState< string | null >( null );
 
 	// The window starts on the SITE's own today (`siteNow`, never `new Date()` - an evening
-	// visitor west of the salon is often a day behind it), spanning the strip's fourteen days,
-	// `to` exclusive.
+	// visitor west of the salon is often a day behind it), spanning the strip's fourteen days
+	// (`availabilityWindow`, `to` exclusive).
 	const today = siteNow( timezone );
-	const fromDay = ymd( today );
-	const toDay = ymd(
-		new Date( today.getFullYear(), today.getMonth(), today.getDate() + WINDOW_DAYS )
-	);
+	const { from: fromDay, to: toDay } = availabilityWindow( today );
 	const availability = useAvailability( items, fromDay, toDay );
 
 	// Focus moves INTO the dialog on open - onto the container, not a first control, so a screen
@@ -238,8 +145,8 @@ export function RescheduleDialog( {
 			<h2 id={ headingId } className="reservant-reschedule__title">
 				{ __( 'Pick a new time', 'reservant' ) }
 			</h2>
-			<NoticeRegion notice={ notice } />
-			<NoticeRegion notice={ queryNotice } />
+			<NoticeRegion classBase="reservant-manage" notice={ notice } />
+			<NoticeRegion classBase="reservant-manage" notice={ queryNotice } />
 			{ busy ? (
 				<ProgressStatus
 					text={ __( 'Moving your booking...', 'reservant' ) }

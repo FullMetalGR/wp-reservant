@@ -18,6 +18,8 @@
  * Labels are formatted by `Intl` in the machine's own locale (the `undefined` locale is
  * deliberate, the ServicePicker precedent pinned by review).
  */
+import { WINDOW_DAYS, ymd } from '../../shared';
+
 interface DateStripProps {
 	/** The first day shown - site-packed, typically `siteNow( widgetBootstrap().timezone )`. */
 	from: Date;
@@ -26,22 +28,14 @@ interface DateStripProps {
 	/** The selected day as `Y-m-d`, or null while none is chosen yet. */
 	value?: string | null;
 	/**
-	 * How many days the strip offers. Two weeks by default: enough for "next free morning"
-	 * planning while staying far inside `AvailabilityController::MAX_WINDOW_DAYS` (62).
+	 * How many days the strip offers - `WINDOW_DAYS` by default, and that coupling is the point:
+	 * the strip and the availability request it fronts must agree, or a rendered day's slots
+	 * would silently never load (`WINDOW_DAYS`'s docblock owns the sizing).
 	 */
 	days?: number;
 }
 
-function pad( n: number ): string {
-	return String( n ).padStart( 2, '0' );
-}
-
-/** The `Y-m-d` business date of a site-packed Date, read through the local getters that unpack it. */
-function ymd( day: Date ): string {
-	return `${ day.getFullYear() }-${ pad( day.getMonth() + 1 ) }-${ pad( day.getDate() ) }`;
-}
-
-export function DateStrip( { from, onSelect, value = null, days = 14 }: DateStripProps ): JSX.Element {
+export function DateStrip( { from, onSelect, value = null, days = WINDOW_DAYS }: DateStripProps ): JSX.Element {
 	const formatter = new Intl.DateTimeFormat( undefined, {
 		weekday: 'short',
 		month: 'short',
