@@ -6,6 +6,7 @@ namespace Reservant\Rest\Admin;
 use Reservant\Infrastructure\Db\BookingRepository;
 use Reservant\Infrastructure\Db\OccurrenceRepository;
 use Reservant\Infrastructure\Db\ResourceRepository;
+use Reservant\Rest\BookingPayload;
 use Reservant\Rest\Errors;
 use Reservant\Rest\Routes;
 
@@ -75,18 +76,15 @@ final class CalendarAdminController {
 		foreach ( $rows as $row ) {
 			$uuid = (string) $row['uuid'];
 			if ( ! isset( $byUuid[ $uuid ] ) ) {
+				// A staff-only viewer sees a name only - never the customer's email or phone
+				// (AGENTS.md Task 10). Which columns count as contact details, and the capability
+				// that gates them, are `BookingPayload`'s to say; the event shape around them is
+				// this controller's, because a calendar entry is not a booking payload.
 				$byUuid[ $uuid ] = array(
 					'uuid'          => $uuid,
 					'status'        => (string) $row['status'],
 					'customer_name' => (string) $row['customer_name'],
-					'items'         => array(),
-				);
-				// A staff-only viewer sees a name only - never the customer's email or phone
-				// (AGENTS.md Task 10).
-				if ( $includeContact ) {
-					$byUuid[ $uuid ]['customer_email'] = (string) $row['customer_email'];
-					$byUuid[ $uuid ]['customer_phone'] = (string) $row['customer_phone'];
-				}
+				) + BookingPayload::contact( $row, $includeContact ) + array( 'items' => array() );
 			}
 			$byUuid[ $uuid ]['items'][] = array(
 				'service_id'          => (int) $row['service_id'],

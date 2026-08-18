@@ -26,7 +26,7 @@ final class AvailabilityQuery {
 
 	public function __construct(
 		private readonly ServiceRepository $services,
-		private readonly ResourceRepository $resources,
+		private readonly SegmentEligibility $eligibility,
 		private readonly AvailabilityRepository $availability,
 		private readonly BookingRepository $bookings,
 	) {}
@@ -34,7 +34,7 @@ final class AvailabilityQuery {
 	public static function make( \wpdb $db ): self {
 		return new self(
 			new ServiceRepository( $db ),
-			new ResourceRepository( $db ),
+			new SegmentEligibility( new ResourceRepository( $db ) ),
 			new AvailabilityRepository( $db ),
 			new BookingRepository( $db )
 		);
@@ -69,30 +69,14 @@ final class AvailabilityQuery {
 
 		foreach ( $segmentChoices as $index => $choice ) {
 			$service = $this->services->find( $choice->serviceId );
-			if ( null === $service || ServiceType::Appointment->value !== $service['type'] ) {
+			// Status is checked here for the same reason `HoldBooking::planAppointment()` checks it:
+			// an archived service is not on sale, and offering starts for one advertises a chain
+			// every hold on it would refuse as `not_found`.
+			if ( null === $service || ServiceType::Appointment->value !== $service['type'] || 'active' !== $service['status'] ) {
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped
 				throw new SlotConflict( 'not_found', $index );
 			}
-			$eligible = $this->resources->idsForService( $choice->serviceId );
-
-			/**
-			 * Narrow which staff may serve this segment (AGENTS.md section 7). Applied BEFORE the
-			 * explicit-resource check below, so a filter that removes the customer's chosen staff member
-			 * refuses the chain rather than quietly serving someone else.
-			 *
-			 * @param list<int> $eligible
-			 */
-			$eligible = array_values(
-				array_filter(
-					(array) apply_filters( 'reservant/chain/candidates', $eligible, $choice->serviceId, $index ),
-					'is_int'
-				)
-			);
-
-			if ( array() === $eligible || ( null !== $choice->resourceId && ! in_array( $choice->resourceId, $eligible, true ) ) ) {
-				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped
-				throw new SlotConflict( 'no_staff', $index );
-			}
+			$eligible = $this->eligibility->forSegment( $choice->serviceId, $choice->resourceId, $index );
 
 			$segments[]  = new ChainSegment(
 				(int) $service['id'],

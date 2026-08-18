@@ -273,6 +273,14 @@ Migrations are versioned and run through `Infrastructure/Db/Migrations` on activ
 | `POST /admin/bookings/{uuid}/approve` , `/reject` | `reservant_approve_bookings` alone is enough - a staff member without `reservant_manage_bookings` is scoped to bookings with an item on their own resource. Approve lands the booking on `confirmed` unconditionally: the approve -> `awaiting_payment` -> payment-link step for a paid service is the WooCommerce bridge's job (section 6), and it is not built yet - see P7 in section 9 |
 | `POST /admin/bookings/{uuid}/cancel` , `/no_show` , `/complete` | manager overrides; `reservant_manage_bookings` |
 | `GET /admin/calendar` | the week/day grid; `reservant_manage_bookings` or `reservant_view_own_calendar` |
+
+**What a caller may see of a booking is `Rest\BookingPayload`'s to decide, on every surface.** It is
+a whitelist: each field that reaches the wire is named there, so a column added to
+`reservant_bookings` is invisible until someone classifies it, and `BookingPayloadTest` reads the
+live schema and fails on an unclassified one rather than waiting for it to leak. Customer contact
+details (`customer_email`, `customer_phone`) require `reservant_manage_bookings` - approving a
+booking or viewing a calendar does not qualify - and a guest holding a signed manage token receives
+them because the booking is their own. `id` and `manage_token_hash` reach nobody.
 | `GET /admin/availability` | chain feasibility for the manual-booking drawer, same request shape as the public `GET /availability`; `reservant_manage_bookings` or `reservant_view_own_calendar` |
 | `GET\|POST /admin/services`, `GET\|PUT\|DELETE /admin/services/{id}` | service catalog CRUD; `reservant_manage_settings` throughout, except the collection `GET`, which also answers `reservant_manage_bookings` (the manual-booking drawer reads the catalog) |
 | `GET\|POST /admin/resources`, `GET\|PUT\|DELETE /admin/resources/{id}` | staff CRUD - identity, linked WP user, services performed, weekly rules; `reservant_manage_settings` throughout, except the collection `GET`, which also answers `reservant_manage_bookings` |
@@ -342,7 +350,9 @@ That namespace only loads when `class_exists( 'WooCommerce' )`. Everything else 
     list<SegmentChoice> $segments, \DateTimeImmutable $fromUtc, \DateTimeImmutable $toUtc )` -
     last word on what the customer is offered.
   - `reservant/chain/candidates` `( list<int> $eligible, int $serviceId, int $segmentIndex )` -
-    narrows which staff may serve a segment.
+    narrows which staff may serve a segment. Applied in `Application\SegmentEligibility`, the one
+    module both the advisory read and the authoritative write draw their pool from, so a narrowing
+    binds the hold and not only the offer. `$eligible` is active staff only.
   - `reservant/holds/rate_limit` `( int $maxPerMinute )`, default 10.
   - `reservant/hold_ttl_minutes` `( int $minutes )` - the checkout hold TTL.
   - `reservant/granularity_min` `( int $minutes )`, default 5.

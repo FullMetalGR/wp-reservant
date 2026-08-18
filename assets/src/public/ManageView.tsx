@@ -77,7 +77,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { __, _n, sprintf } from '@wordpress/i18n';
 import { QueryClientProvider } from '@tanstack/react-query';
-import { ApiError, utcToSite } from '../shared';
+import { ApiError, formatMoney, utcToSite } from '../shared';
 import { widgetBootstrap } from './api/client';
 import { newQueryClient } from './api/queryClient';
 import { useBooking, useCancel, useReschedule, useServices } from './api/queries';
@@ -85,7 +85,7 @@ import type { Booking, ChainItem, PublicService, RescheduleTarget } from './api/
 import { NoticeRegion, ProgressStatus, noticeOf } from './components/Notice';
 import type { Notice } from './components/Notice';
 import { RescheduleDialog } from './components/RescheduleDialog';
-import { formatPrice } from './components/ServicePicker';
+
 import type { WidgetConfig } from './index';
 
 /**
@@ -662,7 +662,7 @@ function Manage( { config }: { config: WidgetConfig } ): JSX.Element {
 				{ sprintf(
 					/* translators: %s: the formatted total price. */
 					__( 'Total: %s', 'reservant' ),
-					formatPrice( data.total_minor, data.currency )
+					formatMoney( data.total_minor, data.currency )
 				) }
 			</p>
 			<p className="reservant-manage__customer">

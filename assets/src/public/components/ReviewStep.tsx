@@ -9,16 +9,15 @@
  * left the catalog since page load falls back to the same placeholder ChainBuilder uses. Times
  * render on the SITE clock through `utcToSite` + the bootstrap timezone - the one spine every
  * surface shares - formatted by `Intl` in the machine's own locale (the ServicePicker precedent).
- * The total reuses ServicePicker's `formatPrice`, so minor-unit scaling stays currency-derived in
+ * The total reuses the shared `formatMoney`, so minor-unit scaling stays currency-derived in
  * exactly one place.
  *
  * Dumb and props-driven: the flow owns the countdown, the notices and the confirm transition;
  * this renders the summary and one real `<button>` whose disabled state the flow dictates.
  */
 import { __, _n, sprintf } from '@wordpress/i18n';
-import { utcToSite } from '../../shared';
+import { formatMoney, utcToSite } from '../../shared';
 import type { Booking, PublicService } from '../api/types';
-import { formatPrice } from './ServicePicker';
 
 interface ReviewStepProps {
 	/** The held booking as `POST /holds` returned it. */
@@ -75,7 +74,7 @@ export function ReviewStep( {
 				{ sprintf(
 					/* translators: %s: the formatted total price. */
 					__( 'Total: %s', 'reservant' ),
-					formatPrice( booking.total_minor, booking.currency )
+					formatMoney( booking.total_minor, booking.currency )
 				) }
 			</p>
 			<p className="reservant-review__customer">

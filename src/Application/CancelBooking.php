@@ -8,6 +8,7 @@ use Reservant\Domain\Booking\CancellationPolicy;
 use Reservant\Domain\Enum\BookingStatus;
 use Reservant\Infrastructure\Db\AuditLog;
 use Reservant\Infrastructure\Db\BookingRepository;
+use Reservant\Infrastructure\Db\LockKey;
 use Reservant\Infrastructure\Db\LockManager;
 use Reservant\Infrastructure\Db\ResourceDayRepository;
 use Reservant\Infrastructure\Db\ServiceRepository;
@@ -69,7 +70,7 @@ final class CancelBooking {
 			throw new \RuntimeException( 'window_closed' );
 		}
 
-		$keys     = HoldBooking::lockKeysForItems( $items );
+		$keys     = LockKey::forItems( $items );
 		$released = array(
 			'hold_expires_at' => null,
 			'hold_class'      => null,

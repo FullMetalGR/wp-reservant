@@ -9,8 +9,10 @@ dependency.
 
 The v1.0 engine core is complete: pure availability domain (bitmask slot math, service
 chains with processing gaps), the locked hold protocol, custom InnoDB schema, and the
-public REST API (`reservant/v1`), proven under concurrent load. Admin UI, booking widget,
-notifications, and the WooCommerce bridge are the next milestones.
+public REST API (`reservant/v1`), proven under concurrent load. The admin UI (services,
+staff, availability, calendar, manual booking) and the public booking widget (shortcode
+and block, chain builder, guest flow, magic-link manage page) are complete as well.
+Notifications and the WooCommerce bridge are the next milestones.
 
 See `AGENTS.md` for the full product spec, invariants, schema, and conventions.
 

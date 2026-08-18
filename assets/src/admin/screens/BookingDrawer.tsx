@@ -5,7 +5,7 @@ import { bootConfig } from '../boot';
 import { useApprove, useBooking, useCancelBooking, useOutcome, useReject } from '../api/queries';
 import type { BookingDetail, BookingStatus, BookingSummary } from '../api/types';
 import { useToasts } from '../components/Toasts';
-import { errorMessage, utcToSite } from '../../shared';
+import { errorMessage, formatMoney, utcToSite } from '../../shared';
 
 /** Every booking hold class (AGENTS.md section 2.3) plus `confirmed` - Cancel is offered on all four. */
 const CANCELLABLE_STATUSES: readonly BookingStatus[] = [ 'pending', 'awaiting_approval', 'awaiting_payment', 'confirmed' ];
@@ -46,15 +46,6 @@ function hasStarted( booking: BookingDetail, now: number = Date.now() ): boolean
 		return false;
 	}
 	return Math.min( ...booking.items.map( ( item ) => parseUtcInstant( item.start_utc ) ) ) <= now;
-}
-
-/** Minor-unit integer -> a locale-formatted currency string; falls back gracefully on a bad code. */
-export function formatMoney( minor: number, currency: string ): string {
-	try {
-		return new Intl.NumberFormat( undefined, { style: 'currency', currency } ).format( minor / 100 );
-	} catch ( error ) {
-		return `${ ( minor / 100 ).toFixed( 2 ) } ${ currency }`;
-	}
 }
 
 const STATUS_LABELS: Record< BookingStatus, () => string > = {
