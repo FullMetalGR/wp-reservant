@@ -17,6 +17,7 @@ use Reservant\Application\SlotConflict;
 use Reservant\Infrastructure\Db\AuditLog;
 use Reservant\Infrastructure\Db\BookingRepository;
 use Reservant\Infrastructure\Db\ResourceRepository;
+use Reservant\Rest\BookingPayload;
 use Reservant\Rest\Errors;
 use Reservant\Rest\Input;
 use Reservant\Rest\PresentsBookings;
@@ -305,11 +306,7 @@ final class BookingsAdminController {
 	 * @return array<string, mixed>
 	 */
 	private function presentForCaller( array $booking ): array {
-		$payload = $this->presentBooking( $booking );
-		if ( ! current_user_can( Routes::CAP_MANAGE ) ) {
-			unset( $payload['customer_email'], $payload['customer_phone'] );
-		}
-		return $payload;
+		return BookingPayload::present( $booking, BookingPayload::callerMaySeeContact() );
 	}
 
 	/**
