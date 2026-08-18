@@ -105,6 +105,7 @@ final class Plugin {
 		// plugin owns - so it is safe at `plugins_loaded` time, unlike the sweeper guard below.
 		Infrastructure\Scheduler\Jobs::register();
 		Notifications\ApprovalEmails::register();
+		Notifications\BookingEmails::register();
 
 		// Action Scheduler's own data store initializes on `init` (priority 1, `ActionScheduler::init()`),
 		// which has not run yet at `plugins_loaded` - calling `as_*` functions here would silently

@@ -26,7 +26,39 @@ abstract class ReservantTestCase extends \WP_UnitTestCase {
 		// `AdminSettingsTest`); hoisted here so the leak cannot recur in a class that forgets it.
 		delete_option( 'reservant_settings' );
 		self::clearRateLimiter();
+		self::silenceMailTransport();
 		$this->resetRewriteAndTheme();
+	}
+
+	/**
+	 * Whether `wp_mail()` can reach a transport is a property of the CONTAINER, and no test's
+	 * assertions may depend on it.
+	 *
+	 * There is no mail transport in `tests-cli`, so every `wp_mail()` returns false and
+	 * `Notifications\Mailer` dutifully reports `mail_send_failed` on `reservant/error` - the channel
+	 * three unrelated tests count firings on to prove that a lost audit row is visible to an
+	 * operator. Once `BookingEmails` started sending on `confirmed`, those tests began counting the
+	 * mailer's honest complaint alongside the audit failure they were actually asserting about, and
+	 * they would have gone green again on any machine that happened to have sendmail configured.
+	 * That is an environment dependency in the assertion, not a real disagreement.
+	 *
+	 * Priority 999 and the pass-through are both load-bearing. A capturing filter
+	 * (`ApprovalEmailsTest::captureMail()`) registers at 10 and must see the message first; and
+	 * because `apply_filters()` runs EVERY callback rather than stopping at the first non-null one,
+	 * a suppressor that returned `true` unconditionally would overwrite the decision of a test that
+	 * deliberately makes delivery fail. Returning the incoming value untouched when it is already
+	 * decided leaves both kinds of test in charge of their own mail.
+	 *
+	 * Hoisted here for the reason `reservant_settings` and the rate limiter were: this was already
+	 * an opt-in in `ApprovalActionEndpointTest`, three times, and a class that forgot it inherited a
+	 * failure that had nothing to do with what it was testing.
+	 */
+	private static function silenceMailTransport(): void {
+		add_filter(
+			'pre_wp_mail',
+			static fn ( $pre ) => null === $pre ? true : $pre,
+			999
+		);
 	}
 
 	/** The pristine stylesheet of this process, recorded by the first test to run. */

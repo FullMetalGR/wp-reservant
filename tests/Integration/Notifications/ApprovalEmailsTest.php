@@ -102,6 +102,21 @@ final class ApprovalEmailsTest extends ReservantTestCase {
 		return $captured;
 	}
 
+	/**
+	 * The messages addressed to one recipient.
+	 *
+	 * An approval-gated hold now sends TWO emails from the one `reservant/booking/held` - this
+	 * class's `approval_request` to the approver, and `BookingEmails`' `booking_received` to the
+	 * guest, who would otherwise hear nothing at all until a human decided. The two are told apart
+	 * by who they are for, which is also the thing worth asserting.
+	 *
+	 * @param list<array{to: string, subject: string, message: string}> $sent
+	 * @return list<array{to: string, subject: string, message: string}>
+	 */
+	private function addressedTo( array $sent, string $recipient ): array {
+		return array_values( array_filter( $sent, static fn ( array $mail ): bool => $recipient === $mail['to'] ) );
+	}
+
 	public function testHeldApprovalRequestGoesToAssignedStaffWithBothSignedUrls(): void {
 		global $wpdb;
 		$booking = null;
@@ -111,8 +126,13 @@ final class ApprovalEmailsTest extends ReservantTestCase {
 			}
 		);
 
-		self::assertCount( 1, $sent );
-		self::assertSame( 'alex@example.com', $sent[0]['to'] );
+		// Two emails, one hook: the approver's decision request and the guest's acknowledgement.
+		self::assertCount( 2, $sent );
+		self::assertCount( 1, $this->addressedTo( $sent, 'maria@example.com' ), 'the guest is told their request is waiting on a human' );
+
+		$approver = $this->addressedTo( $sent, 'alex@example.com' );
+		self::assertCount( 1, $approver );
+		$sent = $approver;
 		self::assertStringContainsString( 'approval', strtolower( $sent[0]['subject'] ) );
 
 		$fresh      = ( new BookingRepository( $wpdb ) )->findByUuid( $booking['uuid'] );
@@ -191,8 +211,11 @@ final class ApprovalEmailsTest extends ReservantTestCase {
 
 		remove_filter( 'reservant/email/approval_request/args', $rewrite );
 
-		self::assertCount( 1, $sent );
-		self::assertSame( 'override@example.com', $sent[0]['to'] );
+		self::assertCount( 1, $this->addressedTo( $sent, 'override@example.com' ) );
+		// The filter is keyed, so rewriting the approver's recipient must not touch the guest's
+		// acknowledgement going out of the same hook.
+		self::assertCount( 1, $this->addressedTo( $sent, 'maria@example.com' ) );
+		self::assertCount( 0, $this->addressedTo( $sent, 'alex@example.com' ) );
 	}
 
 	public function testHeldWithoutApprovalSendsNoMail(): void {
