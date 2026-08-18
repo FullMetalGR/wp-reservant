@@ -169,20 +169,23 @@ final class Assets {
 	 * The key itself stays in the shape: the shipped client (assets/src/public/api/client.ts)
 	 * destructures exactly `restRoot` and `nonce`, branching on the nonce's falsiness to OMIT the
 	 * X-WP-Nonce header entirely - never sending an empty one, which core would reject as an
-	 * invalid nonce. Of the other four keys, `timezone` is read by the pickers (SlotGrid,
-	 * OccurrencePicker); `currency`, `granularityMin` and `checkoutTtlMin` are typed on
-	 * WidgetBootstrap but unread until the Task 14-16 surfaces land. ShortcodeTest pins the exact
-	 * six-key shape and order.
+	 * invalid nonce. Of the other four keys, `timezone` is the widget's shared clock spine
+	 * (BookingFlow, ManageView, SlotGrid, OccurrencePicker and RescheduleDialog all read it);
+	 * `currency`, `granularityMin` and `checkoutTtlMin` are typed on WidgetBootstrap but remain
+	 * UNREAD even now that the Task 14-16 surfaces have shipped - prices arrive denominated per
+	 * service and per booking, and the grid and TTL truths come back on the wire, so no surface
+	 * ever needed them. They stay in the shape for integrators and for P6+. ShortcodeTest pins
+	 * the exact six-key shape and order.
 	 *
 	 * `checkoutTtlMin` is the site default TTL for the CHECKOUT hold class ONLY - the `pending`
 	 * status, `Settings::checkoutTtlMin()`, default 15 minutes. AGENTS.md section 2.3 defines two
 	 * more hold classes with much longer TTLs (`awaiting_approval` ~48 h, `awaiting_payment`
 	 * ~24 h, both service- or settings-configurable), and a booking on a `requires_approval`
-	 * service is held for the approval TTL, not this one. Task 14's countdown must therefore
-	 * anchor on `hold_expires_at` from the `POST /holds` response - the authority for the hold
-	 * actually created - and use this value only as a pre-hold hint. A countdown driven by this
-	 * number would tick 15 minutes to zero and block confirm while an approval hold lives on for
-	 * two days.
+	 * service is held for the approval TTL, not this one. The shipped countdown (BookingFlow,
+	 * Task 14) therefore anchors on `hold_expires_at` from the `POST /holds` response - the
+	 * authority for the hold actually created - and reads this key not at all. A countdown driven
+	 * by this number would tick 15 minutes to zero and block confirm while an approval hold lives
+	 * on for two days.
 	 *
 	 * @return array{restRoot:string,nonce:string,currency:string,timezone:string,granularityMin:int,checkoutTtlMin:int}
 	 */

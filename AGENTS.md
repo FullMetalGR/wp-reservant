@@ -260,12 +260,12 @@ Migrations are versioned and run through `Infrastructure/Db/Migrations` on activ
 | Route | Notes |
 |---|---|
 | `GET /services`, `GET /services/{id}` | public |
-| `GET /availability` | body describes the **whole chain**: ordered `items[]` of `{service_id, resource_id\|any}`, plus `from`, `to`, `tz`. Returns start times for which a complete valid chain exists. Advisory. |
+| `GET /availability` | the query string describes the **whole chain**: `items` (a JSON list of `{service_id, resource_id\|null}`), `from`, `to`, optional `same_staff` and `tz`. Appointments answer the start times for which a complete valid chain exists; an EVENT service answers its occurrences with remaining places instead. Advisory either way. |
 | `GET /occurrences/{id}/seats` | seat grid + which seats are currently blocking |
-| `POST /holds` | takes `items[]` (with optional `seat_ids`), creates the container + items under lock. Returns `uuid`, `status`, `hold_expires_at`. `409` names the failing segment. **Rate-limited.** |
-| `DELETE /holds/{uuid}` | releases immediately |
-| `POST /bookings/{uuid}/confirm` | free / pay-on-site path |
-| `GET\|POST /bookings/{uuid}` | guest self-service, requires `token` |
+| `POST /holds` | takes `items[]` (with optional `seat_ids`), creates the container + items under lock. Returns the booking (`uuid`, `status`, `hold_expires_at`, items) plus `manage_token` - the guest's only credential, shown exactly once, in a `no-store` response. `409` names the failing segment. **Rate-limited.** |
+| `DELETE /holds/{uuid}` | releases immediately; requires `token` |
+| `POST /bookings/{uuid}/confirm` | free / pay-on-site path; `token` or `reservant_manage_bookings` |
+| `GET /bookings/{uuid}` | guest self-service read, requires `token` (or `reservant_manage_bookings`) |
 | `POST /bookings/{uuid}/cancel` , `/reschedule` | policy-checked. Reschedule moves **all** segments as one atomic release + re-hold; partial success is impossible. |
 | `GET /admin/bookings` | search/list; `reservant_manage_bookings` |
 | `POST /admin/bookings` | the owner's manual booking - lands on `confirmed` directly, never a hold; `reservant_manage_bookings` |
@@ -274,8 +274,8 @@ Migrations are versioned and run through `Infrastructure/Db/Migrations` on activ
 | `POST /admin/bookings/{uuid}/cancel` , `/no_show` , `/complete` | manager overrides; `reservant_manage_bookings` |
 | `GET /admin/calendar` | the week/day grid; `reservant_manage_bookings` or `reservant_view_own_calendar` |
 | `GET /admin/availability` | chain feasibility for the manual-booking drawer, same request shape as the public `GET /availability`; `reservant_manage_bookings` or `reservant_view_own_calendar` |
-| `GET\|POST /admin/services`, `GET\|PUT\|DELETE /admin/services/{id}` | service catalog CRUD; `reservant_manage_settings` |
-| `GET\|POST /admin/resources`, `GET\|PUT\|DELETE /admin/resources/{id}` | staff CRUD - identity, linked WP user, services performed, weekly rules; `reservant_manage_settings` |
+| `GET\|POST /admin/services`, `GET\|PUT\|DELETE /admin/services/{id}` | service catalog CRUD; `reservant_manage_settings` throughout, except the collection `GET`, which also answers `reservant_manage_bookings` (the manual-booking drawer reads the catalog) |
+| `GET\|POST /admin/resources`, `GET\|PUT\|DELETE /admin/resources/{id}` | staff CRUD - identity, linked WP user, services performed, weekly rules; `reservant_manage_settings` throughout, except the collection `GET`, which also answers `reservant_manage_bookings` |
 | `POST\|DELETE /admin/resources/{id}/exceptions` | one resource's own blackout dates; `reservant_manage_settings` |
 | `GET\|POST\|DELETE /admin/exceptions` | business-wide blackout dates (`GET` also lists a single resource's own, via `resource_id`); `reservant_manage_settings` |
 | `GET\|POST /admin/occurrences`, `PUT\|DELETE /admin/occurrences/{id}` | event occurrences; `reservant_manage_settings` |
@@ -283,8 +283,9 @@ Migrations are versioned and run through `Infrastructure/Db/Migrations` on activ
 | `GET\|PUT /admin/settings` | plugin settings; `reservant_manage_settings` |
 
 Auth: `X-WP-Nonce` for logged-in/admin; for guests a **signed manage token** - random secret in the
-email link, only its hash stored (`manage_token_hash`), compared with `hash_equals()`, expiring
-a fixed period after the booking ends.
+email link, only its hash stored (`manage_token_hash`), compared with `hash_equals()`. Token
+expiry is NOT implemented yet: the hash lives as long as the booking row does. Expiring it a
+fixed period after the booking ends is P6 work, alongside the emailed link that carries it.
 
 Sanitize at the REST boundary, escape at output, `$wpdb->prepare()` always. Domain objects never
 see `$_POST`. Every route declares a real `permission_callback` - `__return_true` is only
@@ -324,10 +325,30 @@ That namespace only loads when `class_exists( 'WooCommerce' )`. Everything else 
 - **Chain resolution:** `ChainResolver` takes free/busy masks in and returns feasible start times
   by mask algebra (section 2.4) - it does not search, and it does not touch the DB. Assignment of
   concrete staff is a separate, deterministic step at hold time, so failures reproduce in tests.
-- **Hooks:** actions `reservant/booking/held`, `/approved`, `/rejected`, `/confirmed`,
-  `/cancelled`, `reservant/hold/expired`; filters `reservant/availability/slots`,
-  `reservant/chain/candidates`, `reservant/booking/can_cancel`, `reservant/email/{key}/args`.
-  Pass DTOs, not arrays.
+- **Hooks** (signatures read off the call sites in `src/`; the DTO rule is a split, not one
+  sentence - ACTIONS pass a `BookingSnapshot` DTO, the POLICY FILTERS pass the booking row as
+  an array, and both halves are deliberate):
+  - Booking actions, every one `( BookingSnapshot $booking )`: `reservant/booking/held`,
+    `/approved`, `/rejected`, `/confirmed`, `/cancelled`, `/rescheduled`, and the dynamic
+    `reservant/booking/{outcome}` (`completed` | `no_show`, from `MarkBookingOutcome`).
+  - `reservant/hold/expired` `( BookingSnapshot $booking )` - the reaped hold.
+  - `reservant/approval/nag` `( BookingSnapshot $booking, int $percent )` - fired at 25/50/75%
+    of the approval window (an ACTION; the P6 mailer listens here).
+  - `reservant/error` `( \Throwable $e )`, at some sites plus a string context (booking uuid or
+    mail key) - the diagnostics channel for swallowed failures.
+  - Policy filters, both `( bool $allowed, array $booking, \DateTimeImmutable $nowUtc )` - the
+    booking ROW, not a DTO: `reservant/booking/can_cancel`, `reservant/booking/can_reschedule`.
+  - `reservant/availability/slots` `( list<\DateTimeImmutable> $starts,
+    list<SegmentChoice> $segments, \DateTimeImmutable $fromUtc, \DateTimeImmutable $toUtc )` -
+    last word on what the customer is offered.
+  - `reservant/chain/candidates` `( list<int> $eligible, int $serviceId, int $segmentIndex )` -
+    narrows which staff may serve a segment.
+  - `reservant/holds/rate_limit` `( int $maxPerMinute )`, default 10.
+  - `reservant/hold_ttl_minutes` `( int $minutes )` - the checkout hold TTL.
+  - `reservant/granularity_min` `( int $minutes )`, default 5.
+  - `reservant/allow_direct_confirm` `( bool $allowed, array $booking )` - lets an `online`
+    booking confirm without payment (the bridge's escape hatch).
+  - Planned, NOT yet implemented: `reservant/email/{key}/args` (P6's mailer).
 - **Capabilities:** custom caps (`reservant_manage_bookings`, `reservant_approve_bookings`,
   `reservant_manage_settings`, `reservant_view_own_calendar`) mapped on activation, plus a
   `reservant_staff` role that can approve bookings assigned to them. Never check `manage_options`.
@@ -358,11 +379,13 @@ composer lint                 # PHPCS / WPCS over src/ and bin/
 composer stan                 # PHPStan level 6+ over src/
 composer test:unit            # Domain/ + pure Application/ - no WP bootstrap, fast
 composer test:integration     # repositories, REST, migrations, locking (needs wp-env)
+npm run build                 # the bundles every later gate measures or serves
+npm run size                  # byte budgets (widget.js, style-widget.css) + the externals contract
 npm run tsc                   # TypeScript strict, no emit
 npm run test:js               # Jest + Testing Library over assets/src
 npm run fallow                # fallow static analysis, failing on its error-level findings
 ./bin/run-concurrency.sh      # parallel holds, opposing-order chains, contested seats (needs wp-env)
-npm run test:e2e              # Playwright admin smoke (needs wp-env + a built bundle)
+npm run test:e2e              # Playwright: admin smoke + the public booking flow (needs wp-env + a built bundle)
 ```
 
 CI runs all of the above. Concurrency tests are not allowed to be marked skipped: `./bin/run-concurrency.sh`
@@ -383,15 +406,19 @@ UI, not data.
 
 **v1.0 - the salon core.** Appointments + chains + payments + notifications.
 
-1. **P0** Scaffolding: plugin header, autoloader, container, CI, lint/stan gates.
-2. **P1** `Domain/` - slot generation (rules, exceptions, buffers, processing gaps, lead time,
-   horizon), free/busy masks, `ChainResolver`, cancellation policy, money, seat grids.
-   Unit-tested to death, including DST. No DB yet.
-3. **P2** Schema (complete), migrations, repositories, `LockManager`, `TransactionRunner`.
-4. **P3** The hold protocol + REST holds/confirm/cancel, with concurrency tests (single slot,
-   opposing-order chains, contested seats). **The riskiest work - done before any UI exists.**
-5. **P4** Admin: services, staff, availability, calendar, manual booking.
-6. **P5** Booking widget (shortcode + block): chain builder, staff picker, guest flow,
+`[DONE]` means merged on the development branch and passing every gate in section 8.
+
+1. **P0** `[DONE]` Scaffolding: plugin header, autoloader, container, CI, lint/stan gates.
+2. **P1** `[DONE]` `Domain/` - slot generation (rules, exceptions, buffers, processing gaps,
+   lead time, horizon), free/busy masks, `ChainResolver`, cancellation policy, money, seat
+   grids. Unit-tested to death, including DST. No DB yet.
+3. **P2** `[DONE]` Schema (complete), migrations, repositories, `LockManager`,
+   `TransactionRunner`.
+4. **P3** `[DONE]` The hold protocol + REST holds/confirm/cancel, with concurrency tests
+   (single slot, opposing-order chains, contested seats). **The riskiest work - done before any
+   UI exists.**
+5. **P4** `[DONE]` Admin: services, staff, availability, calendar, manual booking.
+6. **P5** `[DONE]` Booking widget (shortcode + block): chain builder, staff picker, guest flow,
    magic-link manage page.
 7. **P6** Notifications: emails, `.ics`, reminders, hold-expiry sweeper.
 8. **P7** WooCommerce bridge.
