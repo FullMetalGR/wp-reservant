@@ -142,6 +142,10 @@ function ServicesTable( { services, selectedId, onSelect }: ServicesTableProps )
 		<table className="reservant-services-table">
 			<thead>
 				<tr>
+					{ /* The id is what the block's appearance panel and the shortcode's
+					     service="" attribute ask for - this table is the one place an owner
+					     can read it (Task 17). */ }
+					<th>{ __( 'ID', 'reservant' ) }</th>
 					<th>{ __( 'Name', 'reservant' ) }</th>
 					<th>{ __( 'Type', 'reservant' ) }</th>
 					<th>{ __( 'Duration/Capacity', 'reservant' ) }</th>
@@ -159,6 +163,7 @@ function ServicesTable( { services, selectedId, onSelect }: ServicesTableProps )
 						}
 						onClick={ () => onSelect( service ) }
 					>
+						<td>{ service.id }</td>
 						<td>
 							<RowSelectButton
 								label={ service.name }

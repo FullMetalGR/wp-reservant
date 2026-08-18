@@ -320,3 +320,48 @@ describe( 'catalog tables - keyboard-operable row selection', () => {
 		expect( control ).toHaveAttribute( 'aria-current', 'true' );
 	} );
 } );
+
+/**
+ * Task 17 (P5 release): the block's appearance panel and the shortcode both take NUMERIC
+ * service and staff ids, and before this no admin screen printed an id to a human - a site
+ * owner inserting the block saw two ID fields with no way to learn that "Cut" is service 3.
+ * The catalog tables are where those rows already live client-side (the id is in every row the
+ * screens render; no new REST work), so each gains an ID column.
+ */
+describe( 'catalog tables - the ID column the block panel needs', () => {
+	beforeEach( () => {
+		setBootConfig();
+		mockedApiFetch.mockReset();
+		mockedApiFetch.mockImplementation( ( path ) => {
+			if ( path.startsWith( '/admin/services' ) ) {
+				return Promise.resolve( { services: [ serviceFixture( { id: 41, name: 'Haircut' } ) ] } );
+			}
+			if ( path.startsWith( '/admin/resources' ) ) {
+				return Promise.resolve( { resources: [ resourceFixture( { id: 73, name: 'Alex' } ) ] } );
+			}
+			if ( path.startsWith( '/admin/seat-maps' ) ) {
+				return Promise.resolve( { seat_maps: [] } );
+			}
+			if ( path.startsWith( '/admin/exceptions' ) ) {
+				return Promise.resolve( { exceptions: [] } );
+			}
+			return Promise.reject( new Error( `unexpected path: ${ path }` ) );
+		} );
+	} );
+
+	it( 'ServicesScreen: every row states its id under an ID header', async () => {
+		renderWithClient( <ServicesScreen /> );
+
+		const row = ( await screen.findByRole( 'button', { name: 'Haircut' } ) ).closest( 'tr' ) as HTMLElement;
+		expect( screen.getByRole( 'columnheader', { name: 'ID' } ) ).toBeInTheDocument();
+		expect( within( row ).getByText( '41' ) ).toBeInTheDocument();
+	} );
+
+	it( 'StaffScreen: every row states its id under an ID header', async () => {
+		renderWithClient( <StaffScreen /> );
+
+		const row = ( await screen.findByRole( 'button', { name: 'Alex' } ) ).closest( 'tr' ) as HTMLElement;
+		expect( screen.getByRole( 'columnheader', { name: 'ID' } ) ).toBeInTheDocument();
+		expect( within( row ).getByText( '73' ) ).toBeInTheDocument();
+	} );
+} );

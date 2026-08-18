@@ -287,6 +287,10 @@ function StaffTable( { resources, selectedId, onSelect }: StaffTableProps ) {
 		<table className="reservant-staff-table">
 			<thead>
 				<tr>
+					{ /* The id is what the block's appearance panel and the shortcode's
+					     staff="" attribute ask for - this table is the one place an owner can
+					     read it (Task 17). */ }
+					<th>{ __( 'ID', 'reservant' ) }</th>
 					<th>{ __( 'Name', 'reservant' ) }</th>
 					<th>{ __( 'Email', 'reservant' ) }</th>
 					<th>{ __( 'Status', 'reservant' ) }</th>
@@ -301,6 +305,7 @@ function StaffTable( { resources, selectedId, onSelect }: StaffTableProps ) {
 						}
 						onClick={ () => onSelect( resource ) }
 					>
+						<td>{ resource.id }</td>
 						<td>
 							<RowSelectButton
 								label={ resource.name }

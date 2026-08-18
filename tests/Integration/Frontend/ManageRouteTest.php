@@ -208,6 +208,24 @@ final class ManageRouteTest extends ReservantTestCase {
 		$this->assertSame( Plugin::REWRITE_VERSION, get_option( 'reservant_rewrite_version' ) );
 	}
 
+	public function test_a_current_marker_flushes_nothing(): void {
+		// The other half of "flushes once and then not again" (Task 17): the two tests above
+		// prove a STALE marker reaches the stored rules exactly once, but neither would go red
+		// if maybeFlushRewrites() lost its marker-equality early return and flushed on every
+		// wp_loaded - the exact "every request writes the options table" failure the design
+		// spec forbids registering-time flushes over. A sentinel rules table pins it: a flush
+		// REBUILDS the stored option, so the sentinel surviving the call is proof no flush ran.
+		$GLOBALS['wp_rewrite'] = new \WP_Rewrite();
+		$GLOBALS['wp_rewrite']->set_permalink_structure( '/%postname%/' );
+		update_option( 'reservant_rewrite_version', Plugin::REWRITE_VERSION );
+		$sentinel = array( 'sentinel/?$' => 'index.php' );
+		update_option( 'rewrite_rules', $sentinel );
+
+		Plugin::maybeFlushRewrites();
+
+		$this->assertSame( $sentinel, get_option( 'rewrite_rules' ), 'a current marker must be a no-op - flushing here again would write the options table on every request' );
+	}
+
 	public function test_the_rewrite_marker_is_derived_from_the_rule_it_arms(): void {
 		// The 0.3.0 defect had a HUMAN half the tests above cannot reach: a hand-bumped marker
 		// constant must be REMEMBERED whenever the rule changes, and this project has already

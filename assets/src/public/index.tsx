@@ -12,9 +12,9 @@
  * anywhere reachable here - it alone is ~800 KB of core script plus ~97 KB of CSS handed to every
  * visitor. Bundled bytes cannot catch that: every `@wordpress/*` package is a webpack external,
  * so importing it adds a handle to `build/widget.asset.php`, not weight to `build/widget.js`.
- * `npm run size` therefore runs two checks - `bin/bundle-budget.mjs` bounds the bundled bytes,
- * and `bin/widget-contract.mjs` fails the build on any script handle outside the allowed
- * externals. The block editor script is a separate entry and may use `@wordpress/components`.
+ * `npm run size` therefore runs three checks - `bin/bundle-budget.mjs` bounds the bundled script
+ * bytes and the emitted stylesheet's bytes, and `bin/widget-contract.mjs` fails the build on any
+ * script handle outside the allowed externals. The block editor script is a separate entry and may use `@wordpress/components`.
  *
  * The mount node is rendered by PHP (`src/Frontend/`), which is the only place that knows the
  * booking context, so every input arrives as a `data-` attribute on that node:

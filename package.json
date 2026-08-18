@@ -20,7 +20,7 @@
     "test:js": "wp-scripts test-unit-js",
     "test:e2e": "playwright test",
     "tsc": "tsc --noEmit",
-    "size": "node bin/bundle-budget.mjs build/widget.js 102400 && node bin/widget-contract.mjs",
+    "size": "node bin/bundle-budget.mjs build/widget.js 102400 && node bin/bundle-budget.mjs build/style-widget.css 10240 && node bin/widget-contract.mjs",
     "fallow": "fallow --ci --output-file .fallow-report.sarif && node bin/fallow-gate.mjs .fallow-report.sarif"
   },
   "dependencies": {

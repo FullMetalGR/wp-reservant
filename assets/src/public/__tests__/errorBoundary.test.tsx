@@ -6,6 +6,18 @@ function Boom(): JSX.Element {
 	throw new TypeError( "Cannot read properties of undefined (reading 'starts')" );
 }
 
+/**
+ * Did the WIDGET'S diagnostic line reach `console.error` - as opposed to React's own boundary
+ * notice, which fires for every catch whether or not `componentDidCatch` re-reports? Reads the
+ * jest-console mock directly because that distinction is the whole point (see the docblock).
+ */
+function widgetErrorLineLogged(): boolean {
+	const spy = console.error as jest.MockedFunction< typeof console.error >;
+	return spy.mock.calls.some(
+		( args ) => 'Reservant: the booking widget failed to render.' === args[ 0 ]
+	);
+}
+
 function Fine(): JSX.Element {
 	return <p>the widget rendered</p>;
 }
@@ -19,9 +31,14 @@ function Fine(): JSX.Element {
  *
  * Unlike the admin boundary, the fallback shows NO error detail: the audience is a visitor who
  * cannot act on a component stack, not an owner diagnosing a screen. The diagnostic channel is
- * the console line, asserted here via `toHaveErrored()` - which doubles as the suite-level
- * requirement, because `@wordpress/jest-console` fails any test whose `console.error` goes
- * unexpected (React logs its own boundary notice too; both are expected).
+ * the console line, and it is asserted by the widget's OWN message, not by `toHaveErrored()`
+ * alone: React itself logs a `console.error` for every boundary catch, so a bare
+ * `toHaveErrored()` stays green with the widget's re-report deleted (a mutation pass proved
+ * exactly that). `toHaveErroredWith` cannot single the line out either - it matches the
+ * stringified FULL argument list, and the component stack varies - so the assertion reads the
+ * mock's own calls and pins the first argument. `toHaveErrored()` still runs for
+ * `@wordpress/jest-console`'s bookkeeping (it fails any test whose `console.error` goes
+ * unexpected; React's own notice and the widget's line are both expected).
  */
 describe( 'ErrorBoundary', () => {
 	it( 'renders its children untouched when nothing throws', () => {
@@ -51,6 +68,9 @@ describe( 'ErrorBoundary', () => {
 
 		// No stack traces for visitors - the diagnostic detail belongs to the console line.
 		expect( screen.queryByText( /TypeError/ ) ).not.toBeInTheDocument();
+		// The widget's OWN line, not merely React's boundary notice (the docblock owns why a
+		// bare toHaveErrored() proves nothing here).
+		expect( widgetErrorLineLogged() ).toBe( true );
 		expect( console ).toHaveErrored();
 	} );
 
@@ -66,6 +86,7 @@ describe( 'ErrorBoundary', () => {
 
 		expect( screen.getByText( "the theme's own page content" ) ).toBeInTheDocument();
 		expect( screen.getByRole( 'alert' ) ).toBeInTheDocument();
+		expect( widgetErrorLineLogged() ).toBe( true );
 		expect( console ).toHaveErrored();
 	} );
 } );
