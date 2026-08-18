@@ -342,7 +342,9 @@ That namespace only loads when `class_exists( 'WooCommerce' )`. Everything else 
     list<SegmentChoice> $segments, \DateTimeImmutable $fromUtc, \DateTimeImmutable $toUtc )` -
     last word on what the customer is offered.
   - `reservant/chain/candidates` `( list<int> $eligible, int $serviceId, int $segmentIndex )` -
-    narrows which staff may serve a segment.
+    narrows which staff may serve a segment. Applied in `Application\SegmentEligibility`, the one
+    module both the advisory read and the authoritative write draw their pool from, so a narrowing
+    binds the hold and not only the offer. `$eligible` is active staff only.
   - `reservant/holds/rate_limit` `( int $maxPerMinute )`, default 10.
   - `reservant/hold_ttl_minutes` `( int $minutes )` - the checkout hold TTL.
   - `reservant/granularity_min` `( int $minutes )`, default 5.

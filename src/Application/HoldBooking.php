@@ -60,7 +60,7 @@ final class HoldBooking {
 		private readonly ResourceDayRepository $resourceDays,
 		private readonly BookingRepository $bookings,
 		private readonly ServiceRepository $services,
-		private readonly ResourceRepository $resources,
+		private readonly SegmentEligibility $eligibility,
 		private readonly OccurrenceRepository $occurrences,
 		private readonly AvailabilityRepository $availability,
 		private readonly AuditLog $audit,
@@ -73,7 +73,7 @@ final class HoldBooking {
 			new ResourceDayRepository( $db ),
 			new BookingRepository( $db ),
 			new ServiceRepository( $db ),
-			new ResourceRepository( $db ),
+			new SegmentEligibility( new ResourceRepository( $db ) ),
 			new OccurrenceRepository( $db ),
 			new AvailabilityRepository( $db ),
 			new AuditLog( $db )
@@ -705,13 +705,9 @@ final class HoldBooking {
 			$geometry   = self::segmentGeometry( $service, $chainStart, $offsetMin );
 			$offsetMin += (int) $geometry['advance_min'];
 
-			// Only active staff are candidates, so a pinned resource that has been deactivated
-			// fails as `no_staff` rather than quietly taking the booking.
-			$eligible = $this->resources->activeIdsForService( $choice->serviceId );
-			if ( array() === $eligible || ( null !== $choice->resourceId && ! in_array( $choice->resourceId, $eligible, true ) ) ) {
-				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped
-				throw new SlotConflict( 'no_staff', $index );
-			}
+			// The same pool the availability read offers from, so a slot cannot be advertised by one
+			// path and refused by the other: active staff only, narrowed by `reservant/chain/candidates`.
+			$eligible          = $this->eligibility->forSegment( $choice->serviceId, $choice->resourceId, $index );
 			$segmentCandidates = null === $choice->resourceId ? $eligible : array( $choice->resourceId );
 
 			$items[]      = array(
