@@ -26,9 +26,12 @@
  * MAJOR findings hid. Two properties are non-negotiable and pinned below: (a) no confirm refusal
  * may ever leave the visitor with no way forward, and (b) a booking the server says is settled
  * (confirmed / awaiting approval / awaiting payment) must render its outcome, never a refusal.
- * The double-submit tests fire two clicks with NO await between them, because `isPending` reaches
- * the DOM one macrotask late (TanStack's notifyManager schedules with setTimeout(0)) and a second
- * mutate() detaches the first mutation's callbacks - only a synchronous guard can hold that line.
+ * The double-submit tests fire two clicks with NO await between them, inside one act(): TanStack's
+ * mutation observer updates its snapshot synchronously and only the NOTIFICATION is deferred
+ * (notifyManager schedules with setTimeout(0)), so the rendered `disabled` stops a second click
+ * only when some other render happens to land in the gap - and a second mutate() detaches the
+ * first mutation's callbacks. Only a synchronous guard holds that line, and only clicks with no
+ * render between them measure the guard rather than render timing.
  *
  * Fixtures where `requires_approval` and `status` DISAGREE are deliberate: the returned status is
  * the only thing the UI may branch on (R3), so the confirmed booking carries the flag true and the
@@ -228,7 +231,7 @@ interface RouteHandlers {
 	confirm?: () => Response;
 	release?: () => Response;
 	/** `GET /bookings/{uuid}` - the manage-token re-read the refusal recovery performs. */
-	booking?: () => Response;
+	booking?: () => Response | Promise< Response >;
 }
 
 type FetchCall = [ unknown, RequestInit | undefined ];
@@ -421,6 +424,35 @@ describe( 'BookingFlow', () => {
 		// is useCreateHold's own 409-only invalidation doing its job end to end.
 		await waitFor( () => expect( callsTo( fetchMock, '/availability' ) ).toHaveLength( 2 ) );
 		expect( await screen.findByText( SLOT_LABEL, EXACT_TEXT ) ).toBeInTheDocument();
+	} );
+
+	it( 'says when the slot list could not be refreshed after a conflict', async () => {
+		// React Query keeps `data` through a failed refetch, so a 409 whose triggered refetch
+		// fails would otherwise show the conflict sentence over a list that was never
+		// refreshed, silently. The ServicePicker stale-list precedent, ported to the when
+		// step: degraded and labelled, never destroyed and never silent.
+		let reads = 0;
+		installFetch( {
+			availability: () =>
+				1 === ( reads += 1 )
+					? APPOINTMENT_AVAILABILITY
+					: badRequestResponse( 'That date is too far ahead to book.' ),
+			hold: () => conflictResponse(),
+		} );
+		renderFlow();
+
+		await pickTodaySlot();
+		await submitDetails();
+
+		await screen.findByText( 'That time was just taken. Please pick another.' );
+		expect(
+			await screen.findByText(
+				'The available times could not be refreshed and may be out of date.'
+			)
+		).toBeInTheDocument();
+		// The stale offer is still on screen, and politely: nothing here earns an alert.
+		expect( screen.getByText( SLOT_LABEL, EXACT_TEXT ) ).toBeInTheDocument();
+		expect( screen.queryByRole( 'alert' ) ).not.toBeInTheDocument();
 	} );
 
 	it( 'ends on "request sent" for a service that requires approval', async () => {
@@ -737,6 +769,154 @@ describe( 'BookingFlow', () => {
 		).not.toBeInTheDocument();
 	} );
 
+	it( 'releases a live hold exactly once when the visitor picks another time', async () => {
+		// The deterministic route: an online-payment service's confirm answers 402
+		// online_payment_required on EVERY attempt (ConfirmBooking throws it unless the
+		// allow_direct_confirm filter says otherwise), the re-read comes back still pending,
+		// and the restart control renders beside the refusal. Taking it abandons a hold that
+		// is still ALIVE - skipping the release would leave the visitor's own pending hold
+		// blocking the very slot they are sent back to re-pick, and nulling `held` also wipes
+		// useReleaseOnHide's target, so even pagehide could never release it after the fact.
+		const fetchMock = installFetch( {
+			availability: () => APPOINTMENT_AVAILABILITY,
+			hold: () => jsonResponse( heldBooking(), 201 ),
+			confirm: () =>
+				refusalResponse(
+					'online_payment_required',
+					402,
+					'This booking must be paid for online.'
+				),
+			booking: () => jsonResponse( presentedBooking() ),
+		} );
+		renderFlow();
+
+		await pickTodaySlot();
+		await submitDetails();
+		fireEvent.click( await screen.findByRole( 'button', { name: 'Confirm booking' } ) );
+		await screen.findByText( 'This booking must be paid for online.' );
+
+		fireEvent.click( screen.getByRole( 'button', { name: 'Pick another time' } ) );
+
+		await waitFor( () => expect( callsTo( fetchMock, '/holds/', 'DELETE' ) ).toHaveLength( 1 ) );
+		const [ url ] = callsTo( fetchMock, '/holds/', 'DELETE' )[ 0 ] ?? [];
+		expect( String( url ) ).toContain( `/holds/${ UUID }?token=${ TOKEN }` );
+
+		// Exactly once: the flow released it itself, so a later hidden signal has no target.
+		forceVisibilityState( 'hidden' );
+		act( () => {
+			document.dispatchEvent( new Event( 'visibilitychange' ) );
+		} );
+		await act( async () => {} );
+		expect( callsTo( fetchMock, '/holds/', 'DELETE' ) ).toHaveLength( 1 );
+
+		// And the visitor really is back on the offer list.
+		expect( await screen.findByText( SLOT_LABEL, EXACT_TEXT ) ).toBeInTheDocument();
+	} );
+
+	it( 'leaves an expired hold to the sweeper when the visitor starts over', async () => {
+		// The other half of the split, which is on the DEADLINE, not on which trigger rendered
+		// the control: past expiry the sweeper owns the row, and a client-side DELETE would be
+		// a wasted request the server refuses anyway.
+		const fetchMock = installFetch( {
+			availability: () => APPOINTMENT_AVAILABILITY,
+			hold: () => jsonResponse( heldBooking( { hold_expires_at: '2026-06-01 00:05:00' } ), 201 ),
+		} );
+		renderFlow();
+
+		await pickTodaySlot();
+		await submitDetails();
+		await screen.findByRole( 'button', { name: 'Confirm booking' } );
+
+		act( () => {
+			jest.advanceTimersByTime( 5 * 60 * 1000 );
+		} );
+		fireEvent.click( screen.getByRole( 'button', { name: 'Pick another time' } ) );
+		await act( async () => {} );
+
+		expect( callsTo( fetchMock, '/holds/', 'DELETE' ) ).toHaveLength( 0 );
+		expect( await screen.findByText( SLOT_LABEL, EXACT_TEXT ) ).toBeInTheDocument();
+	} );
+
+	it( 'offers the way out while a refusal re-read hangs, and the next journey still confirms', async () => {
+		// The re-read is a raw fetch with no timeout. While it hangs, Confirm is disabled and
+		// - before this fix - the restart control did not render; with hold_expires_at null
+		// (a supported shape) there is no countdown to expire the way out into view, so the
+		// visitor was simply stuck. "No refusal is a dead end" must not depend on a deadline
+		// existing: the restart control renders during the recovery itself. Taking it releases
+		// the still-live hold, and the next journey's confirm latch is clean.
+		let confirms = 0;
+		const fetchMock = installFetch( {
+			availability: () => APPOINTMENT_AVAILABILITY,
+			hold: () => jsonResponse( heldBooking( { hold_expires_at: null } ), 201 ),
+			confirm: () =>
+				1 === ( confirms += 1 )
+					? refusalResponse(
+							'not_confirmable',
+							409,
+							'This booking cannot be confirmed in its current state.'
+					  )
+					: jsonResponse( confirmedBooking() ),
+			booking: () =>
+				new Promise< Response >( () => {
+					// Never settles - the recovery hangs for the rest of the test.
+				} ),
+		} );
+		renderFlow();
+
+		await pickTodaySlot();
+		await submitDetails();
+		fireEvent.click( await screen.findByRole( 'button', { name: 'Confirm booking' } ) );
+
+		fireEvent.click( await screen.findByRole( 'button', { name: 'Pick another time' } ) );
+		await waitFor( () => expect( callsTo( fetchMock, '/holds/', 'DELETE' ) ).toHaveLength( 1 ) );
+
+		// The journey restarts cleanly: re-pick the slot, the kept details submit again, and
+		// the second confirm goes through - the hung recovery left no latch behind.
+		fireEvent.click( await screen.findByText( SLOT_LABEL, EXACT_TEXT ) );
+		fireEvent.click( await screen.findByRole( 'button', { name: 'Continue' } ) );
+		fireEvent.click( await screen.findByRole( 'button', { name: 'Confirm booking' } ) );
+		expect( await screen.findByText( 'Your booking is confirmed.' ) ).toBeInTheDocument();
+		await act( async () => {} );
+	} );
+
+	it( 'ignores a re-read verdict that lands after the visitor started over', async () => {
+		// The visitor took the way out mid-recovery; the old journey's re-read then resolves
+		// "confirmed" - about a hold they already walked away from (and whose release was
+		// already requested). Teleporting them to an outcome screen mid-re-pick would apply a
+		// verdict to a journey that no longer exists.
+		let resolveRead: ( response: Response ) => void = () => {
+			throw new Error( 'booking re-read resolver was never captured' );
+		};
+		installFetch( {
+			availability: () => APPOINTMENT_AVAILABILITY,
+			hold: () => jsonResponse( heldBooking( { hold_expires_at: null } ), 201 ),
+			confirm: () =>
+				refusalResponse(
+					'not_confirmable',
+					409,
+					'This booking cannot be confirmed in its current state.'
+				),
+			booking: () =>
+				new Promise< Response >( ( resolve ) => {
+					resolveRead = resolve;
+				} ),
+		} );
+		renderFlow();
+
+		await pickTodaySlot();
+		await submitDetails();
+		fireEvent.click( await screen.findByRole( 'button', { name: 'Confirm booking' } ) );
+		fireEvent.click( await screen.findByRole( 'button', { name: 'Pick another time' } ) );
+		await screen.findByText( SLOT_LABEL, EXACT_TEXT );
+
+		await act( async () => {
+			resolveRead( jsonResponse( confirmedBooking() ) );
+		} );
+
+		expect( screen.queryByText( 'Your booking is confirmed.' ) ).not.toBeInTheDocument();
+		expect( screen.getByText( SLOT_LABEL, EXACT_TEXT ) ).toBeInTheDocument();
+	} );
+
 	it( 'sends exactly one hold when the details submit fires twice in one beat', async () => {
 		// Two clicks with NO await between them: isPending reaches the disabled attribute one
 		// macrotask late (notifyManager schedules with setTimeout(0)), and a second mutate()
@@ -954,10 +1134,14 @@ describe( 'BookingFlow', () => {
 		expect( screen.queryByRole( 'alert' ) ).not.toBeInTheDocument();
 	} );
 
-	it( 'moves focus into each new step - never leaving it on a control that unmounted', async () => {
-		// A visitor who submits a step lands with focus on a button that no longer exists, so a
-		// screen reader says nothing about the change. Each step change moves focus to the new
-		// step's first control; mounting never steals focus from the page.
+	it( 'moves focus to the flow container when the visitor advances a step', async () => {
+		// A visitor who submits a step would otherwise land with focus on a button that no
+		// longer exists, so a screen reader says nothing about the change. The landing spot is
+		// the CONTAINER (tabIndex -1), never a control: a first-in-document-order control is
+		// the Confirm button on review - focusing it would put the entire summary being
+		// approved ABOVE the reading point, unread - and a step whose content has not loaded
+		// falls through to Back, the one control that undoes the visitor's action. From the
+		// container a screen reader reads the new step from its top.
 		installFetch( {
 			availability: () => APPOINTMENT_AVAILABILITY,
 			hold: () => jsonResponse( heldBooking(), 201 ),
@@ -965,12 +1149,30 @@ describe( 'BookingFlow', () => {
 		renderFlow();
 
 		expect( document.body ).toHaveFocus();
+		const flow = document.querySelector( '.reservant-flow' );
 
 		await pickTodaySlot();
-		expect( await screen.findByLabelText( 'Name' ) ).toHaveFocus();
+		expect( flow ).toHaveFocus();
 
 		await submitDetails();
-		expect( await screen.findByRole( 'button', { name: 'Confirm booking' } ) ).toHaveFocus();
+		await screen.findByRole( 'button', { name: 'Confirm booking' } );
+		expect( flow ).toHaveFocus();
+	} );
+
+	it( 'leaves focus on the page when a mount auto-skips the staff step', async () => {
+		// A preselected event service enters the staff step with nobody to pick; when the
+		// catalog ANSWER arrives, the skip effect moves the step - a network response, not a
+		// visitor action. Focus must stay wherever the visitor put it: HTMLElement.focus()
+		// scrolls by default, so a widget below the fold would otherwise jerk-scroll the page
+		// and swallow the keystrokes of whatever the visitor was typing elsewhere.
+		installFetch( { availability: () => EVENT_AVAILABILITY } );
+		renderFlow( { serviceId: 9, resourceId: null } );
+
+		// The when step is fully on screen - the skip ran, the availability answered...
+		expect( await screen.findByLabelText( 'Number of places' ) ).toBeInTheDocument();
+		await act( async () => {} );
+		// ...and with ZERO visitor interactions, focus never left the page.
+		expect( document.body ).toHaveFocus();
 	} );
 
 	it( 'reviews what the server held: the service, the site-clock time and the priced total', async () => {

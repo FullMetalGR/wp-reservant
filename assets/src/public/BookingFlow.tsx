@@ -43,9 +43,12 @@
  *   answer); anything else keeps the visitor on review with the server's sentence AND the
  *   restart control, which renders on any refusal - not only after the countdown reaches zero.
  *   A released-then-confirmed hold answers 409 `not_confirmable`, NOT 410: the DELETE moves the
- *   row out of `pending`, `ConfirmBooking` checks status before deadline, and `Errors` maps
- *   every non-`hold_expired` reason to 409 - so a status-code map cannot tell "your hold died"
- *   from "you are already booked"; only the re-read can.
+ *   row out of `pending` and `ConfirmBooking` checks status before deadline. `Errors::failure()`
+ *   maps `hold_expired` to 410, `window_closed` to 403, `online_payment_required` to 402 and
+ *   every other reason to 409 - so `not_confirmable` ("your hold died") and `approval_required`
+ *   ("your request is already lodged") share one status code, and only the re-read can tell the
+ *   dead journey from the succeeded one. The 402 and 403 arms route through the same re-read,
+ *   which is right for them too: neither says anything about what the booking now IS.
  * - Both mutations carry a SYNCHRONOUS `useRef` latch set before `mutate()`: the observer
  *   notifies through a deferred scheduler, so the rendered `disabled` only stops a second click
  *   when some other render happens to land in the gap - and a second `mutate()` detaches the
@@ -57,9 +60,15 @@
  *   a conflict is a normal outcome that must never cost a retype.
  * - A `data-staff` preselection rides along only onto a service that lists that resource -
  *   stamped onto any other pick, the server would refuse a pairing the visitor never chose.
- * - Step changes move focus to the new step's first control (or the flow container): submitting
- *   a step otherwise leaves focus on a button that no longer exists, and a screen reader user
- *   never hears that anything changed. The initial mount never steals focus from the page.
+ * - A step change the VISITOR caused moves focus to the flow container (`tabIndex={-1}`, the
+ *   standard route-change landing spot): submitting a step otherwise leaves focus on a button
+ *   that no longer exists, and a screen reader user never hears that anything changed. The
+ *   container - never a first-in-document-order control, which on review is the Confirm button
+ *   itself, leaving the whole summary being approved above the reading point - puts the reader
+ *   at the top of the new step's content. A step change the STATE MACHINE caused (the staff
+ *   step auto-skipping when the catalog answer arrives) moves nothing: `focus()` scrolls by
+ *   default, and a network response must never scroll the page or steal focus from whatever
+ *   the visitor was doing. The initial mount never steals focus from the page either.
  */
 import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { __ } from '@wordpress/i18n';
@@ -385,7 +394,10 @@ interface StaffStepProps {
 	pending: boolean;
 	error: Error | null;
 	onSegments: ( segments: Segment[] ) => void;
+	/** The visitor's own Continue click - the flow treats it as a visitor-caused step change. */
 	onContinue: () => void;
+	/** The self-skip, fired by the CATALOG ANSWER - the flow must not move focus for it. */
+	onSkip: () => void;
 }
 
 /**
@@ -393,7 +405,9 @@ interface StaffStepProps {
  * this step before the catalog exists; once it arrives, a chain with nobody to pick moves on by
  * itself through the effect (the interactive path decides the same thing at click time in
  * `nextAfterService`). "No preference" is the default - a null `resourceId` reaches the wire as
- * "any staff" and `ChainResolver` assigns at hold time.
+ * "any staff" and `ChainResolver` assigns at hold time. The skip goes through `onSkip`, not
+ * `onContinue`: it is a network response moving the step, and the flow's focus handling must be
+ * able to tell it from the visitor's own click.
  */
 function StaffStep( {
 	segments,
@@ -402,13 +416,14 @@ function StaffStep( {
 	error,
 	onSegments,
 	onContinue,
+	onSkip,
 }: StaffStepProps ): JSX.Element | null {
 	const skip = undefined !== catalog && ! hasStaffChoice( segments, catalog );
 	useEffect( () => {
 		if ( skip ) {
-			onContinue();
+			onSkip();
 		}
-	}, [ skip, onContinue ] );
+	}, [ skip, onSkip ] );
 	if ( skip ) {
 		return null;
 	}
@@ -495,19 +510,34 @@ function WhenStep( {
 	onOccurrence,
 }: WhenStepProps ): JSX.Element {
 	const seatsId = useId();
-	// One notice per step: the 409 sentence when there is one (always polite - a conflict is a
-	// normal outcome), else a query failure through noticeOf (polite for a 4xx, an alert only
-	// for network/5xx). The two never coexist: the failure only renders with no data at all,
-	// and a conflict presupposes a successfully loaded offer list.
+	// The primary notice: the 409 sentence when there is one (always polite - a conflict is a
+	// normal outcome), else a DESTRUCTIVE query failure through noticeOf (polite for a 4xx, an
+	// alert only for network/5xx) - destructive meaning there is no data at all to show.
 	const notice =
 		null !== conflict
 			? { text: conflict, alert: false }
 			: null !== error && undefined === data
 				? noticeOf( error )
 				: null;
+	// A refetch that failed WITH a list still on hand gets its own polite region: React Query
+	// keeps `data` through the failure, so the offer stays usable but may be stale - exactly
+	// the shape a 409's own triggered refetch falls into when it fails, where the conflict
+	// sentence above would otherwise sit over a never-refreshed list, silently (the
+	// ServicePicker stale-list precedent).
+	const staleNotice =
+		null !== error && undefined !== data
+			? {
+					text: __(
+						'The available times could not be refreshed and may be out of date.',
+						'reservant'
+					),
+					alert: false,
+			  }
+			: null;
 	return (
 		<>
 			<StepNotice notice={ notice } />
+			<StepNotice notice={ staleNotice } />
 			{ pending && (
 				<p className="reservant-flow__status" role="status">
 					{ __( 'Checking availability...', 'reservant' ) }
@@ -557,6 +587,8 @@ interface ReviewPanelProps {
 	expiresAt: Date | null;
 	expired: boolean;
 	confirmPending: boolean;
+	/** True while a refusal's booking re-read is in flight - the restart stays reachable. */
+	recovering: boolean;
 	notice: FlowNotice | null;
 	onExpire: () => void;
 	onConfirm: () => void;
@@ -565,9 +597,12 @@ interface ReviewPanelProps {
 
 /**
  * The held state: countdown (when the server gave a deadline), summary, confirm, way out. The
- * restart control renders after expiry AND alongside any refusal notice: a refused confirm has
- * no Back and can re-refuse forever (a released hold answers 409 on every retry), so a visitor
- * with a refusal in front of them always has a way forward that is not a page reload.
+ * restart control renders after expiry, alongside any refusal notice, AND while a refusal's
+ * booking re-read is still in flight: a refused confirm has no Back and can re-refuse forever
+ * (a released hold answers 409 on every retry), and the re-read is a raw fetch with no timeout
+ * - on a hold with no deadline there is no countdown to surface the way out if it hangs. So a
+ * visitor with a refusal in front of them, settled or not, always has a way forward that is
+ * not a page reload.
  */
 function ReviewPanel( {
 	booking,
@@ -576,6 +611,7 @@ function ReviewPanel( {
 	expiresAt,
 	expired,
 	confirmPending,
+	recovering,
 	notice,
 	onExpire,
 	onConfirm,
@@ -592,7 +628,7 @@ function ReviewPanel( {
 				confirmDisabled={ expired || confirmPending }
 			/>
 			<StepNotice notice={ notice } />
-			{ ( expired || null !== notice ) && (
+			{ ( expired || null !== notice || recovering ) && (
 				<button
 					type="button"
 					className="reservant-flow__restart"
@@ -691,6 +727,8 @@ function Flow( { config }: { config: WidgetConfig } ): JSX.Element {
 
 	const createHold = useCreateHold();
 	const confirm = useConfirm();
+	/** For handleStartOver's own fire-and-forget release of a live abandoned hold. */
+	const release = useReleaseHold();
 	useReleaseOnHide( held, 'done' === step );
 
 	// The synchronous double-submit guards (see the header): set before mutate(), cleared where
@@ -698,6 +736,13 @@ function Flow( { config }: { config: WidgetConfig } ): JSX.Element {
 	// recoverRefusedConfirm owns clearing it - so no second confirm can start mid-recovery.
 	const holdBusy = useRef( false );
 	const confirmBusy = useRef( false );
+
+	// The current refusal recovery's ticket. The restart control renders DURING a recovery, so
+	// a re-read can resolve after the visitor already started over - or even after a second
+	// journey's own recovery began. A resolution whose ticket is no longer current applies to
+	// a journey that no longer exists: it must neither render its verdict nor touch the
+	// recovery flag and confirm latch, which belong to the current journey now.
+	const recoveryTicket = useRef( 0 );
 
 	// The window starts on the SITE's own today (`siteNow`, never `new Date()` - an evening
 	// visitor west of the salon is often a day behind it) and spans the strip's fourteen days,
@@ -713,28 +758,27 @@ function Flow( { config }: { config: WidgetConfig } ): JSX.Element {
 
 	const expiresAt = useMemo( () => expiryOf( held ), [ held ] );
 
-	// Focus follows the journey (the ChainBuilder setFocusAfterRemove precedent): a step change
-	// unmounts the control the visitor just used, which would drop focus on <body> and tell a
-	// screen reader user nothing. Each change lands focus on the new step's first control - or
-	// on the container itself when a step renders none (the outcome, whose news arrives through
-	// its status region). The first commit only records the step: mounting must never steal
-	// focus from the surrounding page.
+	// Focus follows the VISITOR, never the state machine (the header's focus bullet): a step
+	// change they caused unmounts the control they just used, which would drop focus on <body>
+	// and tell a screen reader user nothing - so those changes land focus on the flow container
+	// and the reader starts at the top of the new step. The ref is the distinguishing mark:
+	// every visitor-initiated transition goes through moveTo(), which arms it, and the effect
+	// consumes it; a machine-caused change (the staff step's catalog-answer skip) calls setStep
+	// directly, leaves it unarmed, and moves nothing - focus() scrolls by default, and a
+	// network response must never scroll the page or steal focus from whatever the visitor was
+	// doing. The unarmed initial mount never steals focus from the page either.
 	const flowRef = useRef< HTMLDivElement | null >( null );
-	const focusedStep = useRef< Step | null >( null );
+	const visitorMoved = useRef( false );
+	const moveTo = ( next: Step ): void => {
+		visitorMoved.current = true;
+		setStep( next );
+	};
 	useEffect( () => {
-		if ( focusedStep.current === step ) {
+		if ( ! visitorMoved.current ) {
 			return;
 		}
-		const firstStep = null === focusedStep.current;
-		focusedStep.current = step;
-		const root = flowRef.current;
-		if ( firstStep || null === root ) {
-			return;
-		}
-		const target = root.querySelector< HTMLElement >(
-			'button:not([disabled]), input, select, textarea, a[href]'
-		);
-		( target ?? root ).focus();
+		visitorMoved.current = false;
+		flowRef.current?.focus();
 	}, [ step ] );
 
 	/** Both pick kinds land here: store the one that happened, clear the other, move to details. */
@@ -743,7 +787,7 @@ function Flow( { config }: { config: WidgetConfig } ): JSX.Element {
 		setOccurrence( picked );
 		setConflictNotice( null );
 		setDetailsNotice( null );
-		setStep( 'details' );
+		moveTo( 'details' );
 	};
 
 	const handleDetails = ( submitted: HoldInput[ 'customer' ] ): void => {
@@ -753,23 +797,25 @@ function Flow( { config }: { config: WidgetConfig } ): JSX.Element {
 		}
 		holdBusy.current = true;
 		setDetailsNotice( null );
+		// Each route is the direct continuation of the visitor's own details submit, so the
+		// step changes below all count as visitor-caused and go through moveTo.
 		const routes = holdCallbacks( {
 			onHeld: ( booking ) => {
 				setHeld( booking );
 				setExpired( false );
 				setReviewNotice( null );
-				setStep( 'review' );
+				moveTo( 'review' );
 			},
 			onOutcome: ( booking ) => {
 				setHeld( booking );
 				setOutcome( booking );
-				setStep( 'done' );
+				moveTo( 'done' );
 			},
 			onConflict: ( sentence ) => {
 				setConflictNotice( sentence );
 				setChosen( null );
 				setOccurrence( null );
-				setStep( 'when' );
+				moveTo( 'when' );
 			},
 			onRefusal: setDetailsNotice,
 		} );
@@ -792,27 +838,38 @@ function Flow( { config }: { config: WidgetConfig } ): JSX.Element {
 	 * that committed). A settled status renders its outcome - the journey succeeded and a
 	 * refusal screen would be a lie. Anything else, or a failed re-read, keeps the visitor on
 	 * review with the server's sentence and the restart control - never a dead end. The confirm
-	 * latch stays held until this settles, so no second confirm can start mid-read.
+	 * latch stays held until this settles, so no second confirm can start mid-read. Because the
+	 * restart control also renders WHILE this is in flight (a raw fetch with no timeout, and a
+	 * deadline-less hold has no countdown to surface the way out if it hangs), a re-read may
+	 * resolve after the visitor already started over: everything past the await is gated on
+	 * the recovery ticket still being current, so an abandoned recovery's late verdict renders
+	 * nothing and cannot clobber the flag and latch that handleStartOver already reset - and
+	 * that a second journey's own recovery may hold by then.
 	 */
 	const recoverRefusedConfirm = async (
 		credentials: ManageCredentials,
 		notice: FlowNotice,
 		holdGone: boolean
 	): Promise< void > => {
+		recoveryTicket.current += 1;
+		const ticket = recoveryTicket.current;
 		setRecovering( true );
+		let booking: Booking | null = null;
 		try {
-			const booking = await fetchBooking( credentials.uuid, credentials.token );
-			if ( isSettled( booking.status ) ) {
-				setOutcome( booking );
-				setStep( 'done' );
-				return;
-			}
+			booking = await fetchBooking( credentials.uuid, credentials.token );
 		} catch {
-			// The re-read failed too - the refusal below stands, and the restart control is the
-			// way out either way.
-		} finally {
-			setRecovering( false );
-			confirmBusy.current = false;
+			// The re-read failed too - the refusal below stands, and the restart control is
+			// the way out either way.
+		}
+		if ( ticket !== recoveryTicket.current ) {
+			return;
+		}
+		setRecovering( false );
+		confirmBusy.current = false;
+		if ( null !== booking && isSettled( booking.status ) ) {
+			setOutcome( booking );
+			moveTo( 'done' );
+			return;
 		}
 		setExpired( ( previous ) => previous || holdGone );
 		setReviewNotice( notice );
@@ -831,7 +888,7 @@ function Flow( { config }: { config: WidgetConfig } ): JSX.Element {
 				onDone: ( booking ) => {
 					confirmBusy.current = false;
 					setOutcome( booking );
-					setStep( 'done' );
+					moveTo( 'done' );
 				},
 				onRefusal: ( notice, holdGone ) => {
 					void recoverRefusedConfirm( credentials, notice, holdGone );
@@ -840,14 +897,34 @@ function Flow( { config }: { config: WidgetConfig } ): JSX.Element {
 		);
 	};
 
-	// The expired hold is left to the sweeper - never released client-side past its deadline.
+	/**
+	 * Taking the way out releases a hold that is still LIVE: the visitor is abandoning it, and
+	 * their own orphaned `pending` hold would otherwise block the very slot they are sent back
+	 * to re-pick ("That time was just taken" about their own reservation, for the full TTL -
+	 * `POST /holds` has no same-customer exemption), while nulling `held` below also strips
+	 * `useReleaseOnHide`'s target, so not even pagehide would release it later. An EXPIRED
+	 * hold is still left to the sweeper - never released client-side past its deadline - so
+	 * the split is on the DEADLINE, not on which trigger rendered the control. Any in-flight
+	 * recovery is abandoned by bumping its ticket, and its flag and confirm latch reset here:
+	 * a hung re-read would otherwise leave both stuck, and the next journey's confirm dead.
+	 */
 	const handleStartOver = (): void => {
+		if (
+			null !== held &&
+			! expired &&
+			( null === expiresAt || expiresAt.getTime() > Date.now() )
+		) {
+			release.mutate( { uuid: held.uuid, token: held.manage_token } );
+		}
+		recoveryTicket.current += 1;
+		setRecovering( false );
+		confirmBusy.current = false;
 		setHeld( null );
 		setExpired( false );
 		setChosen( null );
 		setOccurrence( null );
 		setReviewNotice( null );
-		setStep( 'when' );
+		moveTo( 'when' );
 	};
 
 	const prev = prevOf( step, config, segments, catalog );
@@ -860,7 +937,7 @@ function Flow( { config }: { config: WidgetConfig } ): JSX.Element {
 					preselectedResourceId={ config.resourceId }
 					catalog={ catalog }
 					onSegments={ setSegments }
-					onContinue={ () => setStep( nextAfterService( segments, catalog ) ) }
+					onContinue={ () => moveTo( nextAfterService( segments, catalog ) ) }
 				/>
 			) }
 			{ 'staff' === step && (
@@ -870,7 +947,8 @@ function Flow( { config }: { config: WidgetConfig } ): JSX.Element {
 					pending={ catalogPending }
 					error={ catalogError }
 					onSegments={ setSegments }
-					onContinue={ () => setStep( 'when' ) }
+					onContinue={ () => moveTo( 'when' ) }
+					onSkip={ () => setStep( 'when' ) }
 				/>
 			) }
 			{ 'when' === step && (
@@ -908,6 +986,7 @@ function Flow( { config }: { config: WidgetConfig } ): JSX.Element {
 					expiresAt={ expiresAt }
 					expired={ expired }
 					confirmPending={ confirm.isPending || recovering }
+					recovering={ recovering }
 					notice={ reviewNotice }
 					onExpire={ () => setExpired( true ) }
 					onConfirm={ handleConfirm }
@@ -928,7 +1007,7 @@ function Flow( { config }: { config: WidgetConfig } ): JSX.Element {
 						if ( holdBusy.current ) {
 							return;
 						}
-						setStep( prev );
+						moveTo( prev );
 					} }
 				>
 					{ __( 'Back', 'reservant' ) }
