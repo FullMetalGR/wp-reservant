@@ -13,11 +13,13 @@
  *
  * - The neutral panel collapses what the server deliberately keeps distinct: `GET /bookings/{uuid}`
  *   answers a wrong token 403 and an unknown uuid 404 on purpose (the reschedule() docblock in
- *   BookingsController.php owns why), and the CLIENT must render those - and any other failed
- *   read - byte-identically, with no booking fields and no server detail. A failed cancel or
- *   reschedule MUTATION is the opposite case: same status codes possible (`window_closed` is a
- *   403 too), but the booking stays on screen with the server's own sentence - which request
- *   failed decides, never the status code.
+ *   BookingsController.php owns why), and the CLIENT must render every read failure that could
+ *   answer that existence question - any 4xx - byte-identically, with no booking fields and no
+ *   server detail. A read failure that answers NOTHING about the uuid (a transport drop, a 5xx)
+ *   must never claim the link is invalid: it gets a could-not-load state with a real retry. A
+ *   failed cancel or reschedule MUTATION is different again: same status codes possible
+ *   (`window_closed` is a 403 too), but the booking stays on screen with the server's own
+ *   sentence - which request failed decides, never the status code alone.
  * - No optimistic updates: the screen shows only what the server has confirmed, so a reschedule
  *   409 leaves the ORIGINAL time standing (the engine's atomic release-and-re-hold guarantee,
  *   mirrored) and a success shows the NEW time only once the server said so.
@@ -267,10 +269,14 @@ function jsonResponse( body: unknown, status = 200 ): Response {
 	} as Response;
 }
 
-/** The route guard's wrong-token answer - no reservant detail on purpose. */
+/** `Routes::forbidden()` verbatim - its worded detail must never reach the neutral panel. */
 function forbiddenResponse(): Response {
 	return jsonResponse(
-		{ code: 'reservant_forbidden', message: 'forbidden', data: { status: 403 } },
+		{
+			code: 'reservant_forbidden',
+			message: 'forbidden',
+			data: { status: 403, detail: 'That link is not valid for this booking.' },
+		},
 		403
 	);
 }
@@ -380,6 +386,20 @@ function renderManage( overrides: Partial< WidgetConfig > = {} ): ReturnType< ty
 	);
 }
 
+/**
+ * Run the booking read all the way to its settled failure: `newManageClient` keeps three retries
+ * for anything that is not a 4xx, each behind its own backoff timer, so a single flush leaves the
+ * query mid-retry rather than settled. Each round runs the pending timer and drains the
+ * microtasks its rejection queues.
+ */
+async function settleReadRetries(): Promise< void > {
+	for ( let round = 0; round < 8; round++ ) {
+		await act( async () => {
+			jest.runOnlyPendingTimers();
+		} );
+	}
+}
+
 /** Open the dialog and book the June 3rd 15:00 site slot - the shared reschedule preamble. */
 async function pickNewSlot(): Promise< void > {
 	fireEvent.click( await screen.findByRole( 'button', { name: 'Pick a new time' } ) );
@@ -439,7 +459,9 @@ describe( 'ManageView', () => {
 		const second = renderManage();
 		await screen.findByText( NEUTRAL );
 		expect( second.container.innerHTML ).toBe( forbiddenHtml );
-		// The 404's own worded detail never leaks into the panel.
+		// Neither side's worded detail ever leaks into the panel - the 403 carries one too
+		// (`Routes::forbidden()`), so suppression must be demonstrated on both.
+		expect( forbiddenHtml ).not.toContain( 'That link is not valid for this booking.' );
 		expect( second.container.innerHTML ).not.toContain( 'That booking is no longer available.' );
 	} );
 
@@ -450,6 +472,64 @@ describe( 'ManageView', () => {
 		expect( await screen.findByText( NEUTRAL ) ).toBeInTheDocument();
 		await act( async () => {} );
 		expect( callsTo( fetchMock, '/bookings/' ) ).toHaveLength( 0 );
+	} );
+
+	it( 'offers a retry instead of the dead-link panel when the connection drops', async () => {
+		// A transport failure answers NOTHING about whether the uuid exists - the request never
+		// reached an authorization decision - so the oracle-collapsing neutral panel would tell
+		// a guest on a flaky connection that their perfectly good link is dead, with no way to
+		// try again. This state must never claim the link is invalid and must always refetch.
+		const fetchMock = installFetch( {
+			booking: () => Promise.reject( new TypeError( 'Failed to fetch' ) ),
+		} );
+		renderManage();
+		await settleReadRetries();
+
+		const retry = screen.getByRole( 'button', { name: 'Try again' } );
+		expect(
+			screen.getByText( 'We could not load your booking. Please check your connection and try again.' )
+		).toBeInTheDocument();
+		// Not the dead-link lie, no booking fields, and no browser jargon.
+		expect( screen.queryByText( NEUTRAL ) ).not.toBeInTheDocument();
+		expect( screen.queryByText( 'Haircut' ) ).not.toBeInTheDocument();
+		expect( screen.queryByText( FIRST_TIME, EXACT_TEXT ) ).not.toBeInTheDocument();
+		expect( screen.queryByText( 'Failed to fetch' ) ).not.toBeInTheDocument();
+
+		// The control is a real retry: it puts the read back on the wire.
+		const readsBefore = callsTo( fetchMock, '/bookings/' ).length;
+		fireEvent.click( retry );
+		await act( async () => {} );
+		expect( callsTo( fetchMock, '/bookings/' ).length ).toBeGreaterThan( readsBefore );
+	} );
+
+	it( 'offers a retry instead of the dead-link panel when the read fails with a 500', async () => {
+		// A 5xx is the server failing, not the server answering the oracle question - only an
+		// authorization-shaped 4xx may collapse into the neutral panel.
+		let failing = true;
+		installFetch( {
+			booking: () =>
+				failing
+					? jsonResponse(
+							{
+								code: 'internal_server_error',
+								message: 'Internal server error',
+								data: { status: 500 },
+							},
+							500
+					  )
+					: jsonResponse( chainBooking() ),
+		} );
+		renderManage();
+		await settleReadRetries();
+
+		expect( screen.queryByText( NEUTRAL ) ).not.toBeInTheDocument();
+		expect( screen.queryByText( FIRST_TIME, EXACT_TEXT ) ).not.toBeInTheDocument();
+
+		// The server recovers; the retry control brings the booking up without a reload.
+		failing = false;
+		fireEvent.click( screen.getByRole( 'button', { name: 'Try again' } ) );
+		expect( await screen.findByText( 'Haircut' ) ).toBeInTheDocument();
+		expect( screen.getByText( FIRST_TIME, EXACT_TEXT ) ).toBeInTheDocument();
 	} );
 
 	it( 'shows the engine refusal and keeps the booking when cancel is refused outside the window', async () => {
@@ -535,6 +615,50 @@ describe( 'ManageView', () => {
 
 		expect( await screen.findByText( 'This booking has been cancelled.' ) ).toBeInTheDocument();
 		expect( callsTo( fetchMock, '/cancel', 'POST' ) ).toHaveLength( 1 );
+	} );
+
+	it( 'gives the destructive action its own progress feedback', async () => {
+		// A screen-reader guest confirming a cancel used to get only `disabled` - silence -
+		// while the request flew. The busy line is a polite status (the SlotGrid empty-answer
+		// precedent), mounted empty and filled one effect later so it actually announces (the
+		// NoticeRegion mechanism).
+		installFetch( {
+			booking: () => jsonResponse( chainBooking() ),
+			cancel: () => new Promise< Response >( () => {} ),
+		} );
+		renderManage();
+
+		fireEvent.click( await screen.findByRole( 'button', { name: 'Cancel booking' } ) );
+		fireEvent.click( screen.getByRole( 'button', { name: 'Yes, cancel it' } ) );
+		await act( async () => {} );
+
+		expect( screen.getByText( 'Cancelling your booking...' ) ).toHaveAttribute(
+			'role',
+			'status'
+		);
+	} );
+
+	it( 'never shows browser jargon when a cancel dies on the network', async () => {
+		// A dead connection rejects the fetch with TypeError('Failed to fetch') - developer
+		// wording no guest should be handed. It is a genuine failure (role="alert"), worded
+		// for a human, and the booking stays fully on screen with every way forward intact.
+		installFetch( {
+			booking: () => jsonResponse( chainBooking() ),
+			cancel: () => Promise.reject( new TypeError( 'Failed to fetch' ) ),
+		} );
+		renderManage();
+
+		fireEvent.click( await screen.findByRole( 'button', { name: 'Cancel booking' } ) );
+		fireEvent.click( screen.getByRole( 'button', { name: 'Yes, cancel it' } ) );
+
+		const alert = await screen.findByRole( 'alert' );
+		expect( alert ).toHaveTextContent(
+			'We could not reach the server. Please check your connection and try again.'
+		);
+		expect( screen.queryByText( 'Failed to fetch' ) ).not.toBeInTheDocument();
+		expect( screen.getByText( FIRST_TIME, EXACT_TEXT ) ).toBeInTheDocument();
+		expect( screen.queryByText( NEUTRAL ) ).not.toBeInTheDocument();
+		expect( screen.getByRole( 'button', { name: 'Yes, cancel it' } ) ).toBeInTheDocument();
 	} );
 
 	it( 'ignores a cancel refusal that lands after the visitor kept the booking', async () => {
@@ -810,6 +934,83 @@ describe( 'ManageView', () => {
 		await act( async () => {} );
 	} );
 
+	it.each< [ Booking[ 'status' ], string ] >( [
+		[ 'completed', 'This booking has already taken place.' ],
+		[ 'no_show', 'This booking was recorded as missed.' ],
+		[ 'rejected', 'This booking request was declined.' ],
+		[ 'expired', 'This booking request expired before it was completed.' ],
+	] )( 'says what a %s booking is and offers no doomed controls', async ( status, sentence ) => {
+		// The server refuses both mutations for these statuses (`CancelBooking`'s
+		// canTransitionTo guard, `RescheduleBooking::assertReschedulable()`) - rendering the
+		// buttons anyway promises actions guaranteed to fail. And the guest still came to see
+		// their booking: the details render for EVERY status; only the controls and the
+		// sentence change.
+		installFetch( { booking: () => jsonResponse( chainBooking( { status } ) ) } );
+		renderManage();
+
+		expect( await screen.findByText( sentence ) ).toBeInTheDocument();
+		expect( screen.getByText( 'Haircut' ) ).toBeInTheDocument();
+		expect( screen.getByText( FIRST_TIME, EXACT_TEXT ) ).toBeInTheDocument();
+		expect( screen.queryByRole( 'button', { name: 'Pick a new time' } ) ).not.toBeInTheDocument();
+		expect( screen.queryByRole( 'button', { name: 'Cancel booking' } ) ).not.toBeInTheDocument();
+	} );
+
+	it( 'tells an awaiting-approval guest their booking is not settled, keeping both controls', async () => {
+		// Task 14's R3 forbids flattening the held statuses into "confirmed" on the way in;
+		// the page the guest returns to must not flatten them either. A live approval hold is
+		// both cancellable (canTransitionTo) and reschedulable (assertReschedulable's
+		// held-with-live-deadline arm), so the sentence changes and both controls stay.
+		installFetch( {
+			booking: () =>
+				jsonResponse(
+					chainBooking( {
+						status: 'awaiting_approval',
+						hold_class: 'approval',
+						hold_expires_at: '2026-06-02 00:00:00',
+					} )
+				),
+		} );
+		renderManage();
+
+		expect(
+			await screen.findByText(
+				'This booking is waiting for our approval. We will email you as soon as it is decided.'
+			)
+		).toBeInTheDocument();
+		expect( screen.getByText( FIRST_TIME, EXACT_TEXT ) ).toBeInTheDocument();
+		expect( screen.getByRole( 'button', { name: 'Pick a new time' } ) ).toBeInTheDocument();
+		expect( screen.getByRole( 'button', { name: 'Cancel booking' } ) ).toBeInTheDocument();
+	} );
+
+	it.each< [ string | null ] >( [ [ '2026-05-31 23:59:59' ], [ null ] ] )(
+		'offers cancel but never reschedule for a pending booking with a dead hold (expiry %p)',
+		async ( holdExpiresAt ) => {
+			// assertReschedulable wants a LIVE deadline on a held status - a lapsed or absent
+			// hold has nothing to release, so "Pick a new time" would be a guaranteed
+			// not_reschedulable. Cancel stays: canTransitionTo allows Pending -> Cancelled
+			// regardless of the hold clock.
+			installFetch( {
+				booking: () =>
+					jsonResponse(
+						chainBooking( {
+							status: 'pending',
+							hold_class: 'checkout',
+							hold_expires_at: holdExpiresAt,
+						} )
+					),
+			} );
+			renderManage();
+
+			expect(
+				await screen.findByText( 'This booking has not been confirmed yet.' )
+			).toBeInTheDocument();
+			expect( screen.getByRole( 'button', { name: 'Cancel booking' } ) ).toBeInTheDocument();
+			expect(
+				screen.queryByRole( 'button', { name: 'Pick a new time' } )
+			).not.toBeInTheDocument();
+		}
+	);
+
 	it( 'is a real dialog: named, focused on open, Escape closes and restores focus', async () => {
 		installFetch( {
 			booking: () => jsonResponse( chainBooking() ),
@@ -826,6 +1027,53 @@ describe( 'ManageView', () => {
 		fireEvent.keyDown( dialog, { key: 'Escape' } );
 		expect( screen.queryByRole( 'dialog' ) ).not.toBeInTheDocument();
 		expect( trigger ).toHaveFocus();
+	} );
+
+	it( 'blocks the background controls while the dialog is open', async () => {
+		// R-J's Tab containment is pinned above - but a modal must hold by MOUSE too: nothing
+		// behind the open dialog may be clicked or focused. Unguarded, "Cancel booking" sat
+		// clickable behind the modal, arming the destructive confirmation UNDER the dialog and
+		// yanking focus out of it with two competing flows live.
+		installFetch( {
+			booking: () => jsonResponse( chainBooking() ),
+			availability: () => CHAIN_AVAILABILITY,
+		} );
+		renderManage();
+
+		const trigger = await screen.findByRole( 'button', { name: 'Pick a new time' } );
+		const cancelButton = screen.getByRole( 'button', { name: 'Cancel booking' } );
+		fireEvent.click( trigger );
+		const dialog = await screen.findByRole( 'dialog', { name: 'Pick a new time' } );
+
+		// Clicking the background cancel affordance does nothing - and prove it with a full
+		// flush, since a stolen focus or a swapped row could land a beat late.
+		fireEvent.click( cancelButton );
+		await act( async () => {} );
+		act( () => {
+			jest.runOnlyPendingTimers();
+		} );
+		await act( async () => {} );
+		expect( screen.queryByRole( 'button', { name: 'Yes, cancel it' } ) ).not.toBeInTheDocument();
+		expect( screen.getByRole( 'dialog', { name: 'Pick a new time' } ) ).toBeInTheDocument();
+		expect( dialog ).toHaveFocus();
+
+		// Nor can the background take focus while the dialog is open.
+		act( () => {
+			cancelButton.focus();
+		} );
+		expect( cancelButton ).not.toHaveFocus();
+		act( () => {
+			trigger.focus();
+		} );
+		expect( trigger ).not.toHaveFocus();
+
+		// Closing re-enables the background: focus comes home to the trigger, and the cancel
+		// affordance works again.
+		fireEvent.keyDown( dialog, { key: 'Escape' } );
+		expect( screen.queryByRole( 'dialog' ) ).not.toBeInTheDocument();
+		expect( trigger ).toHaveFocus();
+		fireEvent.click( screen.getByRole( 'button', { name: 'Cancel booking' } ) );
+		expect( screen.getByRole( 'button', { name: 'Yes, cancel it' } ) ).toBeInTheDocument();
 	} );
 
 	it( 'contains focus while the dialog is open', async () => {
@@ -978,6 +1226,11 @@ describe( 'ManageView', () => {
 		// The catalog never answers, but the segment row still shows its time.
 		expect( await screen.findByText( FIRST_TIME, EXACT_TEXT ) ).toBeInTheDocument();
 		expect( screen.getByText( SECOND_TIME, EXACT_TEXT ) ).toBeInTheDocument();
+		// And the name is OMITTED rather than guessed (R-D): no service-name span exists at
+		// all until the catalog answers - any guess, including the left-the-catalog
+		// placeholder, would have to render one.
+		expect( document.querySelector( '.reservant-manage__service' ) ).toBeNull();
+		expect( screen.queryByText( 'Unavailable service' ) ).not.toBeInTheDocument();
 	} );
 
 	it( 'keeps the row whole when a service has left the catalog', async () => {

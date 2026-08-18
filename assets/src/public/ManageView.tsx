@@ -11,12 +11,24 @@
  * - The neutral "no longer valid" panel collapses what the server deliberately keeps distinct:
  *   `GET /bookings/{uuid}` answers a wrong token 403 and an unknown uuid 404 on purpose (the
  *   `reschedule()` docblock in `BookingsController.php` owns why that asymmetry exists), and this
- *   client renders those - and every other failed READ - byte-identically, one code path that
- *   never reads the error, no booking fields, no server detail. Distinguish by WHICH REQUEST
- *   failed, never by status code: `window_closed` on a cancel is a 403 too, and a refused
- *   MUTATION keeps the booking on screen with the server's `data.detail` verbatim. Getting this
- *   backwards either leaks the booking-existence oracle or tells a visitor with a perfectly good
- *   link that it is invalid.
+ *   client renders every read failure that could ANSWER that existence question - any 4xx -
+ *   byte-identically: no booking fields, no server wording. A read failure that answers nothing
+ *   about the uuid (a transport drop, a 5xx - the request never reached an authorization
+ *   decision) is NOT a verdict on the link: it renders a could-not-load state with a retry
+ *   control instead, because the dead-link sentence would be a lie to a guest on a flaky
+ *   connection. `answersOracle` owns the split. Distinguish by WHICH REQUEST failed, never by
+ *   status code alone: `window_closed` on a cancel is a 403 too, and a refused MUTATION keeps
+ *   the booking on screen with the server's `data.detail` verbatim. Getting this backwards
+ *   either leaks the booking-existence oracle or tells a visitor with a perfectly good link
+ *   that it is invalid.
+ * - What the booking IS comes from its STATUS, exhaustively: every non-confirmed status states
+ *   itself in one sentence through the always-mounted status region, and both controls derive
+ *   from the server's own guards - cancellable mirrors `BookingStatus::canTransitionTo(
+ *   Cancelled )`, reschedulable mirrors `RescheduleBooking::assertReschedulable()` (confirmed,
+ *   or a held status with a live `hold_expires_at`). An expired or completed booking never
+ *   dangles buttons guaranteed to fail; an awaiting-approval one is never dressed up as
+ *   confirmed (Task 14's R3, on the way back in). The details render for EVERY status - the
+ *   guest came to see their booking; only the controls and the sentence change.
  * - Nothing renders optimistically: the view reads the booking QUERY alone, and the mutations
  *   only invalidate it (`useCancel`/`useReschedule` already invalidate `['booking', uuid]` and
  *   `['availability']` on success - repeating that here would fork one policy into two places).
@@ -45,6 +57,15 @@
  *   view container (`tabIndex={-1}`), because their click just unmounted the control it was on.
  *   The dialog focuses itself on open; every close path restores focus to the trigger from here,
  *   the one owner that covers Escape, the close control and a successful move alike.
+ * - The dialog's `aria-modal` must hold by MOUSE as well as by Tab: while it is open, both
+ *   background action buttons are `disabled`, so nothing behind the dialog can be clicked or
+ *   focused (jsdom and real browsers alike refuse focus on a disabled button; `inert` is not
+ *   honoured by this jsdom, so it cannot be the pinned mechanism). Disabling rather than
+ *   unmounting keeps `rescheduleTrigger` attached to the SAME element across the dialog's
+ *   lifetime - and it forces the focus restore into an effect: at the moment a close path runs,
+ *   the trigger is still disabled (React has not re-rendered), so a synchronous `.focus()`
+ *   would silently no-op and drop focus on `<body>`. Close paths arm `restoreToTrigger`; the
+ *   `[dialogOpen]` effect consumes it one render later, when the trigger is live again.
  * - The document title and the page's caching are PHP's (`ManageRoute::render()` sends core's
  *   nocache headers and applies `wp_robots_sensitive_page`); nothing here touches either.
  *
@@ -59,8 +80,13 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { ApiError, utcToSite } from '../shared';
 import { widgetBootstrap } from './api/client';
 import { useBooking, useCancel, useReschedule, useServices } from './api/queries';
-import type { ChainItem, PublicService, RescheduleTarget } from './api/types';
-import { NoticeRegion, RescheduleDialog, noticeOf } from './components/RescheduleDialog';
+import type { Booking, ChainItem, PublicService, RescheduleTarget } from './api/types';
+import {
+	NoticeRegion,
+	ProgressStatus,
+	RescheduleDialog,
+	noticeOf,
+} from './components/RescheduleDialog';
 import type { ManageNotice } from './components/RescheduleDialog';
 import { formatPrice } from './components/ServicePicker';
 import type { WidgetConfig } from './index';
@@ -81,9 +107,93 @@ function serviceName( catalog: PublicService[] | undefined, serviceId: number ):
 }
 
 /**
- * One identical panel for EVERY failed read - wrong token, unknown uuid, expired link, whatever
- * else - with no error read and no server wording, so a 403 and a 404 cannot be told apart from
- * the outside (the docblock header owns why). No booking fields, no controls.
+ * The statuses that hold capacity behind a TTL - `BookingStatus::heldStatuses()`, mirrored.
+ * Both affordance rules below branch on STATUS alone, never on `requires_approval` or
+ * `payment_mode` (Task 14's R3), and mirror the server guard that would refuse the mutation -
+ * a rendered control must never be one guaranteed to fail (the OccurrencePicker sold-out
+ * precedent: suppress the doomed act, keep everything visible).
+ */
+const HELD_STATUSES: ReadonlyArray< Booking[ 'status' ] > = [
+	'pending',
+	'awaiting_approval',
+	'awaiting_payment',
+];
+
+/** `CancelBooking` refuses unless `canTransitionTo( Cancelled )`: the held three plus confirmed. */
+function isCancellable( status: Booking[ 'status' ] ): boolean {
+	return 'confirmed' === status || HELD_STATUSES.includes( status );
+}
+
+/** UTC now in the wire's own `Y-m-d H:i:s`, for the same string comparison the server makes. */
+function utcNowStamp(): string {
+	return new Date().toISOString().slice( 0, 19 ).replace( 'T', ' ' );
+}
+
+/**
+ * `RescheduleBooking::assertReschedulable()`, mirrored: `confirmed`, or a held status whose
+ * `hold_expires_at` is non-null and still ahead of UTC now - a lapsed or absent hold has
+ * nothing to release, so a move is a guaranteed `not_reschedulable`. Computed from the DTO's
+ * own `hold_expires_at`, never approximated through `hold_class`.
+ */
+function isReschedulable( booking: Booking ): boolean {
+	if ( 'confirmed' === booking.status ) {
+		return true;
+	}
+	return (
+		HELD_STATUSES.includes( booking.status ) &&
+		null !== booking.hold_expires_at &&
+		booking.hold_expires_at > utcNowStamp()
+	);
+}
+
+/**
+ * One sentence per status for the always-mounted status region - null only for `confirmed`,
+ * the one state that needs no explanation. The switch is exhaustive over the DTO union ON
+ * PURPOSE, with no default: the explicit `string | null` return type makes the compiler refuse
+ * a tenth status (a non-exhaustive switch no longer returns on every path) instead of letting
+ * it fall through to silence or to somebody else's sentence.
+ */
+function statusSentence( status: Booking[ 'status' ] ): string | null {
+	switch ( status ) {
+		case 'confirmed':
+			return null;
+		case 'pending':
+			return __( 'This booking has not been confirmed yet.', 'reservant' );
+		case 'awaiting_approval':
+			return __(
+				'This booking is waiting for our approval. We will email you as soon as it is decided.',
+				'reservant'
+			);
+		case 'awaiting_payment':
+			return __( 'This booking is approved and waiting for payment.', 'reservant' );
+		case 'completed':
+			return __( 'This booking has already taken place.', 'reservant' );
+		case 'no_show':
+			return __( 'This booking was recorded as missed.', 'reservant' );
+		case 'cancelled':
+			return __( 'This booking has been cancelled.', 'reservant' );
+		case 'rejected':
+			return __( 'This booking request was declined.', 'reservant' );
+		case 'expired':
+			return __( 'This booking request expired before it was completed.', 'reservant' );
+	}
+}
+
+/**
+ * Could this read failure ANSWER the question the neutral panel exists to hide - whether the
+ * uuid exists? Only an authorization-shaped 4xx can: the server looked and answered. A transport
+ * failure or a 5xx never reached an authorization decision, so it says nothing about the link
+ * and must not be dressed up as a verdict on it.
+ */
+function answersOracle( error: Error ): boolean {
+	return error instanceof ApiError && error.status >= 400 && error.status < 500;
+}
+
+/**
+ * One identical panel for every failed read that could answer the oracle question
+ * (`answersOracle`) - wrong token, unknown uuid, expired link - with no server wording read,
+ * so a 403 and a 404 cannot be told apart from the outside (the docblock header owns why).
+ * No booking fields, no controls.
  */
 function NeutralPanel(): JSX.Element {
 	return (
@@ -92,6 +202,247 @@ function NeutralPanel(): JSX.Element {
 			<p>{ __( 'If you need to change your booking, please contact us directly.', 'reservant' ) }</p>
 		</div>
 	);
+}
+
+/**
+ * The could-not-load state for a read failure that answered nothing (see `answersOracle`): a
+ * plain sentence and a control that refetches - never the dead-link verdict, and never the
+ * transport error's own jargon. The alert may mount with its text (the NoticeRegion convention:
+ * an alert announces on appearance).
+ */
+function RetryPanel( { busy, onRetry }: { busy: boolean; onRetry: () => void } ): JSX.Element {
+	return (
+		<div className="reservant-manage__unreachable">
+			<p className="reservant-manage__unreachable-text" role="alert">
+				{ __(
+					'We could not load your booking. Please check your connection and try again.',
+					'reservant'
+				) }
+			</p>
+			<button
+				type="button"
+				className="reservant-manage__retry"
+				disabled={ busy }
+				onClick={ onRetry }
+			>
+				{ __( 'Try again', 'reservant' ) }
+			</button>
+		</div>
+	);
+}
+
+/** What a manage mount can render right now - `readView` is the one owner of the decision. */
+type ReadView =
+	| { kind: 'neutral' }
+	| { kind: 'retry' }
+	| { kind: 'loading' }
+	| { kind: 'ready'; data: Booking };
+
+/**
+ * Classify the read: stripped credentials are the neutral panel with no request ever made
+ * (`useBooking` stays suspended); present data always renders, whatever a background refetch
+ * just did (a failed refresh must not nuke a booking already on screen); and a failed read
+ * with nothing to show splits on the oracle rule (`answersOracle`) - the header owns why.
+ */
+function readView(
+	uuid: string,
+	token: string,
+	data: Booking | undefined,
+	error: Error | null
+): ReadView {
+	if ( '' === uuid || '' === token ) {
+		return { kind: 'neutral' };
+	}
+	if ( undefined !== data ) {
+		return { kind: 'ready', data };
+	}
+	if ( null === error ) {
+		return { kind: 'loading' };
+	}
+	return answersOracle( error ) ? { kind: 'neutral' } : { kind: 'retry' };
+}
+
+/** The three not-ready read states, rendered. One home, so `Manage` itself stays readable. */
+function ReadFallback( {
+	view,
+	busy,
+	onRetry,
+}: {
+	view: Exclude< ReadView, { kind: 'ready' } >;
+	busy: boolean;
+	onRetry: () => void;
+} ): JSX.Element {
+	if ( 'neutral' === view.kind ) {
+		return <NeutralPanel />;
+	}
+	if ( 'retry' === view.kind ) {
+		return <RetryPanel busy={ busy } onRetry={ onRetry } />;
+	}
+	// The polite region rides on the loading message itself and dies with it - never on the
+	// panel, which is about to hold buttons (the index.tsx convention). ProgressStatus mounts
+	// it empty and fills it one effect later, so the load actually announces.
+	return (
+		<ProgressStatus
+			text={ __( 'Loading your booking...', 'reservant' ) }
+			className="reservant-manage__loading"
+		/>
+	);
+}
+
+/**
+ * The booking's segments on the site clock: the time ALWAYS renders; the name is omitted while
+ * the catalog loads and placeholdered when the service has left it (`serviceName` owns that).
+ */
+function BookingItems( {
+	items,
+	catalog,
+	timezone,
+}: {
+	items: Booking[ 'items' ];
+	catalog: PublicService[] | undefined;
+	timezone: string;
+} ): JSX.Element {
+	const formatter = new Intl.DateTimeFormat( undefined, {
+		weekday: 'short',
+		month: 'short',
+		day: 'numeric',
+		hour: 'numeric',
+		minute: '2-digit',
+	} );
+	return (
+		<ul className="reservant-manage__items">
+			{ items.map( ( item ) => {
+				const name = serviceName( catalog, item.service_id );
+				return (
+					<li key={ item.id } className="reservant-manage__item">
+						{ null !== name && (
+							<span className="reservant-manage__service">{ name }</span>
+						) }
+						<span className="reservant-manage__when">
+							{ formatter.format( utcToSite( item.start_utc, timezone ) ) }
+						</span>
+						{ item.seats > 1 && (
+							<span className="reservant-manage__seats">
+								{ sprintf(
+									/* translators: %d: number of places reserved. */
+									_n( '%d place', '%d places', item.seats, 'reservant' ),
+									item.seats
+								) }
+							</span>
+						) }
+					</li>
+				);
+			} ) }
+		</ul>
+	);
+}
+
+interface ManageActionsProps {
+	/** The status-derived affordances (the header's status rule) - a missing one hides its control. */
+	cancellable: boolean;
+	reschedulable: boolean;
+	confirmingCancel: boolean;
+	/** Both action buttons are disabled while the dialog is open - the by-mouse half of its modality. */
+	dialogOpen: boolean;
+	cancelling: boolean;
+	/** The dialog's focus-restore target - the parent owns the restore (see its close paths). */
+	triggerRef: { current: HTMLButtonElement | null };
+	onOpenDialog: () => void;
+	onStartCancel: () => void;
+	onConfirmCancel: () => void;
+	onKeepBooking: () => void;
+}
+
+/**
+ * The controls a booking's status actually supports: the action row while nothing was asked,
+ * the two-click cancel confirmation once it was. Renders nothing when the status supports
+ * neither act - the sentence in the status region says why.
+ */
+function ManageActions( {
+	cancellable,
+	reschedulable,
+	confirmingCancel,
+	dialogOpen,
+	cancelling,
+	triggerRef,
+	onOpenDialog,
+	onStartCancel,
+	onConfirmCancel,
+	onKeepBooking,
+}: ManageActionsProps ): JSX.Element | null {
+	if ( ! cancellable && ! reschedulable ) {
+		return null;
+	}
+	if ( ! confirmingCancel ) {
+		return (
+			<div className="reservant-manage__actions">
+				{ reschedulable && (
+					<button
+						ref={ triggerRef }
+						type="button"
+						className="reservant-manage__reschedule"
+						disabled={ dialogOpen }
+						onClick={ onOpenDialog }
+					>
+						{ __( 'Pick a new time', 'reservant' ) }
+					</button>
+				) }
+				{ cancellable && (
+					<button
+						type="button"
+						className="reservant-manage__cancel"
+						disabled={ dialogOpen }
+						onClick={ onStartCancel }
+					>
+						{ __( 'Cancel booking', 'reservant' ) }
+					</button>
+				) }
+			</div>
+		);
+	}
+	if ( ! cancellable ) {
+		return null;
+	}
+	return (
+		<div className="reservant-manage__confirm-cancel">
+			<p>{ __( 'Cancel this booking? This cannot be undone.', 'reservant' ) }</p>
+			<button
+				type="button"
+				className="reservant-manage__confirm-cancel-yes"
+				disabled={ cancelling }
+				onClick={ onConfirmCancel }
+			>
+				{ __( 'Yes, cancel it', 'reservant' ) }
+			</button>
+			<button
+				type="button"
+				className="reservant-manage__confirm-cancel-no"
+				onClick={ onKeepBooking }
+			>
+				{ __( 'Keep this booking', 'reservant' ) }
+			</button>
+			{ cancelling && (
+				// The destructive action's own progress feedback: `disabled` alone is
+				// silence to a screen reader while the request flies.
+				<ProgressStatus
+					text={ __( 'Cancelling your booking...', 'reservant' ) }
+					className="reservant-manage__cancelling"
+				/>
+			) }
+		</div>
+	);
+}
+
+/**
+ * The abandonment-ticket discipline, in one place: run `settle` only while `ticket` is still
+ * the ref's current value. A stale resolution belongs to a journey the visitor already left -
+ * it renders nothing, announces nothing, moves no focus, and must not touch a latch the next
+ * journey now owns (only the hook-level invalidation may act on it).
+ */
+function ifCurrent( ticketRef: { current: number }, ticket: number, settle: () => void ): void {
+	if ( ticket === ticketRef.current ) {
+		settle();
+	}
 }
 
 function Manage( { config }: { config: WidgetConfig } ): JSX.Element {
@@ -140,6 +491,18 @@ function Manage( { config }: { config: WidgetConfig } ): JSX.Element {
 
 	/** Every close path restores focus here - the trigger outlives the dialog on all of them. */
 	const rescheduleTrigger = useRef< HTMLButtonElement | null >( null );
+	// Armed by every dialog-close path, consumed one render later: the trigger is `disabled`
+	// while the dialog is open (the header's by-mouse modality), so a synchronous `.focus()`
+	// inside the close path would no-op against a still-disabled element. The effect runs after
+	// the re-render that re-enables it.
+	const restoreToTrigger = useRef( false );
+	useEffect( () => {
+		if ( dialogOpen || ! restoreToTrigger.current ) {
+			return;
+		}
+		restoreToTrigger.current = false;
+		rescheduleTrigger.current?.focus();
+	}, [ dialogOpen ] );
 
 	const startCancel = (): void => {
 		visitorMoved.current = true;
@@ -173,29 +536,26 @@ function Manage( { config }: { config: WidgetConfig } ): JSX.Element {
 		cancel.mutate(
 			{ uuid, token },
 			{
-				onSuccess: () => {
-					if ( ticket !== cancelTicket.current ) {
-						return;
-					}
-					cancelBusy.current = false;
-					setCancelling( false );
-					// The visitor's own confirmation just resolved; the confirmation row
-					// unmounts, so the change lands focus like every visitor-caused one. What
-					// renders next is the QUERY's refreshed answer, never an assumption.
-					visitorMoved.current = true;
-					setConfirmingCancel( false );
-				},
-				onError: ( error: Error ) => {
-					if ( ticket !== cancelTicket.current ) {
-						return;
-					}
-					cancelBusy.current = false;
-					setCancelling( false );
-					// The server's own sentence, verbatim, beside a booking that stays fully on
-					// screen - a refused cancel is an answer about THIS request, never about the
-					// link (the header's which-request-failed rule).
-					setActionNotice( noticeOf( error ) );
-				},
+				onSuccess: () =>
+					ifCurrent( cancelTicket, ticket, () => {
+						cancelBusy.current = false;
+						setCancelling( false );
+						// The visitor's own confirmation just resolved; the confirmation row
+						// unmounts, so the change lands focus like every visitor-caused one.
+						// What renders next is the QUERY's refreshed answer, never an
+						// assumption.
+						visitorMoved.current = true;
+						setConfirmingCancel( false );
+					} ),
+				onError: ( error: Error ) =>
+					ifCurrent( cancelTicket, ticket, () => {
+						cancelBusy.current = false;
+						setCancelling( false );
+						// The server's own sentence, verbatim, beside a booking that stays
+						// fully on screen - a refused cancel is an answer about THIS request,
+						// never about the link (the header's which-request-failed rule).
+						setActionNotice( noticeOf( error ) );
+					} ),
 			}
 		);
 	};
@@ -217,8 +577,8 @@ function Manage( { config }: { config: WidgetConfig } ): JSX.Element {
 		moveBusy.current = false;
 		setMoving( false );
 		setDialogNotice( null );
+		restoreToTrigger.current = true;
 		setDialogOpen( false );
-		rescheduleTrigger.current?.focus();
 	};
 
 	const handlePick = ( target: RescheduleTarget ): void => {
@@ -232,69 +592,62 @@ function Manage( { config }: { config: WidgetConfig } ): JSX.Element {
 		reschedule.mutate(
 			{ uuid, token, ...target },
 			{
-				onSuccess: () => {
-					if ( ticket !== dialogTicket.current ) {
-						return;
-					}
-					moveBusy.current = false;
-					setMoving( false );
-					dialogTicket.current += 1;
-					setDialogOpen( false );
-					rescheduleTrigger.current?.focus();
-					// Announced in the details region the dialog leaves behind; the NEW time
-					// itself arrives through the invalidated booking query - the server's
-					// answer, never this client's assumption.
-					setActionNotice( {
-						text: __( 'Your booking has been moved.', 'reservant' ),
-						alert: false,
-					} );
-				},
-				onError: ( error: Error ) => {
-					if ( ticket !== dialogTicket.current ) {
-						return;
-					}
-					moveBusy.current = false;
-					setMoving( false );
-					// Shown inside the dialog, where the visitor is - who keeps every way
-					// forward: the same slot, another one, or the close control.
-					setDialogNotice( noticeOf( error ) );
-				},
+				onSuccess: () =>
+					ifCurrent( dialogTicket, ticket, () => {
+						moveBusy.current = false;
+						setMoving( false );
+						dialogTicket.current += 1;
+						restoreToTrigger.current = true;
+						setDialogOpen( false );
+						// Announced in the details region the dialog leaves behind; the NEW
+						// time itself arrives through the invalidated booking query - the
+						// server's answer, never this client's assumption.
+						setActionNotice( {
+							text: __( 'Your booking has been moved.', 'reservant' ),
+							alert: false,
+						} );
+					} ),
+				onError: ( error: Error ) =>
+					ifCurrent( dialogTicket, ticket, () => {
+						moveBusy.current = false;
+						setMoving( false );
+						// Shown inside the dialog, where the visitor is - who keeps every way
+						// forward: the same slot, another one, or the close control.
+						setDialogNotice( noticeOf( error ) );
+					} ),
 			}
 		);
 	};
 
-	// A failed READ with nothing to show is the neutral panel - and ONLY a read: note the
-	// data-undefined guard, which keeps a failed background refetch from nuking a booking that
-	// is already on screen. Stripped credentials land here too, without any request having been
-	// made (`useBooking` is suspended until both exist).
-	if ( '' === uuid || '' === token || ( undefined === booking.data && null !== booking.error ) ) {
+	// A failed READ with nothing to show is classified by `readView` (the header's oracle rule
+	// applies ONLY to reads - a refused mutation keeps the booking on screen).
+	const view = readView( uuid, token, booking.data, booking.error );
+	if ( 'ready' !== view.kind ) {
 		return (
 			<div className="reservant-manage">
-				<NeutralPanel />
+				<ReadFallback
+					view={ view }
+					busy={ booking.isFetching }
+					onRetry={ () => void booking.refetch() }
+				/>
 			</div>
 		);
 	}
 
-	if ( undefined === booking.data ) {
-		// The polite region rides on the loading message itself and dies with it - never on the
-		// panel, which is about to hold buttons (the index.tsx convention).
-		return (
-			<div className="reservant-manage">
-				<p className="reservant-manage__loading" role="status" aria-live="polite">
-					{ __( 'Loading your booking...', 'reservant' ) }
-				</p>
-			</div>
-		);
-	}
-
-	const data = booking.data;
-	const cancelled = 'cancelled' === data.status;
-	// Rendered through the always-mounted status region: for a booking that ARRIVES cancelled it
-	// is simply the state of things; after a cancel resolves, the refreshed query lands this text
-	// in a region that already existed, which is exactly what announces it.
-	const statusNotice: ManageNotice | null = cancelled
-		? { text: __( 'This booking has been cancelled.', 'reservant' ), alert: false }
-		: null;
+	const data = view.data;
+	// Both affordances derive from the STATUS, mirroring the server's own guards (the helpers
+	// above own the mapping) - eight of nine statuses used to render as a live booking, with
+	// controls guaranteed to fail. The details render for every status regardless: the guest
+	// came to see their booking; only the controls and the sentence change.
+	const cancellable = isCancellable( data.status );
+	const reschedulable = isReschedulable( data );
+	const sentence = statusSentence( data.status );
+	// Rendered through the always-mounted status region: for a booking that ARRIVES in a
+	// non-confirmed state it is simply the state of things; after a cancel resolves, the
+	// refreshed query lands the cancelled sentence in a region that already existed, which is
+	// exactly what announces it.
+	const statusNotice: ManageNotice | null =
+		null === sentence ? null : { text: sentence, alert: false };
 	// The availability request for a move, staff pinned AS SOLD from the booking's own items -
 	// `RescheduleBooking::planAppointment()` keeps the sold resource, so any-staff starts could
 	// offer times the move cannot land on. An event item's null resource_id means "any", which
@@ -303,41 +656,11 @@ function Manage( { config }: { config: WidgetConfig } ): JSX.Element {
 		service_id: item.service_id,
 		resource_id: item.resource_id,
 	} ) );
-	const formatter = new Intl.DateTimeFormat( undefined, {
-		weekday: 'short',
-		month: 'short',
-		day: 'numeric',
-		hour: 'numeric',
-		minute: '2-digit',
-	} );
 
 	return (
 		<div ref={ containerRef } tabIndex={ -1 } className="reservant-manage">
 			<h2 className="reservant-manage__title">{ __( 'Your booking', 'reservant' ) }</h2>
-			<ul className="reservant-manage__items">
-				{ data.items.map( ( item ) => {
-					const name = serviceName( catalog, item.service_id );
-					return (
-						<li key={ item.id } className="reservant-manage__item">
-							{ null !== name && (
-								<span className="reservant-manage__service">{ name }</span>
-							) }
-							<span className="reservant-manage__when">
-								{ formatter.format( utcToSite( item.start_utc, timezone ) ) }
-							</span>
-							{ item.seats > 1 && (
-								<span className="reservant-manage__seats">
-									{ sprintf(
-										/* translators: %d: number of places reserved. */
-										_n( '%d place', '%d places', item.seats, 'reservant' ),
-										item.seats
-									) }
-								</span>
-							) }
-						</li>
-					);
-				} ) }
-			</ul>
+			<BookingItems items={ data.items } catalog={ catalog } timezone={ timezone } />
 			<p className="reservant-manage__total">
 				{ sprintf(
 					/* translators: %s: the formatted total price. */
@@ -350,46 +673,19 @@ function Manage( { config }: { config: WidgetConfig } ): JSX.Element {
 			</p>
 			<NoticeRegion notice={ statusNotice } />
 			<NoticeRegion notice={ actionNotice } />
-			{ ! cancelled && ! confirmingCancel && (
-				<div className="reservant-manage__actions">
-					<button
-						ref={ rescheduleTrigger }
-						type="button"
-						className="reservant-manage__reschedule"
-						onClick={ openDialog }
-					>
-						{ __( 'Pick a new time', 'reservant' ) }
-					</button>
-					<button
-						type="button"
-						className="reservant-manage__cancel"
-						onClick={ startCancel }
-					>
-						{ __( 'Cancel booking', 'reservant' ) }
-					</button>
-				</div>
-			) }
-			{ ! cancelled && confirmingCancel && (
-				<div className="reservant-manage__confirm-cancel">
-					<p>{ __( 'Cancel this booking? This cannot be undone.', 'reservant' ) }</p>
-					<button
-						type="button"
-						className="reservant-manage__confirm-cancel-yes"
-						disabled={ cancelling }
-						onClick={ confirmCancel }
-					>
-						{ __( 'Yes, cancel it', 'reservant' ) }
-					</button>
-					<button
-						type="button"
-						className="reservant-manage__confirm-cancel-no"
-						onClick={ keepBooking }
-					>
-						{ __( 'Keep this booking', 'reservant' ) }
-					</button>
-				</div>
-			) }
-			{ ! cancelled && dialogOpen && (
+			<ManageActions
+				cancellable={ cancellable }
+				reschedulable={ reschedulable }
+				confirmingCancel={ confirmingCancel }
+				dialogOpen={ dialogOpen }
+				cancelling={ cancelling }
+				triggerRef={ rescheduleTrigger }
+				onOpenDialog={ openDialog }
+				onStartCancel={ startCancel }
+				onConfirmCancel={ confirmCancel }
+				onKeepBooking={ keepBooking }
+			/>
+			{ reschedulable && dialogOpen && (
 				<RescheduleDialog
 					items={ chainItems }
 					notice={ dialogNotice }
