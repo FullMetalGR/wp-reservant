@@ -8,6 +8,18 @@ namespace Reservant\Application\Dto;
  * `findById()`. This is what every `reservant/booking/*` and `reservant/hold/expired` action
  * hands to listeners (AGENTS.md section 7: "Pass DTOs, not arrays.") - the row array itself
  * never leaves the Application layer.
+ *
+ * `$manageToken` is the one field that is not a column. It is the guest's plaintext credential
+ * (`Application\ManageToken`), which exists for the length of one request and is never stored -
+ * only its SHA-256 hash is. It rides here because the emailed manage link cannot be built without
+ * it and no later listener can reconstruct it, so `HoldBooking::execute()` is the only place it can
+ * be handed over. It is therefore populated ONLY on the two hooks that use case fires - `held`
+ * always, and `confirmed` on the admin-created booking that skips the hold entirely - and null on
+ * every other hook, including `ConfirmBooking`'s own `confirmed`. A listener wanting the link must
+ * treat its absence as ordinary rather than as an error: see `Notifications\BookingEmails`, which
+ * sends the link exactly once, from whichever of those two emails the guest actually receives.
+ *
+ * `toArray()` deliberately does NOT emit it - see that method.
  */
 final class BookingSnapshot {
 
@@ -30,6 +42,7 @@ final class BookingSnapshot {
 		public readonly bool $requiresApproval,
 		public readonly array $items,
 		public readonly ?string $rejectionReason,
+		public readonly ?string $manageToken = null,
 	) {}
 
 	/**
@@ -59,10 +72,23 @@ final class BookingSnapshot {
 			isset( $row['requires_approval'] ) ? (bool) (int) $row['requires_approval'] : false,
 			$items,
 			isset( $row['rejection_reason'] ) ? (string) $row['rejection_reason'] : null,
+			isset( $row['manage_token'] ) ? (string) $row['manage_token'] : null,
 		);
 	}
 
-	/** @return array<string, mixed> BookingRepository::findByUuid() row naming. */
+	/**
+	 * The persistable row shape - which is why `manage_token` is absent from it even when the
+	 * snapshot carries one.
+	 *
+	 * This is the array form a listener reaches for when it wants to store, log or forward the
+	 * booking, and the plaintext credential belongs in exactly one place: the link in the email
+	 * this plugin sends. Emitting it here would put it wherever any third-party listener puts the
+	 * array, permanently, while the hash beside it in the database exists precisely so the secret
+	 * is never at rest. The asymmetry with `fromArray()` is the point, not an oversight: the
+	 * credential travels IN to the DTO from the one use case that mints it, and does not travel out.
+	 *
+	 * @return array<string, mixed> BookingRepository::findByUuid() row naming.
+	 */
 	public function toArray(): array {
 		return array(
 			'id'                => $this->id,

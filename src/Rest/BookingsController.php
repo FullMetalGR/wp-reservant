@@ -42,7 +42,14 @@ final class BookingsController {
 	/** POST /bookings/{uuid}/confirm - the free / pay-on-site path only (section 2.3). */
 	public function confirm( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
 		try {
-			$confirmed = ConfirmBooking::make( $this->db )->execute( (string) $request->get_param( 'uuid' ), $this->now() );
+			// The token is forwarded so `booking_confirmed` can carry the guest's manage link - it is
+			// not what authorises the call (`Routes::guard()` did that), and the use case verifies it
+			// against this booking's own hash before letting it reach a listener.
+			$confirmed = ConfirmBooking::make( $this->db )->execute(
+				(string) $request->get_param( 'uuid' ),
+				$this->now(),
+				null === $request->get_param( 'token' ) ? null : (string) $request->get_param( 'token' )
+			);
 		} catch ( SlotConflict $exception ) {
 			return Errors::conflict( $exception );
 		} catch ( \RuntimeException $exception ) {

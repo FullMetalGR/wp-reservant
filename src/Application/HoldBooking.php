@@ -184,8 +184,14 @@ final class HoldBooking {
 		foreach ( $result['reaped'] as $expired ) {
 			do_action( 'reservant/hold/expired', BookingSnapshot::fromArray( $expired ) );
 		}
-		$snapshot        = $result['booking'];
-		$bookingSnapshot = BookingSnapshot::fromArray( $snapshot );
+		$snapshot = $result['booking'];
+		// BEFORE the hooks, not after. The plaintext secret exists nowhere else and nothing can
+		// reconstruct it from the stored hash, so a listener that wants to put the guest's manage
+		// link in an email has this one instant to be handed it - and grafting it below the two
+		// `do_action` calls meant no listener could ever see it. `BookingSnapshot::toArray()`
+		// refuses to emit it again, so it goes no further than the listeners on these two hooks.
+		$snapshot['manage_token'] = $secret;
+		$bookingSnapshot          = BookingSnapshot::fromArray( $snapshot );
 		do_action( 'reservant/booking/held', $bookingSnapshot );
 		if ( $request->admin ) {
 			// Admin-mode manual booking lands `confirmed` with no hold in between: listeners that
@@ -198,7 +204,6 @@ final class HoldBooking {
 			// schedules nothing.
 			$this->scheduleApprovalTimers( $snapshot );
 		}
-		$snapshot['manage_token'] = $secret;
 		return $snapshot;
 	}
 

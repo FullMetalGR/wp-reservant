@@ -75,6 +75,36 @@ final class ManageRouteTest extends ReservantTestCase {
 		$this->assertSame( self::UUID, get_query_var( 'reservant_booking' ) );
 	}
 
+	/**
+	 * The link `Notifications\BookingEmails` puts in the guest's inbox has to be one this site can
+	 * actually serve, so the assertion is not about the string - it is that the router accepts it.
+	 *
+	 * Under PLAIN permalinks no rewrite rule is consulted at all, so a builder that always emitted
+	 * `/booking/{uuid}/` would send every guest on such a site to a 404, and nothing short of
+	 * routing the URL it produced would notice.
+	 */
+	public function test_the_emailed_link_resolves_under_pretty_permalinks(): void {
+		$this->set_permalink_structure( '/%postname%/' );
+		$this->go_to( ManageRoute::url( self::UUID, self::WRONG_TOKEN ) );
+
+		$this->assertSame( self::UUID, get_query_var( 'reservant_booking' ) );
+		// The token is not a query var - `ManageRoute::token()` reads it straight off `$_GET`,
+		// because it authenticates nothing on this page and is only echoed for the client to
+		// present to the REST routes.
+		$this->assertSame( self::WRONG_TOKEN, $_GET['token'] ?? '' );
+	}
+
+	public function test_the_emailed_link_resolves_under_plain_permalinks(): void {
+		$this->set_permalink_structure( '' );
+		$url = ManageRoute::url( self::UUID, self::WRONG_TOKEN );
+
+		$this->assertStringNotContainsString( '/booking/', $url, 'there is no rewrite to match on a site with plain permalinks' );
+		$this->go_to( $url );
+
+		$this->assertSame( self::UUID, get_query_var( 'reservant_booking' ) );
+		$this->assertSame( self::WRONG_TOKEN, $_GET['token'] ?? '' );
+	}
+
 	public function test_an_unknown_uuid_renders_the_same_neutral_page_as_a_bad_token(): void {
 		global $wpdb;
 

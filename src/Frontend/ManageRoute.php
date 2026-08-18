@@ -111,6 +111,27 @@ final class ManageRoute {
 	}
 
 	/**
+	 * The emailed magic link, in whichever of the two forms this site can actually serve.
+	 *
+	 * `Notifications\BookingEmails` is the only caller, and it must not have to know that the
+	 * pretty form depends on the site's permalink structure: under plain permalinks
+	 * (`permalink_structure` empty) no rewrite rule is consulted at all, so `/booking/{uuid}/`
+	 * would 404 and the query-var form is the only one that resolves. Both forms land on the same
+	 * `dispatch()`, and both are equally the credential - see `render()`, which is why the page
+	 * sends nocache headers and asks robots to stay away.
+	 *
+	 * It lives beside the rule it inverts, for the reason `Plugin::REWRITE_VERSION` is derived
+	 * rather than hand-typed: a URL builder in another file is one more thing to remember when the
+	 * route changes. `ManageRouteTest` pins both forms against what `addRewrite()` registers.
+	 */
+	public static function url( string $uuid, string $token ): string {
+		$base = '' === (string) get_option( 'permalink_structure' )
+			? add_query_arg( self::QUERY_VAR, $uuid, home_url( '/' ) )
+			: home_url( '/booking/' . $uuid . '/' );
+		return add_query_arg( 'token', $token, $base );
+	}
+
+	/**
 	 * Registers the rewrite rule and its query var on the in-memory `$wp_rewrite`/`$wp`. Never
 	 * flushes - see the class docblock for the two places that do. Everything registered here
 	 * must flow through `RULE_PATTERN` / `RULE_REDIRECT` (the tag's two inputs, `QUERY_VAR` and
