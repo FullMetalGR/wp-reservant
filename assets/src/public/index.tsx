@@ -24,6 +24,7 @@
  */
 import { createRoot } from '@wordpress/element';
 import { BookingFlow } from './BookingFlow';
+import { ErrorBoundary } from './ErrorBoundary';
 import { ManageView } from './ManageView';
 import './style.css';
 
@@ -125,14 +126,24 @@ const mounted: WeakSet< HTMLElement > =
 		? host.reservantWidgetMounted
 		: ( host.reservantWidgetMounted = new WeakSet< HTMLElement >() );
 
-/** Mounts one widget into the node PHP rendered. Mounting the same node again is a no-op. */
+/**
+ * Mounts one widget into the node PHP rendered. Mounting the same node again is a no-op. The
+ * boundary wraps the WHOLE widget (ErrorBoundary.tsx): a render crash anywhere in the journey
+ * degrades to one inline sentence instead of React unmounting the tree and leaving the mount
+ * div silently empty - and the noscript fallback PHP put inside the div is long gone by then,
+ * because this very render replaced the container's children.
+ */
 export function mountWidget( el: HTMLElement ): void {
 	if ( mounted.has( el ) ) {
 		return;
 	}
 
 	mounted.add( el );
-	createRoot( el ).render( <Widget config={ readConfig( el ) } /> );
+	createRoot( el ).render(
+		<ErrorBoundary>
+			<Widget config={ readConfig( el ) } />
+		</ErrorBoundary>
+	);
 }
 
 /**

@@ -74,6 +74,22 @@ final class ShortcodeTest extends ReservantTestCase {
 		$this->assertStringContainsString( 'data-staff=""', $html );
 	}
 
+	public function test_the_mount_div_carries_a_noscript_fallback_react_will_replace(): void {
+		// Without JavaScript the mount div would render as a permanently blank spot on the page
+		// with nothing telling the visitor why. The fallback needs no hiding logic: React's
+		// createRoot().render() replaces the container's children on first render, so the
+		// sentence disappears the moment the bundle boots. It lives in MountPoint::render() -
+		// the ONE producer of the mount markup - so the shortcode, the block (byte-identical
+		// via the parity test in BlockTest) and the manage route all carry it. The pattern pins
+		// it INSIDE the div with text only: markup inside a noscript would invite the escaping
+		// question all over again, and a fallback outside the div would survive the boot.
+		$html = do_shortcode( '[reservant_booking]' );
+		$this->assertMatchesRegularExpression(
+			'#<div class="reservant-widget"[^>]*><noscript>[^<]+</noscript></div>#',
+			$html
+		);
+	}
+
 	public function test_assets_are_not_enqueued_on_a_page_without_the_shortcode(): void {
 		$this->visitPostWith( 'nothing here' );
 		do_action( 'wp_enqueue_scripts' );

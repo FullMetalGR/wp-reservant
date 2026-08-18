@@ -13,10 +13,15 @@ namespace Reservant\Frontend;
  * the surfaces drifting apart while there is exactly one renderer. A copied markup string would
  * turn that test into a tautology that passes while the copies diverge.
  *
- * The div is deliberately empty: React's `createRoot()` owns the node and replaces whatever is
- * inside on first render. The bundle (assets/src/public/index.tsx) queries `.reservant-widget`
- * and reads the `data-` contract: `data-mode`, `data-service`, `data-staff`, `data-uuid`,
- * `data-token` - plan Tasks 9-16 depend on exactly these names.
+ * The div carries exactly one child, a `<noscript>` fallback sentence: React's `createRoot()`
+ * owns the node and replaces its children on first render, so the fallback disappears by itself
+ * the moment the bundle boots - no hiding logic, no flash to manage - while a visitor without
+ * JavaScript gets one sentence pointing at the business instead of a permanently blank spot no
+ * site owner could diagnose. Text only inside the noscript (no markup, no attributes), escaped
+ * with esc_html__(); there is deliberately no no-JS booking flow. The bundle
+ * (assets/src/public/index.tsx) queries `.reservant-widget` and reads the `data-` contract:
+ * `data-mode`, `data-service`, `data-staff`, `data-uuid`, `data-token` - plan Tasks 9-16 depend
+ * on exactly these names.
  *
  * Rendering a mount point also force-enqueues the assets (see `Assets::force()`): content
  * detection covers the normal case, but a shortcode or block rendered from a template part or a
@@ -88,6 +93,8 @@ final class MountPoint {
 			$html .= ' data-' . $name . '="' . esc_attr( $value ) . '"';
 		}
 
-		return $html . '></div>';
+		return $html . '><noscript>'
+			. esc_html__( 'Online booking requires JavaScript. Please contact us directly to book.', 'reservant' )
+			. '</noscript></div>';
 	}
 }

@@ -19,7 +19,7 @@
  * booking is no longer available."). Either way an event holds through `occurrence_id`, not
  * segments - the refusal here spares the visitor the doomed round trip.
  */
-import { useEffect, useId, useRef, useState } from 'react';
+import { Fragment, useEffect, useId, useRef, useState } from 'react';
 import { __, sprintf } from '@wordpress/i18n';
 import { errorMessage } from '../../shared';
 import { useServices } from '../api/queries';
@@ -123,7 +123,15 @@ export function ChainBuilder( {
 	// boolean means a parent-driven replacement retires the notice by construction - no effect
 	// watching props, no way to show a refusal about a chain that no longer exists.
 	const [ refusedFor, setRefusedFor ] = useState< Segment[] | null >( null );
-	const [ announcement, setAnnouncement ] = useState( '' );
+	// The nonce exists for the SECOND identical announcement: two consecutive removals of the
+	// same service produce the same sentence, and a live region only speaks when its DOM
+	// actually mutates - rendered as a plain string, React would diff the second, equal text
+	// and write nothing, so the visitor hears one removal out of two. The nonce keys the text's
+	// wrapper below, forcing a fresh text write per announcement while the region node itself
+	// persists (a region must exist before its message lands).
+	const [ announcement, setAnnouncement ] = useState< { text: string; nonce: number } | null >(
+		null
+	);
 	const [ focusAfterRemove, setFocusAfterRemove ] = useState< number | null >( null );
 	const listRef = useRef< HTMLUListElement | null >( null );
 	const addRef = useRef< HTMLButtonElement | null >( null );
@@ -204,13 +212,14 @@ export function ChainBuilder( {
 
 	const handleRemove = ( index: number, label: string ): void => {
 		setRefusedFor( null );
-		setAnnouncement(
-			sprintf(
+		setAnnouncement( ( previous ) => ( {
+			text: sprintf(
 				/* translators: %s: service name. */
 				__( '%s removed.', 'reservant' ),
 				label
-			)
-		);
+			),
+			nonce: ( previous?.nonce ?? 0 ) + 1,
+		} ) );
 		setFocusAfterRemove( index );
 		onChange( segments.filter( ( _segment, i ) => i !== index ) );
 	};
@@ -245,7 +254,12 @@ export function ChainBuilder( {
 			     interrupt. The removal region always exists so the announcement lands in a live
 			     region that was already there. */ }
 			<p className="reservant-chain__announcement" role="status">
-				{ announcement }
+				{ null !== announcement && (
+					// The keyed fragment remounts its text node whenever the nonce moves, so an
+					// announcement identical to the last one still mutates the region - the DOM
+					// stays a bare text node inside the region, no wrapper element.
+					<Fragment key={ announcement.nonce }>{ announcement.text }</Fragment>
+				) }
 			</p>
 			{ refused && (
 				<p id={ noticeId } className="reservant-chain__notice" role="status">

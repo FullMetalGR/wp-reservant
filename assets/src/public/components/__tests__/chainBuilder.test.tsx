@@ -357,6 +357,56 @@ describe( 'ChainBuilder', () => {
 		expect( screen.getByText( 'Haircut removed.' ) ).toHaveAttribute( 'role', 'status' );
 	} );
 
+	it( 'announces the second of two identical removals with a fresh DOM write', async () => {
+		// Two identical consecutive removals produce the identical announcement string, and a
+		// live region only speaks when its DOM actually MUTATES: with the string rendered
+		// directly, React's second setState carries an equal value, nothing in the region
+		// changes, and some screen readers tell the visitor about one removal out of two. The
+		// region must therefore receive a fresh text write per announcement. Records are
+		// collected in the observer CALLBACK: every await below runs microtasks, which is when
+		// jsdom delivers pending records - takeRecords() after the fact answers an empty list
+		// (the commit 9465b1b lesson).
+		mockServices( SERVICES );
+		render(
+			withClient(
+				<ControlledChain
+					initial={ [
+						{ serviceId: 3, resourceId: 7 },
+						{ serviceId: 3, resourceId: null },
+					] }
+				/>
+			)
+		);
+		const removes = await screen.findAllByRole( 'button', { name: 'Remove Haircut' } );
+		expect( removes ).toHaveLength( 2 );
+
+		const region = document.querySelector( '.reservant-chain__announcement' );
+		expect( region ).not.toBeNull();
+		const records: MutationRecord[] = [];
+		const observer = new MutationObserver( ( batch ) => records.push( ...batch ) );
+		observer.observe( region as Element, {
+			childList: true,
+			subtree: true,
+			characterData: true,
+		} );
+
+		fireEvent.click( removes[ 0 ] as HTMLElement );
+		await act( async () => {} );
+		const afterFirst = records.length;
+		expect( region ).toHaveTextContent( 'Haircut removed.' );
+		expect( afterFirst ).toBeGreaterThan( 0 );
+
+		fireEvent.click( screen.getByRole( 'button', { name: 'Remove Haircut' } ) );
+		await act( async () => {} );
+		records.push( ...observer.takeRecords() );
+		observer.disconnect();
+
+		expect( region ).toHaveTextContent( 'Haircut removed.' );
+		// The second, identical announcement must mutate the region again - an unchanged DOM
+		// is a silent screen reader.
+		expect( records.length ).toBeGreaterThan( afterFirst );
+	} );
+
 	it( 'wires the add button and the picker together as one disclosure', async () => {
 		mockServices( SERVICES );
 		renderChain( [] );
