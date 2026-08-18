@@ -4,11 +4,11 @@ import { Button, CheckboxControl, Modal, Notice, SelectControl, Spinner, TextCon
 import { addDays, format } from 'date-fns';
 import type { UseQueryResult } from '@tanstack/react-query';
 import { bootConfig } from '../boot';
-import { errorMessage } from '../api/client';
 import { useAdminAvailability, useManualBooking, useResources, useServices } from '../api/queries';
 import type { AvailabilityResponse, AvailabilityStart, ManualBookingSegment, Resource, Service } from '../api/types';
 import { siteToday } from '../calendar/navigation';
 import { useToasts } from '../components/Toasts';
+import { errorMessage } from '../../shared';
 
 interface SegmentState {
 	serviceId: number;
@@ -51,7 +51,7 @@ function staffOptionsForService( resources: Resource[], serviceId: number ): { l
  * Reads the wall-clock hour:minute straight off the server's own `local` ISO string
  * (`AvailabilityAdminController`: `$start->setTimezone($display)->format('c')`) rather than
  * round-tripping it through a `Date` and re-formatting - `date-fns`'s `format()` only ever reads a
- * `Date` through the HOST machine's local getters (the same caveat `calendar/adapter.ts`'s
+ * `Date` through the HOST machine's local getters (the same caveat `shared/time.ts`'s
  * `utcToSite` docblock explains at length), which would silently show the wrong hour on any runner
  * not already in the site's own timezone. The string already carries the right wall-clock digits;
  * this only ever needs to extract them, never convert anything.
@@ -238,7 +238,7 @@ export function ManualBookingDrawer( { onClose, initialDate, initialResourceId }
 	const { addToast } = useToasts();
 
 	// `siteToday( timezone )`, never `format( new Date(), ... )`: the default day must be the
-	// BUSINESS's today, not the admin's laptop's. See `calendar/navigation.ts`'s `siteNow` docblock -
+	// BUSINESS's today, not the admin's laptop's. See `shared/time.ts`'s `siteNow` docblock -
 	// an owner in US/Pacific opening this drawer at 16:00 local is already on the next day at a
 	// Europe/Athens business, and a host-local default would fetch the wrong day's slots.
 	const [ date, setDate ] = useState( () => initialDate ?? siteToday( timezone ) );

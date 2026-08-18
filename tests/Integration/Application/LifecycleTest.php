@@ -40,9 +40,19 @@ final class LifecycleTest extends ReservantTestCase {
 
 	/** Books day 1 at $start; "now" is always day 0. @return array<string, mixed> */
 	private function holdOne( string $start ): array {
+		return $this->holdOn( 1, $start );
+	}
+
+	/**
+	 * The same hold on an arbitrary day - the sweeper tests need two bookings whose resource-day
+	 * mutex rows differ, and one staff member on two days is the smallest way to get that.
+	 *
+	 * @return array<string, mixed>
+	 */
+	private function holdOn( int $dayOffset, string $start ): array {
 		global $wpdb;
 		return HoldBooking::make( $wpdb )->execute(
-			new HoldRequest( new Customer( 'M', 'm@example.com' ), new AppointmentRequest( $this->utc( 1, $start ), array( new SegmentChoice( $this->serviceId ) ) ) ),
+			new HoldRequest( new Customer( 'M', 'm@example.com' ), new AppointmentRequest( $this->utc( $dayOffset, $start ), array( new SegmentChoice( $this->serviceId ) ) ) ),
 			$this->utc( 0 )
 		);
 	}
@@ -60,12 +70,16 @@ final class LifecycleTest extends ReservantTestCase {
 		$booking = $this->holdOne( '09:00' );
 		ConfirmBooking::make( $wpdb )->execute( $booking['uuid'], $this->utc( 0, '00:05' ) );
 		$cancel = CancelBooking::make( $wpdb );
+		// Captured into a variable rather than asserted inside the `catch`: PHPUnit's own
+		// `AssertionFailedError` is a `\RuntimeException`, so a `self::fail()` in the `try` of a broad
+		// catch would be swallowed by it and the test would pass having proved nothing.
+		$refusal = null;
 		try {
 			$cancel->execute( $booking['uuid'], $this->utc( 1, '08:00' ) ); // inside 24h window
-			self::fail( 'Expected window_closed.' );
 		} catch ( \RuntimeException $e ) {
-			self::assertSame( 'window_closed', $e->getMessage() );
+			$refusal = $e->getMessage();
 		}
+		self::assertSame( 'window_closed', $refusal );
 		$cancelled = $cancel->execute( $booking['uuid'], $this->utc( 1, '08:00' ), true ); // admin force
 		self::assertSame( 'cancelled', $cancelled['status'] );
 	}
@@ -85,12 +99,15 @@ final class LifecycleTest extends ReservantTestCase {
 		$booking = $this->holdOne( '09:00' );
 		ConfirmBooking::make( $wpdb )->execute( $booking['uuid'], $this->utc( 0, '00:05' ) );
 
+		// See the note in `test_cancel_respects_window_and_force_overrides`: a `self::fail()` here
+		// would be caught by the broad `\RuntimeException` arm, so the refusal is asserted afterwards.
+		$refusal = null;
 		try {
 			CancelBooking::make( $wpdb )->execute( $booking['uuid'], $this->utc( 0, '00:06' ), true, BookingStatus::heldStatuses() );
-			self::fail( 'Expected not_held.' );
 		} catch ( \RuntimeException $exception ) {
-			self::assertSame( 'not_held', $exception->getMessage() );
+			$refusal = $exception->getMessage();
 		}
+		self::assertSame( 'not_held', $refusal );
 		self::assertSame( 'confirmed', ( new BookingRepository( $wpdb ) )->findByUuid( $booking['uuid'] )['status'] );
 
 		// The unrestricted call is the manager's force-cancel and still goes through, so the refusal
@@ -136,5 +153,96 @@ final class LifecycleTest extends ReservantTestCase {
 				)
 			)
 		);
+	}
+
+	/**
+	 * One contended row must not stop the sweep.
+	 *
+	 * A lock the sweeper could not take this minute is one it will very likely take next minute, so
+	 * the batch skips that booking and carries on. AGENTS.md section 2.1 permits this in both
+	 * directions - "Correctness must never depend on the sweeper having run", and expired holds are
+	 * already free by time comparison in every query - so aborting and skipping are equally safe, and
+	 * skipping does strictly more work.
+	 *
+	 * ONLY `lock_unavailable` is skipped. Any other `\RuntimeException` is a genuine bug and must
+	 * still abort loudly rather than be swallowed by a sweeper nobody watches.
+	 *
+	 * Two holds on two different UTC days, so the sabotage can single out one of the two mutex rows
+	 * by its `day_utc` literal; the contended one is given the earlier `hold_expires_at` so
+	 * `expiredHeldIds()` (ordered ASC) hands it over FIRST.
+	 *
+	 * That ordering is load-bearing, though not for the reason it might look like: an aborting sweeper
+	 * fails this test under EITHER ordering, because `run()` is called without a `catch` and the
+	 * exception errors out of the test method. What the ordering actually buys is that
+	 * `assertSame( 'expired', $other )` cannot be satisfied incidentally - if the contended booking
+	 * were processed last, the other one would already have been swept before the abort, and the
+	 * assertion would be describing work an aborting sweeper had done rather than work the skip
+	 * allowed it to reach.
+	 */
+	public function test_sweeper_skips_a_booking_it_cannot_lock_and_finishes_the_batch(): void {
+		global $wpdb;
+		$contended = $this->holdOn( 1, '10:00' );
+		$other     = $this->holdOn( 2, '10:00' );
+		$wpdb->update( $wpdb->prefix . 'reservant_bookings', array( 'hold_expires_at' => '2020-01-01 00:00:00' ), array( 'uuid' => $contended['uuid'] ) );
+		$wpdb->update( $wpdb->prefix . 'reservant_bookings', array( 'hold_expires_at' => '2020-01-02 00:00:00' ), array( 'uuid' => $other['uuid'] ) );
+
+		// Only the contended day's mutex fails; every other statement, including the other booking's
+		// own lock, runs untouched.
+		$day      = $this->utc( 1 )->format( 'Y-m-d' );
+		$pattern  = '/^\s*SELECT\s+resource_id\s+FROM\s+\S*reservant_resource_days\b[^;]*day_utc\s*=\s*\'' . preg_quote( $day, '/' ) . '\'.*FOR UPDATE/is';
+		$sabotage = static function ( $query ) use ( $pattern ) {
+			return 1 === preg_match( $pattern, (string) $query )
+				? 'SELECT resource_id FROM reservant_no_such_table WHERE 1 = 1'
+				: $query;
+		};
+
+		$suppressed = $wpdb->suppress_errors( true );
+		add_filter( 'query', $sabotage );
+		try {
+			$processed = ExpireHolds::make( $wpdb )->run();
+		} finally {
+			remove_filter( 'query', $sabotage );
+			$wpdb->suppress_errors( $suppressed );
+		}
+
+		$bookings = new BookingRepository( $wpdb );
+		self::assertSame( 1, $processed, 'the batch must carry on past the row it could not lock' );
+		self::assertSame(
+			'pending',
+			$bookings->findByUuid( $contended['uuid'] )['status'],
+			'a hold the sweeper could not lock must be left exactly as it was, for the next sweep'
+		);
+		self::assertSame(
+			'expired',
+			$bookings->findByUuid( $other['uuid'] )['status'],
+			'the rest of the batch must still be swept'
+		);
+	}
+
+	/**
+	 * The other half of the rule above: a sweeper that swallowed everything would hide real bugs, so
+	 * anything that is not `lock_unavailable` still aborts the run.
+	 */
+	public function test_sweeper_still_aborts_on_an_unexpected_failure(): void {
+		global $wpdb;
+		$booking = $this->holdOn( 1, '10:00' );
+		$wpdb->update( $wpdb->prefix . 'reservant_bookings', array( 'hold_expires_at' => '2020-01-01 00:00:00' ), array( 'uuid' => $booking['uuid'] ) );
+
+		$blowUp = static function (): void {
+			throw new \RuntimeException( 'unexpected_test_failure' );
+		};
+		add_action( 'reservant/hold/expired', $blowUp );
+
+		// Captured, not asserted in place: PHPUnit's AssertionFailedError extends \RuntimeException,
+		// so a self::fail() inside the try would be swallowed by the catch arm below.
+		$failure = null;
+		try {
+			ExpireHolds::make( $wpdb )->run();
+		} catch ( \RuntimeException $e ) {
+			$failure = $e->getMessage();
+		} finally {
+			remove_action( 'reservant/hold/expired', $blowUp );
+		}
+		self::assertSame( 'unexpected_test_failure', $failure, 'only a busy lock is skipped; a real bug must still abort' );
 	}
 }

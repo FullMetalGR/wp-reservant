@@ -36,16 +36,75 @@ final class ExpireHolds {
 		);
 	}
 
-	/** @return int bookings actually moved to expired */
+	/**
+	 * Sweep a batch of lapsed holds.
+	 *
+	 * **A booking this iteration could not take is SKIPPED, not fatal.** One bad row must not stop the
+	 * sweep: whatever went wrong this minute is very likely fine on the next run, and every other
+	 * booking in the batch is independent of it. AGENTS.md section 2.1 permits this in both
+	 * directions - correctness never depends on the sweeper having run, and a lapsed hold is already
+	 * free by time comparison in every query - so aborting and skipping are equally safe, and
+	 * skipping does strictly more work.
+	 *
+	 * The catch is narrowed to `lock_unavailable` on purpose. Anything else - an unclassified refusal, a
+	 * listener that threw - is a genuine bug, and a sweeper nobody watches is the worst possible place
+	 * to swallow one.
+	 *
+	 * **What is actually swallowed here is wider than "the mutex was busy" - and narrower than the name
+	 * suggests, because `acquire()` never refuses for ordinary contention at all.** `LockManager::acquire()`
+	 * takes its mutex with a plain, blocking `SELECT ... FOR UPDATE`: a row somebody else already holds
+	 * makes this transaction WAIT, not fail. So `lock_unavailable` out of `acquire()` means one of only
+	 * two things - the wait itself ended badly (1205 lock-wait timeout, or 1213 deadlock, both of which
+	 * come back as `false`), or the resource-day mutex row was not there to lock (see that method's
+	 * docblock on why zero rows is refused for a resource-day key). And `acquire()` is not even the
+	 * main source: `lock_unavailable` is also the message every guarded write and locking read on this
+	 * transaction's path answers a genuine DB-level failure with - `releaseSeatClaims()`, `bumpRev()`,
+	 * `ensure()` and `findById()` all refuse this way too, and this catch cannot tell any of them apart
+	 * from the others. That is the one real cost of narrowing the catch to a single string
+	 * rather than a richer signal: a genuine DB fault on this path becomes completely invisible - no
+	 * exception here, and (because `Rest\Errors::failure()` is never reached; nothing in this call chain
+	 * is a REST response) no `reservant/error` action either, even after this repair adds one for every
+	 * other `lock_unavailable` refusal in the codebase. The consequence stays bounded regardless:
+	 * `TransactionRunner` has already rolled back whatever the failed statement was mid-transaction, so
+	 * nothing corrupts - the row simply stays held-and-lapsed, exactly as it was before this iteration,
+	 * and the next sweep (or a fresh hold's own inline reap) tries it again. AGENTS.md section 2.1 is
+	 * why that is an acceptable place to land: correctness never depends on the sweeper having run.
+	 *
+	 * `expireByUuid()` is deliberately NOT given this catch: it targets exactly one booking, so there
+	 * is no rest-of-the-batch to protect and a swallowed failure would simply be a lost one. Note what
+	 * that means for its caller: `Jobs::timeout()` is scheduled with `as_schedule_single_action()`, a
+	 * ONE-OFF, and Action Scheduler marks a throwing action failed without re-running it - so the
+	 * backstop is this five-minute sweep, not a retry of the timer. The consequence worth naming: for
+	 * `on_approval_timeout = 'auto_approve'`, a `lock_unavailable` out of `ApproveBooking` fails that
+	 * action for good, and the sweeper later EXPIRES the booking instead of auto-approving it. The
+	 * hold is not lost or double-sold, but the owner's chosen timeout policy is not what runs.
+	 *
+	 * @return int bookings actually moved to expired
+	 */
 	public function run( int $batch = 50 ): int {
 		$processed = 0;
 		foreach ( $this->bookings->expiredHeldIds( $batch ) as $id ) {
-			$booking = $this->bookings->findById( $id );
-			if ( null === $booking ) {
-				continue;
-			}
-			if ( null !== $this->expireByUuid( (string) $booking['uuid'] ) ) {
-				++$processed;
+			// The batch read (`findById()`) is inside the same try as the reap it feeds: guarding
+			// `findById()` for uniformity (this repair's item 6) means a DB failure on THIS read now
+			// refuses `lock_unavailable` too, rather than silently returning null. It must be caught by
+			// the very same "skip, not fatal" rule or one bad read would abort the whole batch instead
+			// of just the one row it belongs to.
+			try {
+				$booking = $this->bookings->findById( $id );
+				if ( null === $booking ) {
+					continue;
+				}
+				if ( null !== $this->expireByUuid( (string) $booking['uuid'] ) ) {
+					++$processed;
+				}
+			} catch ( \RuntimeException $e ) {
+				if ( 'lock_unavailable' !== $e->getMessage() ) {
+					throw $e;
+				}
+				// A lock statement, a guarded write or this row's own read just failed at the DB level
+				// (ordinary contention would have WAITED, not landed here - see the docblock). Either
+				// way, leave the row exactly as it is and let the next sweep have it: the hold is
+				// already non-blocking by time comparison.
 			}
 		}
 		return $processed;

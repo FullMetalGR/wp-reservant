@@ -1,10 +1,10 @@
 import { useEffect, useState } from '@wordpress/element';
 import { __ } from '@wordpress/i18n';
 import { Button, CheckboxControl, Notice, Spinner, TextControl } from '@wordpress/components';
-import { errorMessage } from '../api/client';
 import { useSaveSettings, useSettings } from '../api/queries';
 import type { SettingsPayload } from '../api/types';
 import { useToasts } from '../components/Toasts';
+import { errorMessage } from '../../shared';
 
 /**
  * A TTL field is only ever meaningful as a positive whole number - `SettingsAdminController`'s own

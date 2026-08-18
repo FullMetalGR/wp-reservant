@@ -1,0 +1,307 @@
+/*
+ * Public widget styles - builds to build/style-widget.css (and build/style-widget-rtl.css).
+ *
+ * The emitted name is wp-scripts' choice, not this file's: webpack pulls any source file named
+ * style.css into a shared chunk named style-<entry> after the FIRST entry that imports it. Today
+ * only the `widget` entry imports this file, so it emits style-widget.css - but if a second entry
+ * (the block editor script, say) ever imports it too, the name follows whichever entry comes
+ * first on the build command line, and every enqueue hardcoding the old name silently ships
+ * nothing. bin/widget-contract.mjs (run by `npm run size`) asserts build/style-widget.css exists
+ * after every build, so that rename fails CI instead. Do not rename this source file either:
+ * wp-scripts routes only source files NAMED style.css into the front-end style-<entry> chunk -
+ * renamed, these rules would emit into widget.css, which nothing enqueues. The filename matters
+ * because Assets.php enqueues build/style-widget.css by name; block.json deliberately declares
+ * NO `style` field (Task 9 removed it - on a classic theme that handle would enqueue site-wide,
+ * and frontend loading has exactly one owner, Assets).
+ *
+ * CONTAINMENT (this description is on its third revision; keep it matching the rules below).
+ * This stylesheet loads on a stranger's theme and must never reach outside its own mount node.
+ * Two mechanisms now do that work together: every selector starts with a reservant- prefixed
+ * class, and every rule below the two mount-node blocks is additionally descendant-scoped under
+ * .reservant-widget. The two exceptions have to be exceptions: .reservant-widget IS the mount
+ * node, and .reservant-widget--compact targets that same node (Block.php writes the modifier
+ * next to reservant-widget on the same div), so neither can sit under a descendant scope -
+ * compact stays a bare class at the token block's own specificity, winning by source order (see
+ * its comment below; assets/src/public/__tests__/style.test.ts pins that the order actually
+ * holds). No bare element selectors anywhere, in any position: unclassed elements inside the
+ * widget (the form's labels and inputs, plain paragraphs) deliberately keep the theme's own
+ * element styling, so the widget reads as part of the site instead of fighting it. No
+ * !important - as of this revision no rule here needs one; a future rule that genuinely must
+ * defend against a theme reset carries a comment naming what it defends against.
+ *
+ * THE THEMING SURFACE. The custom properties on .reservant-widget below are the documented
+ * surface, and they are the ONLY styling surface: the block's className/customClassName supports
+ * are deliberately OFF (src/Frontend/Block.php - the mount markup is byte-stable across the
+ * shortcode, the block and the manage route, and BlockTest's parity pin depends on that), so no
+ * per-instance class hook exists. Themes restyle the widget by setting these properties on
+ * .reservant-widget from their own stylesheet.
+ *
+ * Precedence differs BY TOKEN, and a theme author needs to know which is which:
+ *
+ * - accent and radius chosen in the block's appearance panel land as an INLINE style attribute
+ *   on the mount node itself (MountPoint::render()). Inline beats every stylesheet rule at any
+ *   specificity, so a theme cannot override a panel-chosen accent or radius from CSS. The panel
+ *   only emits a property for a non-default choice, so themes own the default look.
+ * - density lands as a stylesheet rule (.reservant-widget--compact below) at the same
+ *   single-class specificity as the token block. A theme's own
+ *   .reservant-widget { --reservant-space: ... } loaded AFTER this sheet therefore beats compact
+ *   by source order. Themes can retune density; they cannot out-cascade the panel's accent or
+ *   radius.
+ *
+ * What each token drives: --reservant-accent paints the primary action buttons and the selected
+ * choice chips, and feeds --reservant-focus, the focus-ring colour - it is real paint, not just
+ * a focus token. --reservant-error colours the alert regions and the destructive manage actions,
+ * --reservant-success the outcome sentence (every sentence Outcome renders is a positive
+ * resolution - failures never route there). Every documented token is consumed by a rule in this
+ * sheet.
+ */
+.reservant-widget {
+	--reservant-accent: #2271b1;
+	--reservant-radius: 6px;
+	--reservant-font: inherit;
+	--reservant-space: 12px;
+	--reservant-fg: #1e1e1e;
+	--reservant-bg: transparent;
+	--reservant-muted: #646970;
+	--reservant-border: #dcdcde;
+	--reservant-error: #b32d2e;
+	--reservant-success: #007017;
+	--reservant-focus: var( --reservant-accent );
+	--reservant-max-width: 46rem;
+
+	box-sizing: border-box;
+	max-width: var( --reservant-max-width );
+	font-family: var( --reservant-font );
+	color: var( --reservant-fg );
+	background: var( --reservant-bg );
+}
+
+/*
+ * The block's "density" attribute travels as this modifier CLASS on the mount node itself -
+ * never as a data- attribute (index.tsx deliberately reads no density; it is presentation, not
+ * configuration) and never as an inline property (what "compact" MEANS belongs to the
+ * stylesheet, so themes can retune it without touching PHP). Declared after the token block
+ * above so it wins the same-specificity fight on the same element - an order the style suite
+ * pins, because nothing else would notice this block drifting above the tokens or a second
+ * token block landing below it.
+ */
+.reservant-widget--compact {
+	--reservant-space: 8px;
+}
+
+.reservant-widget .reservant-widget__panel {
+	box-sizing: border-box;
+	padding: var( --reservant-space );
+	border: 1px solid var( --reservant-border );
+	border-radius: var( --reservant-radius );
+}
+
+/*
+ * Every list in the widget is a semantic <ul> with a class of its own, so the theme's list
+ * styling (bullets, indents) is reset per class - never through an element selector.
+ */
+.reservant-widget .reservant-chain__list,
+.reservant-widget .reservant-service-picker,
+.reservant-widget .reservant-staff-picker,
+.reservant-widget .reservant-date-strip,
+.reservant-widget .reservant-slot-grid,
+.reservant-widget .reservant-occurrence-picker,
+.reservant-widget .reservant-review__items,
+.reservant-widget .reservant-manage__items {
+	list-style: none;
+	margin: 0 0 var( --reservant-space );
+	padding: 0;
+}
+
+.reservant-widget .reservant-service-picker,
+.reservant-widget .reservant-staff-picker,
+.reservant-widget .reservant-occurrence-picker {
+	display: grid;
+	gap: calc( var( --reservant-space ) / 2 );
+}
+
+.reservant-widget .reservant-date-strip {
+	display: flex;
+	flex-wrap: wrap;
+	gap: calc( var( --reservant-space ) / 2 );
+}
+
+/* The responsive grid SlotGrid's own docblock promises its <ul> will be laid out as. */
+.reservant-widget .reservant-slot-grid {
+	display: grid;
+	grid-template-columns: repeat( auto-fill, minmax( 5.5rem, 1fr ) );
+	gap: calc( var( --reservant-space ) / 2 );
+}
+
+.reservant-widget .reservant-chain__segment {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: var( --reservant-space );
+	padding: calc( var( --reservant-space ) / 2 ) 0;
+}
+
+.reservant-widget .reservant-customer-form__field {
+	display: grid;
+	gap: calc( var( --reservant-space ) / 4 );
+	margin: 0 0 var( --reservant-space );
+}
+
+.reservant-widget .reservant-manage__actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: calc( var( --reservant-space ) / 2 );
+	margin: 0 0 var( --reservant-space );
+}
+
+.reservant-widget .reservant-manage__title,
+.reservant-widget .reservant-reschedule__title {
+	margin: 0 0 var( --reservant-space );
+	font-size: 1.2em;
+}
+
+/*
+ * Buttons inherit neither font nor colour from the page, so every classed control states both.
+ * Three visual roles below: choice chips (the pick-one lists), primary actions (the step
+ * advancers), quiet actions (everything else).
+ */
+.reservant-widget .reservant-service-picker__choice,
+.reservant-widget .reservant-staff-picker__choice,
+.reservant-widget .reservant-date-strip__day,
+.reservant-widget .reservant-slot-grid__slot,
+.reservant-widget .reservant-occurrence-picker__choice {
+	box-sizing: border-box;
+	padding: calc( var( --reservant-space ) / 2 ) var( --reservant-space );
+	border: 1px solid var( --reservant-border );
+	border-radius: var( --reservant-radius );
+	background: transparent;
+	color: var( --reservant-fg );
+	font: inherit;
+	cursor: pointer;
+}
+
+.reservant-widget .reservant-service-picker__choice,
+.reservant-widget .reservant-staff-picker__choice,
+.reservant-widget .reservant-occurrence-picker__choice {
+	width: 100%;
+	text-align: left;
+}
+
+.reservant-widget .reservant-slot-grid__slot {
+	width: 100%;
+	text-align: center;
+}
+
+/*
+ * The picked chip: an inner ring rather than a wider border, so the control does not change
+ * size when chosen. The visual state doubles the aria-pressed each chip already carries.
+ */
+.reservant-widget .reservant-service-picker__choice--selected,
+.reservant-widget .reservant-staff-picker__choice--selected,
+.reservant-widget .reservant-date-strip__day--selected {
+	border-color: var( --reservant-accent );
+	box-shadow: inset 0 0 0 1px var( --reservant-accent );
+}
+
+/* Sold out stays readable, not clickable - the state is also stated in the control's own text. */
+.reservant-widget .reservant-occurrence-picker__choice--sold-out {
+	color: var( --reservant-muted );
+	cursor: default;
+}
+
+.reservant-widget .reservant-flow__continue,
+.reservant-widget .reservant-customer-form__submit,
+.reservant-widget .reservant-review__confirm {
+	box-sizing: border-box;
+	padding: calc( var( --reservant-space ) / 2 ) var( --reservant-space );
+	border: 1px solid var( --reservant-accent );
+	border-radius: var( --reservant-radius );
+	background: var( --reservant-accent );
+	color: #fff;
+	font: inherit;
+	cursor: pointer;
+}
+
+.reservant-widget .reservant-chain__add,
+.reservant-widget .reservant-chain__remove,
+.reservant-widget .reservant-flow__back,
+.reservant-widget .reservant-flow__restart,
+.reservant-widget .reservant-manage__cancel,
+.reservant-widget .reservant-manage__retry,
+.reservant-widget .reservant-manage__reschedule,
+.reservant-widget .reservant-manage__confirm-cancel-yes,
+.reservant-widget .reservant-manage__confirm-cancel-no,
+.reservant-widget .reservant-reschedule__close {
+	box-sizing: border-box;
+	padding: calc( var( --reservant-space ) / 2 ) var( --reservant-space );
+	border: 1px solid var( --reservant-border );
+	border-radius: var( --reservant-radius );
+	background: transparent;
+	color: var( --reservant-fg );
+	font: inherit;
+	cursor: pointer;
+}
+
+/* The destructive pair names its risk in colour as well as in its label. */
+.reservant-widget .reservant-manage__cancel,
+.reservant-widget .reservant-manage__confirm-cancel-yes {
+	border-color: var( --reservant-error );
+	color: var( --reservant-error );
+}
+
+.reservant-widget .reservant-flow__continue:disabled,
+.reservant-widget .reservant-customer-form__submit:disabled,
+.reservant-widget .reservant-review__confirm:disabled,
+.reservant-widget .reservant-occurrence-picker__choice:disabled {
+	opacity: 0.6;
+	cursor: default;
+}
+
+/*
+ * One focus ring for every control, in the focus token - which defaults to the accent, so a
+ * theme that retunes --reservant-accent restyles the ring with it unless it sets
+ * --reservant-focus separately.
+ */
+.reservant-widget .reservant-service-picker__choice:focus-visible,
+.reservant-widget .reservant-staff-picker__choice:focus-visible,
+.reservant-widget .reservant-date-strip__day:focus-visible,
+.reservant-widget .reservant-slot-grid__slot:focus-visible,
+.reservant-widget .reservant-occurrence-picker__choice:focus-visible,
+.reservant-widget .reservant-flow__continue:focus-visible,
+.reservant-widget .reservant-customer-form__submit:focus-visible,
+.reservant-widget .reservant-review__confirm:focus-visible,
+.reservant-widget .reservant-chain__add:focus-visible,
+.reservant-widget .reservant-chain__remove:focus-visible,
+.reservant-widget .reservant-flow__back:focus-visible,
+.reservant-widget .reservant-flow__restart:focus-visible,
+.reservant-widget .reservant-manage__cancel:focus-visible,
+.reservant-widget .reservant-manage__retry:focus-visible,
+.reservant-widget .reservant-manage__reschedule:focus-visible,
+.reservant-widget .reservant-manage__confirm-cancel-yes:focus-visible,
+.reservant-widget .reservant-manage__confirm-cancel-no:focus-visible,
+.reservant-widget .reservant-reschedule__close:focus-visible {
+	outline: 2px solid var( --reservant-focus );
+	outline-offset: 1px;
+}
+
+/* The genuine-failure colour: NoticeRegion's alert under both BEM blocks, and the boundary. */
+.reservant-widget .reservant-flow__alert,
+.reservant-widget .reservant-manage__alert,
+.reservant-widget .reservant-widget__error {
+	color: var( --reservant-error );
+}
+
+/* Outcome renders only positive resolutions (failures never route there) - success is honest. */
+.reservant-widget .reservant-outcome__message {
+	color: var( --reservant-success );
+}
+
+/* Secondary lines: detail a visitor scans past, quieter than the choice it belongs to. */
+.reservant-widget .reservant-service-picker__duration,
+.reservant-widget .reservant-service-picker__price,
+.reservant-widget .reservant-occurrence-picker__remaining,
+.reservant-widget .reservant-flow__hint,
+.reservant-widget .reservant-reschedule__hint {
+	color: var( --reservant-muted );
+	font-size: 0.9em;
+}

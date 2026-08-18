@@ -1,4 +1,5 @@
-import { siteToUtc, toEvents, utcToSite } from '../adapter';
+import { toEvents } from '../adapter';
+import { siteToUtc, utcToSite } from '../../../shared';
 import type { CalendarBooking, CalendarBookingItem, CalendarOccurrence } from '../../api/types';
 
 describe( 'utcToSite', () => {

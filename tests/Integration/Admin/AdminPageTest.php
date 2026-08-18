@@ -169,6 +169,34 @@ final class AdminPageTest extends ReservantTestCase {
 		self::assertFalse( wp_script_is( 'reservant-admin', 'enqueued' ), 'an unrelated wp-admin page must not enqueue it' );
 	}
 
+	public function testTheAdminStylesheetDeclaresItsRtlTwin(): void {
+		self::assertFileExists(
+			RESERVANT_PATH . 'build/admin.asset.php',
+			'run `npm run build` before the integration suite so the enqueue path under test is real'
+		);
+
+		$this->asAdmin();
+		// set_up() resets only the script handle; the style handle would otherwise carry an
+		// earlier test's registration (and its data) into this one.
+		wp_dequeue_style( 'reservant-admin' );
+		wp_deregister_style( 'reservant-admin' );
+		$page = new AdminPage();
+		$page->register();
+		do_action( 'admin_menu' );
+		set_current_screen( get_plugin_page_hookname( 'reservant', '' ) );
+		do_action( 'admin_enqueue_scripts', get_plugin_page_hookname( 'reservant', '' ) );
+
+		self::assertTrue( wp_style_is( 'reservant-admin', 'enqueued' ), 'our own page must enqueue the admin stylesheet' );
+		// The build emits an RTL twin (build/admin-rtl.css); declaring it via style_add_data is
+		// what makes WordPress swap the whole sheet for RTL admin locales. 'replace' derives the
+		// URL as s/.css/-rtl.css/, so the twin's on-disk name must match that derivation - the
+		// same contract the frontend sheet already declares (Frontend\Assets, pinned by
+		// ShortcodeTest). Without it an RTL admin locale is served the LTR sheet even though the
+		// correct one shipped.
+		self::assertSame( 'replace', wp_styles()->get_data( 'reservant-admin', 'rtl' ) );
+		self::assertFileExists( RESERVANT_PATH . 'build/admin-rtl.css' );
+	}
+
 	public function testInlineConfigCarriesCapsAndRestRoot(): void {
 		self::assertFileExists( RESERVANT_PATH . 'build/admin.asset.php' );
 

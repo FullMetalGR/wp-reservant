@@ -187,6 +187,10 @@ final class AdminPage {
 		$cssFile = self::pluginPath() . 'build/admin.css';
 		if ( file_exists( $cssFile ) ) {
 			wp_enqueue_style( self::HANDLE, self::pluginUrl() . 'build/admin.css', array(), $asset['version'] );
+			// The build emits the RTL twin (admin-rtl.css); 'replace' swaps the whole sheet for
+			// RTL admin locales, deriving the URL as s/.css/-rtl.css/ - which matches the
+			// emitted name. Same contract as the frontend sheet (Frontend\Assets::enqueue()).
+			wp_style_add_data( self::HANDLE, 'rtl', 'replace' );
 		}
 
 		wp_add_inline_script(

@@ -74,6 +74,21 @@ final class AvailabilityQuery {
 				throw new SlotConflict( 'not_found', $index );
 			}
 			$eligible = $this->resources->idsForService( $choice->serviceId );
+
+			/**
+			 * Narrow which staff may serve this segment (AGENTS.md section 7). Applied BEFORE the
+			 * explicit-resource check below, so a filter that removes the customer's chosen staff member
+			 * refuses the chain rather than quietly serving someone else.
+			 *
+			 * @param list<int> $eligible
+			 */
+			$eligible = array_values(
+				array_filter(
+					(array) apply_filters( 'reservant/chain/candidates', $eligible, $choice->serviceId, $index ),
+					'is_int'
+				)
+			);
+
 			if ( array() === $eligible || ( null !== $choice->resourceId && ! in_array( $choice->resourceId, $eligible, true ) ) ) {
 				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped
 				throw new SlotConflict( 'no_staff', $index );
@@ -102,7 +117,7 @@ final class AvailabilityQuery {
 			new ChainResolver( $granularity )
 		);
 
-		return $generator->starts(
+		$starts = $generator->starts(
 			$segments,
 			$fromUtc,
 			$toUtc,
@@ -114,6 +129,19 @@ final class AvailabilityQuery {
 			$this->busyFor( $resourceIds, $fromUtc, $toUtc ),
 			$sameStaff,
 			$ignoreWindow
+		);
+
+		/**
+		 * Last word on what the customer is offered (AGENTS.md section 7). Applied on the ONE path
+		 * both the public and admin endpoints reach, so `$ignoreWindow` cannot fork the two apart.
+		 *
+		 * @param list<\DateTimeImmutable> $starts
+		 */
+		return array_values(
+			array_filter(
+				(array) apply_filters( 'reservant/availability/slots', $starts, $segmentChoices, $fromUtc, $toUtc ),
+				static fn ( mixed $s ): bool => $s instanceof \DateTimeImmutable
+			)
 		);
 	}
 

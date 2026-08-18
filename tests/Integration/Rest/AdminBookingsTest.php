@@ -513,4 +513,127 @@ final class AdminBookingsTest extends ReservantTestCase {
 		self::assertSame( 409, $customerRefused->get_status() );
 		self::assertSame( 'lead_time', $customerRefused->get_data()['message'] );
 	}
+
+	// ------------------- POST-COMMIT: the second audit row this controller adds by itself
+
+	/**
+	 * Run `$body` with the ONE audit insert naming `$action` rewritten to a table that does not
+	 * exist, and answer how many times `reservant/error` fired.
+	 *
+	 * The action name is in the statement text, so this hits only the controller's own post-commit
+	 * row: the use case's in-transaction row (`admin_create`, `cancelled`) carries a different action
+	 * and is left to succeed, which is the whole point - sabotaging every audit insert would refuse
+	 * the transaction too and prove nothing about the row that comes after it.
+	 *
+	 * @param callable(): void $body
+	 */
+	private function errorsWhileAuditActionFails( string $action, callable $body ): int {
+		global $wpdb;
+		$errors   = 0;
+		$listener = static function () use ( &$errors ): void {
+			++$errors;
+		};
+		$sabotage = static function ( $query ) use ( $action ) {
+			$q = (string) $query;
+			return ( str_contains( $q, 'reservant_audit_log' ) && str_contains( $q, "'{$action}'" ) )
+				? 'INSERT INTO reservant_no_such_table (id) VALUES (1)'
+				: $query;
+		};
+
+		$suppressed = $wpdb->suppress_errors( true );
+		add_action( 'reservant/error', $listener );
+		add_filter( 'query', $sabotage );
+		try {
+			$body();
+		} finally {
+			remove_filter( 'query', $sabotage );
+			remove_action( 'reservant/error', $listener );
+			$wpdb->suppress_errors( $suppressed );
+		}
+		return $errors;
+	}
+
+	/** @return list<string> every audit action recorded against a booking, oldest first */
+	private function auditActions( string $uuid ): array {
+		global $wpdb;
+		return $wpdb->get_col(
+			$wpdb->prepare(
+				"SELECT a.action FROM {$wpdb->prefix}reservant_audit_log a
+				 JOIN {$wpdb->prefix}reservant_bookings b ON b.id = a.booking_id
+				 WHERE b.uuid = %s ORDER BY a.id ASC", // phpcs:ignore WordPress.DB.PreparedSQL
+				$uuid
+			)
+		);
+	}
+
+	/**
+	 * A manual booking whose SECOND audit row failed is still a booking, and must answer 201.
+	 *
+	 * `create()` records `admin_create_by` AFTER `HoldBooking::execute()` has returned - i.e. after
+	 * its transaction committed - and that call sits outside every `try` in the method. Once
+	 * `AuditLog::record()` began refusing a failed insert, a lost row there escaped this REST
+	 * callback as an uncaught exception: a PHP fatal or an opaque 500 for a booking that was created
+	 * SUCCESSFULLY, inviting the owner to repeat a booking that already exists. The honest answer is
+	 * the 201 with the row missing, announced on `reservant/error`.
+	 */
+	public function test_manual_booking_still_answers_201_when_its_second_audit_row_fails(): void {
+		global $wpdb;
+		$this->asAdmin();
+		$start = $this->sql( 1, '09:00' );
+
+		$response = null;
+		$errors   = $this->errorsWhileAuditActionFails(
+			'admin_create_by',
+			function () use ( $start, &$response ): void {
+				$response = $this->jsonRequest(
+					'POST',
+					'/reservant/v1/admin/bookings',
+					array(
+						'customer'    => array( 'name' => 'Walk-in', 'email' => 'walkin@example.com' ),
+						'appointment' => array( 'start_utc' => $start, 'segments' => array( array( 'service_id' => $this->cutId, 'resource_id' => $this->staffA ) ) ),
+					)
+				);
+			}
+		);
+
+		self::assertSame( 201, $response->get_status(), (string) wp_json_encode( $response->get_data() ) );
+		$uuid = (string) $response->get_data()['uuid'];
+		self::assertSame(
+			'confirmed',
+			$wpdb->get_var( $wpdb->prepare( "SELECT status FROM {$wpdb->prefix}reservant_bookings WHERE uuid = %s", $uuid ) ), // phpcs:ignore WordPress.DB.PreparedSQL
+			'the booking committed before the second audit row was even attempted'
+		);
+		self::assertSame( array( 'admin_create' ), $this->auditActions( $uuid ), 'the use case\'s own in-transaction row must survive; only the post-commit one is lost' );
+		self::assertSame( 1, $errors, 'the lost audit row must be visible to an operator rather than silent' );
+	}
+
+	/**
+	 * The same at `cancel()`, whose `admin_cancel` row is recorded after `CancelBooking::execute()`
+	 * has committed and likewise sits outside every `try`. A 409 here would tell a manager their
+	 * override failed while the booking is already cancelled, and a repeat then answers
+	 * `not_cancellable`.
+	 */
+	public function test_admin_cancel_still_answers_200_when_its_second_audit_row_fails(): void {
+		global $wpdb;
+		$uuid = $this->customerHold( $this->utc( 1, '10:00' ), $this->cutId, $this->staffA );
+		$this->asAdmin();
+
+		$response = null;
+		$errors   = $this->errorsWhileAuditActionFails(
+			'admin_cancel',
+			function () use ( $uuid, &$response ): void {
+				$response = $this->request( 'POST', "/reservant/v1/admin/bookings/{$uuid}/cancel" );
+			}
+		);
+
+		self::assertSame( 200, $response->get_status(), (string) wp_json_encode( $response->get_data() ) );
+		self::assertSame( 'cancelled', $response->get_data()['status'] );
+		self::assertSame(
+			'cancelled',
+			$wpdb->get_var( $wpdb->prepare( "SELECT status FROM {$wpdb->prefix}reservant_bookings WHERE uuid = %s", $uuid ) ), // phpcs:ignore WordPress.DB.PreparedSQL
+			'the cancellation committed before the second audit row was even attempted'
+		);
+		self::assertSame( array( 'held', 'cancelled' ), $this->auditActions( $uuid ), 'only the post-commit `admin_cancel` row is lost' );
+		self::assertSame( 1, $errors, 'the lost audit row must be visible to an operator rather than silent' );
+	}
 }

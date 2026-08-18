@@ -169,6 +169,46 @@ final class AdminCatalogTest extends ReservantTestCase {
 		self::assertSame( 'Deluxe Cut', $fetched->get_data()['name'] );
 	}
 
+	/**
+	 * Fix round 1: `description` is optional on create (defaults to `''`, not a missing column - the
+	 * schema now has one, `Migrations.php`), sanitized with `sanitize_textarea_field()` so line
+	 * breaks survive a save, and editable on an existing service through the same partial-PUT
+	 * semantics every other field already gets.
+	 */
+	public function test_create_and_update_round_trip_description(): void {
+		$this->asAdmin();
+
+		$created = $this->jsonRequest(
+			'POST',
+			'/reservant/v1/admin/services',
+			array(
+				'name'         => 'Cut',
+				'type'         => 'appointment',
+				'duration_min' => 30,
+				'payment_mode' => 'onsite',
+				'description'  => "A precision trim.\nWalk-ins welcome.",
+			)
+		);
+		self::assertSame( 201, $created->get_status(), (string) wp_json_encode( $created->get_data() ) );
+		self::assertSame( "A precision trim.\nWalk-ins welcome.", $created->get_data()['description'] );
+
+		$updated = $this->jsonRequest(
+			'PUT',
+			"/reservant/v1/admin/services/{$created->get_data()['id']}",
+			array( 'description' => 'Now with a hot towel finish.' )
+		);
+		self::assertSame( 200, $updated->get_status(), (string) wp_json_encode( $updated->get_data() ) );
+		self::assertSame( 'Now with a hot towel finish.', $updated->get_data()['description'] );
+		// Untouched fields survive the partial update.
+		self::assertSame( 'Cut', $updated->get_data()['name'] );
+	}
+
+	/** A caller that never sends `description` gets `''`, not a missing key. */
+	public function test_create_defaults_description_to_empty_string_when_omitted(): void {
+		$created = $this->createServiceAsAdmin();
+		self::assertSame( '', $created['description'] );
+	}
+
 	public function test_create_service_rejects_bad_duration_and_bad_type(): void {
 		$this->asAdmin();
 
@@ -422,6 +462,69 @@ final class AdminCatalogTest extends ReservantTestCase {
 		self::assertIsInt( $seat['id'] );
 		self::assertIsInt( $seat['sort_row'] );
 		self::assertIsInt( $seat['sort_col'] );
+	}
+
+	/**
+	 * Lock-guard repair wave 3, item 2: `create()`'s only `try` used to wrap the spec parse alone, so
+	 * `SeatMapRepository::insertSeats()`'s guarded `lock_unavailable` throw (added to stop a failed
+	 * insert from feeding `insertSeats()` a stale or zero map id - see that repository's docblock)
+	 * escaped this REST callback as an uncaught exception - a fatal or an opaque 500 - for a failure
+	 * `update()` already answers with a clean 409. `create()` now wraps `insert()`/`insertSeats()` in
+	 * the same catch `update()` uses.
+	 *
+	 * Wave 4 extends this past status-and-message to the COMMITTED STATE, which is what the 409
+	 * actually promises. `create()` had no transaction, so the map row `insert()` wrote had already
+	 * committed by the time `insertSeats()` refused: the caller got a 409 whose whole meaning is
+	 * "nothing happened, repeat the request" together with an orphaned, seatless map - and every retry
+	 * minted another one. `insert()`/`insertSeats()` now run inside one `TransactionRunner`, the shape
+	 * `update()` and `destroy()` on this controller already use, so the refusal really does mean
+	 * nothing happened.
+	 */
+	public function test_seat_map_create_answers_409_not_a_fatal_when_the_seat_insert_fails(): void {
+		global $wpdb;
+		$this->asAdmin();
+
+		$sabotage = static function ( $query ) {
+			return 1 === preg_match( '/^\s*INSERT\s+INTO\s+\S*reservant_seats\b/is', (string) $query )
+				? 'INSERT INTO reservant_no_such_table (id) VALUES (1)'
+				: $query;
+		};
+		$suppressed = $wpdb->suppress_errors( true );
+		add_filter( 'query', $sabotage );
+		try {
+			$response = $this->jsonRequest(
+				'POST',
+				'/reservant/v1/admin/seat-maps',
+				array( 'name' => 'Main Hall', 'spec' => 'rows A-B, 2 per row' )
+			);
+		} finally {
+			remove_filter( 'query', $sabotage );
+			$wpdb->suppress_errors( $suppressed );
+		}
+
+		self::assertSame( 409, $response->get_status(), (string) wp_json_encode( $response->get_data() ) );
+		self::assertSame( 'lock_unavailable', $response->get_data()['message'] );
+
+		self::assertSame(
+			0,
+			(int) $wpdb->get_var( "SELECT COUNT(*) FROM {$wpdb->prefix}reservant_seat_maps" ), // phpcs:ignore WordPress.DB.PreparedSQL
+			'a 409 that says "repeat the request" must not leave an orphaned, seatless map behind for every attempt'
+		);
+		self::assertSame(
+			0,
+			(int) $wpdb->get_var( "SELECT COUNT(*) FROM {$wpdb->prefix}reservant_seats" ), // phpcs:ignore WordPress.DB.PreparedSQL
+			'and no seat rows either'
+		);
+
+		// The retry the 409 invites must now succeed and leave exactly one map.
+		$retry = $this->jsonRequest(
+			'POST',
+			'/reservant/v1/admin/seat-maps',
+			array( 'name' => 'Main Hall', 'spec' => 'rows A-B, 2 per row' )
+		);
+		self::assertSame( 201, $retry->get_status(), (string) wp_json_encode( $retry->get_data() ) );
+		self::assertSame( 1, (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$wpdb->prefix}reservant_seat_maps" ) ); // phpcs:ignore WordPress.DB.PreparedSQL
+		self::assertCount( 4, $retry->get_data()['seats'] );
 	}
 
 	/**

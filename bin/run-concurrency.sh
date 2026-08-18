@@ -94,5 +94,9 @@ php bin/concurrency-seats.php  "$BASE" "$GRID_OCC" "$SEAT"
 # (capacity 3): the scenario needs room for a shrink that is still legal against the seats already
 # sold, which is the whole point of the guard it is testing.
 php bin/concurrency-occurrence.php "$BASE" "$SEMINAR" "$CLI"
+# The reschedule engine (P5): two customers moving into one slot, and a move racing a rival hold. Seeds
+# its own confirmed bookings on days 12-16 past $START, which no other scenario here touches (holds:
+# +0 and +30; chains: +1..+10), so the only contention it ever sees is the contention it creates.
+php bin/concurrency-reschedule.php "$BASE" "$CUT" "$STAFF_A" "$START" "$CLI"
 
 echo "ALL CONCURRENCY TESTS PASSED"

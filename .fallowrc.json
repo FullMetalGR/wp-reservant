@@ -1,7 +1,23 @@
 {
 	"$schema": "https://unpkg.com/fallow/schema/fallow.schema.json",
+	// index.tsx is deliberately NOT an entry: entry status suppresses fallow/unused-export inside
+	// it, and Tasks 14-16 edit that file. Dropping editor.tsx instead trips error-level unused-file.
 	"entry": [
 		"assets/src/admin/index.tsx",
+		"assets/src/public/editor.tsx",
 		"bin/fallow-gate.mjs"
-	]
+	],
+	// editor.tsx imports @wordpress/blocks and @wordpress/block-editor, but the packages are
+	// deliberately NOT in package.json: @wordpress/dependency-extraction-webpack-plugin rewrites
+	// the bare specifiers to the wp.blocks / wp.blockEditor globals WordPress itself ships, and
+	// the npm copies bought nothing (no bundled code, no types - editor-modules.d.ts is the sole
+	// type source) at the cost of 137 transitive packages. Without this list fallow flags both
+	// imports as error-level unlisted-dependency. LATENT HAZARD: the plugin keys externalisation
+	// on the '@wordpress/' PREFIX (a short bundled-packages list excepted), so a DEEP import
+	// (@wordpress/blocks/build-module/...) is never bundled either - it externalises to a
+	// nonexistent global and, first to bite, a bogus script handle (wp-blocks/build-module/...)
+	// in build/editor.asset.php. WordPress skips any item whose dependency handle is unregistered
+	// (WP_Dependencies::all_deps), so the whole editor bundle silently never loads - only
+	// WP 6.9.1+ even raises a _doing_it_wrong notice. Keep imports bare.
+	"ignoreDependencies": ["@wordpress/blocks", "@wordpress/block-editor"]
 }

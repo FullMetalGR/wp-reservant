@@ -6,10 +6,11 @@ import { bootConfig } from '../boot';
 import { useCalendar, useResources } from '../api/queries';
 import type { Resource } from '../api/types';
 import { toEvents, type CalEvent } from '../calendar/adapter';
-import { CalendarNav, rangeFor, siteNow, type CalView } from '../calendar/navigation';
+import { CalendarNav, rangeFor, type CalView } from '../calendar/navigation';
 import { ReservantCalendar, type CalendarSlot } from '../calendar/ReservantCalendar';
 import { BookingDrawer } from './BookingDrawer';
 import { ManualBookingDrawer } from './ManualBookingDrawer';
+import { siteNow } from '../../shared';
 
 /**
  * "All staff" plus every ACTIVE resource, in the shape `<SelectControl>` wants.

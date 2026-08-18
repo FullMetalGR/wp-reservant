@@ -259,4 +259,79 @@ final class ApprovalEmailsTest extends ReservantTestCase {
 		self::assertCount( 1, $sent );
 		self::assertSame( (string) get_option( 'admin_email' ), $sent[0]['to'] );
 	}
+
+	/**
+	 * A DB fault inside this post-commit notification hook must not strand the customer.
+	 *
+	 * `sendApproverEmail()` re-reads the booking (`findByUuid()`, for the `updated_at` the signed
+	 * links bind to), and that read is reached from `reservant/booking/held`, which
+	 * `HoldBooking::execute()` fires AFTER `$this->txn->run()` has returned - the hold is committed.
+	 * Once `findByUuid()` began refusing a failed read, that refusal travelled out of
+	 * `HoldBooking::execute()` into `HoldsController::create()`'s own `catch`, which answered 409
+	 * `lock_unavailable` - for a booking that exists - and never reached the two lines below it that
+	 * hand the guest their `manage_token`. The result was a committed booking the customer could
+	 * neither manage nor cancel, plus a 409 inviting them to book it a second time. It also skipped
+	 * `scheduleApprovalTimers()`, which runs after the same hook, so the hold got no nags and no
+	 * timeout either.
+	 *
+	 * Pre-guard this read answered `null` and the email was simply skipped. That is the behaviour
+	 * restored here: a lost approver email is not worth a lost booking.
+	 *
+	 * The sabotage is installed at priority 9 on that hook and removed at 11, so it covers exactly
+	 * the queries `ApprovalEmails::onHeld()` (priority 10) issues - never `HoldBooking`'s own
+	 * in-transaction re-read, which is the identical statement shape.
+	 */
+	public function testAFailedApproverLookupNeitherLosesTheHoldNorItsManageToken(): void {
+		global $wpdb;
+		$sabotage = static function ( $query ) {
+			$q = (string) $query;
+			return ( str_contains( $q, 'reservant_bookings' ) && str_contains( $q, 'uuid' ) && ! str_contains( $q, 'FOR UPDATE' ) )
+				? 'SELECT * FROM reservant_no_such_table WHERE 1 = 1'
+				: $query;
+		};
+		$arm        = static function () use ( $sabotage ): void {
+			add_filter( 'query', $sabotage );
+		};
+		$disarm     = static function () use ( $sabotage ): void {
+			remove_filter( 'query', $sabotage );
+		};
+		$suppressed = $wpdb->suppress_errors( true );
+		add_action( 'reservant/booking/held', $arm, 9 );
+		add_action( 'reservant/booking/held', $disarm, 11 );
+
+		$request = new \WP_REST_Request( 'POST', '/reservant/v1/holds' );
+		$request->set_body_params(
+			array(
+				'customer'    => array( 'name' => 'Maria', 'email' => 'maria@example.com' ),
+				'appointment' => array(
+					'start_utc' => $this->sql( 1, '09:00' ),
+					'segments'  => array( array( 'service_id' => $this->approvalServiceId ) ),
+				),
+			)
+		);
+		try {
+			$response = rest_do_request( $request );
+		} finally {
+			remove_action( 'reservant/booking/held', $arm, 9 );
+			remove_action( 'reservant/booking/held', $disarm, 11 );
+			remove_filter( 'query', $sabotage ); // Belt and braces if the hook never reached priority 11.
+			$wpdb->suppress_errors( $suppressed );
+		}
+
+		self::assertSame( 201, $response->get_status(), (string) wp_json_encode( $response->get_data() ) );
+		$data = $response->get_data();
+		self::assertNotSame( '', (string) ( $data['manage_token'] ?? '' ), 'the guest must still receive the only credential they have for this booking' );
+
+		$fresh = ( new BookingRepository( $wpdb ) )->findByUuid( (string) $data['uuid'] );
+		self::assertNotNull( $fresh, 'the hold committed - the notification hook runs after the transaction' );
+		self::assertSame( 'awaiting_approval', $fresh['status'] );
+
+		// The approval timers are scheduled after the same hook, so they were skipped too.
+		foreach ( array( Jobs::NAG, Jobs::TIMEOUT ) as $hook ) {
+			self::assertNotEmpty(
+				as_get_scheduled_actions( array( 'hook' => $hook, 'group' => 'reservant', 'per_page' => 10 ), 'ids' ),
+				"a failed approver lookup must not cost the hold its {$hook} timers"
+			);
+		}
+	}
 }

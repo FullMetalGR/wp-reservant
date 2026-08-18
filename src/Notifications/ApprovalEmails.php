@@ -20,8 +20,14 @@ use Reservant\Infrastructure\Db\ResourceRepository;
  * and `booking_rejected` go to the customer, the latter carrying the owner's rejection reason
  * verbatim.
  *
- * `Mailer::send()` never throws (its own contract), so nothing here needs a try/catch of its own -
- * a broken mail transport degrades to a logged `reservant/error`, never a failed booking transition.
+ * `Mailer::send()` never throws (its own contract), so a broken mail transport degrades to a logged
+ * `reservant/error`, never a failed booking transition. Every one of these four hooks fires AFTER the
+ * transition it announces has committed, so that rule binds this whole class and not only the mailer:
+ * nothing here may throw out of a listener, because doing so converts a committed booking into the
+ * caller's failure report. The one statement that can fail on its own is the booking re-read in
+ * `sendApproverEmail()` - see that method's docblock, and `Infrastructure\Db\AuditLog::record()` for
+ * the pre-decision / post-commit split this belongs to. `approverEmail()`'s resource lookup is
+ * unguarded at the repository and so cannot refuse; it falls back to the site admin.
  */
 final class ApprovalEmails {
 
@@ -74,6 +80,29 @@ final class ApprovalEmails {
 	 * would reject on the next write) and the snapshot's own `hold_expires_at`, which is the
 	 * approval window's authoritative deadline.
 	 *
+	 * **This read is POST-COMMIT, and a DB fault on it is treated exactly like an absent row: skip the
+	 * email.** `AuditLog::record()`'s docblock states the pre-decision / post-commit split in full.
+	 * Concretely here: `reservant/booking/held` fires from `HoldBooking::execute()` AFTER
+	 * `$this->txn->run()` has returned, so the hold is committed and its listeners are side work. Once
+	 * `findByUuid()` began refusing a failed read, that refusal travelled out of this hook, out of
+	 * `HoldBooking::execute()`, and into `Rest\HoldsController::create()`'s own `catch` - which answered
+	 * 409 `lock_unavailable` for a booking that EXISTS and, because it returned from that catch, never
+	 * reached the two lines below it that hand the guest their `manage_token`. The result was a
+	 * committed booking the customer could neither manage nor cancel, a 409 inviting them to book it a
+	 * second time, and (the hook fires before `scheduleApprovalTimers()`) a hold with no nags and no
+	 * timeout either. The same read is reached from `Infrastructure\Scheduler\Jobs::nag()`, where the
+	 * refusal instead failed a scheduled action outright.
+	 *
+	 * Losing an approver email costs the owner one notification, and the nag timers will try again.
+	 * Losing the booking's own credential costs the customer the booking. The pre-guard behaviour -
+	 * `null` and skip - is therefore the right answer, and it is restored here rather than at the
+	 * repository, whose refusal is correct for the pre-decision callers that decide on it.
+	 *
+	 * `Jobs::nag()`'s and `Jobs::timeout()`'s OWN reads keep the refusal on purpose: those decide
+	 * whether the job does anything at all, nothing has committed when they run, and Action Scheduler
+	 * marking a throwing action failed is the accepted outcome for a job (`ExpireHolds`'s docblock
+	 * documents that precedent).
+	 *
 	 * @param array<string, mixed> $extra additional filter context (e.g. the nag percent).
 	 */
 	private static function sendApproverEmail( string $key, BookingSnapshot $snapshot, array $extra ): void {
@@ -82,7 +111,13 @@ final class ApprovalEmails {
 		}
 
 		global $wpdb;
-		$fresh = ( new BookingRepository( $wpdb ) )->findByUuid( $snapshot->uuid );
+		try {
+			$fresh = ( new BookingRepository( $wpdb ) )->findByUuid( $snapshot->uuid );
+		} catch ( \RuntimeException $exception ) {
+			// Reported so the lost email is visible, then treated as absence - see above.
+			do_action( 'reservant/error', $exception, $key );
+			return;
+		}
 		if ( null === $fresh ) {
 			return; // Gone by the time the mailer runs - nothing left to notify about.
 		}

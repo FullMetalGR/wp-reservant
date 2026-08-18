@@ -4,9 +4,9 @@ import { Button, ButtonGroup, Notice, SelectControl, Spinner, TextControl } from
 import { bootConfig } from '../boot';
 import { useBookings, useResources, useServices } from '../api/queries';
 import type { ActiveStatus, BookingFilters, BookingListResponse, BookingSummary, Resource, Service } from '../api/types';
-import { utcToSite } from '../calendar/adapter';
 import { RowSelectButton } from '../components/RowSelectButton';
 import { BookingDrawer, formatMoney, statusLabel } from './BookingDrawer';
+import { utcToSite } from '../../shared';
 
 const PER_PAGE = 20;
 

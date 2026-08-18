@@ -157,6 +157,7 @@ export type ApprovalTimeout = 'expire' | 'auto_approve';
 export interface Service {
 	id: number;
 	name: string;
+	description: string;
 	type: ServiceType;
 	duration_min: number;
 	processing_time_min: number;

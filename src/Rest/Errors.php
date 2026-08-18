@@ -16,7 +16,7 @@ use Reservant\Application\SlotConflict;
 final class Errors {
 
 	/**
-	 * Every reason string this plugin may repeat back to a caller: the ten `SlotConflict` codes
+	 * Every reason string this plugin may repeat back to a caller: the eleven `SlotConflict` codes
 	 * (documented on that class) plus the lifecycle refusals the use cases throw. Anything outside
 	 * this list is an internal detail - grep `src/` for `new \RuntimeException(` before adding to it.
 	 */
@@ -32,6 +32,9 @@ final class Errors {
 		'horizon',
 		'outside_hours',
 		'bad_seat',
+		// SlotConflict - RescheduleBooking's own addition. Its closed-window refusal is `window_closed`
+		// below, deliberately the same signal CancelBooking raises, not a second convention.
+		'not_reschedulable',
 		// Lifecycle - ConfirmBooking, CancelBooking, HoldBooking, HoldsController::release().
 		'window_closed',
 		'online_payment_required',
@@ -42,6 +45,17 @@ final class Errors {
 		'stale_state',
 		'not_held',
 		'currency_mismatch',
+		// Infrastructure contention - every write or locking read on a section-2.2 mutex path that can
+		// fail at the DB level and refuses rather than being walked past: `LockManager::acquire()`,
+		// `ResourceDayRepository::ensure()`/`bumpRev()`, `BookingRepository` (its `assertNoDbError()`
+		// reads, `reapExpiredTouching()`, `releaseSeatClaims()`), `SeatMapRepository` (`insert()`,
+		// `insertSeats()`, `lockForUpdate()`, `deleteSeats()`), `OccurrenceRepository` and
+		// `AuditLog::record()`. Deliberately NOT `stale_state`: that one means "a rival moved this
+		// booking between the plan and the transaction", which is a benign no-op for a caller that only
+		// wanted the booking to end up decided. A lock that could not be taken is the opposite -
+		// nothing happened at all and the request is worth repeating verbatim. Folding the two together
+		// made `Admin\ApprovalActionEndpoint` render a busy lock as "may already have been handled".
+		'lock_unavailable',
 		// Lifecycle - ApproveBooking, RejectBooking.
 		'not_approvable',
 		// Lifecycle - MarkBookingOutcome.
@@ -73,7 +87,9 @@ final class Errors {
 	 *
 	 * `window_closed` is 403 (the policy forbids it, not the state), `online_payment_required` is
 	 * 402, an elapsed hold is 410 Gone, and everything else - `not_confirmable`, `approval_required`,
-	 * `not_cancellable`, `stale_state` - is a 409 state conflict.
+	 * `not_cancellable`, `stale_state` - is a 409 state conflict. `lock_unavailable` is a 409 too,
+	 * though it is contention rather than state: the request was never decided, and repeating it
+	 * verbatim is the correct response, which is exactly what 409 already asks a client to do.
 	 *
 	 * **The message is only echoed when it is a known reason.** `RuntimeException` is also how the
 	 * repositories report a failed write (`booking_insert_failed: <$wpdb->last_error>`), so passing
@@ -81,6 +97,14 @@ final class Errors {
 	 * table, column and index names - on a deadlock, a lock-wait timeout or a missing table. Only
 	 * the allow-list below reaches the wire; anything else is an opaque 500, announced on
 	 * `reservant/error` so a site can log it without the plugin choosing a sink.
+	 *
+	 * **`lock_unavailable` fires that same action, even though it reaches the wire as a 409.** Every
+	 * other known reason is an ordinary customer-facing outcome - a booking already decided, a window
+	 * closed - and logging those would just be noise. `lock_unavailable` means the database refused a
+	 * write or a locking read the code expected to work: that is an operational event a site operator
+	 * needs to see, not a customer mistake, and before this the seat-map write path in particular
+	 * traded a logged 500 (`update_conflict`) for a silent 409 the moment it was given this reason
+	 * instead. No other known reason gets this treatment.
 	 */
 	public static function failure( \RuntimeException $exception ): \WP_Error {
 		$reason = $exception->getMessage();
@@ -94,6 +118,9 @@ final class Errors {
 					'detail' => __( 'Something went wrong on our side. Please try again.', 'reservant' ),
 				)
 			);
+		}
+		if ( 'lock_unavailable' === $reason ) {
+			do_action( 'reservant/error', $exception );
 		}
 		$status = match ( $reason ) {
 			'window_closed'           => 403,
@@ -146,6 +173,7 @@ final class Errors {
 			'horizon'                 => __( 'That date is too far ahead to book.', 'reservant' ),
 			'outside_hours'           => __( 'That time is outside our working hours.', 'reservant' ),
 			'bad_seat'                => __( 'Those seats are not selectable.', 'reservant' ),
+			'not_reschedulable'       => __( 'This booking can no longer be moved.', 'reservant' ),
 			'window_closed'           => __( 'It is too late to change this booking. Please contact us.', 'reservant' ),
 			'online_payment_required' => __( 'This booking must be paid for online.', 'reservant' ),
 			'hold_expired'            => __( 'Your reservation expired. Please start again.', 'reservant' ),
@@ -155,6 +183,7 @@ final class Errors {
 			'not_approvable'          => __( 'This booking can no longer be approved or rejected.', 'reservant' ),
 			'bad_outcome'             => __( 'That outcome is not recognised.', 'reservant' ),
 			'referenced'              => __( 'This item is still used by existing bookings. Deactivate it instead of deleting it.', 'reservant' ),
+			'lock_unavailable'        => __( 'The system was busy. Please try again.', 'reservant' ),
 			default                   => __( 'That request could not be completed.', 'reservant' ),
 		};
 	}

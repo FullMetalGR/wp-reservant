@@ -25,6 +25,49 @@ abstract class ReservantTestCase extends \WP_UnitTestCase {
 		// not state a test could see stale. This used to be an opt-in per test class (`SettingsTest`,
 		// `AdminSettingsTest`); hoisted here so the leak cannot recur in a class that forgets it.
 		delete_option( 'reservant_settings' );
+		self::clearRateLimiter();
+		$this->resetRewriteAndTheme();
+	}
+
+	/** The pristine stylesheet of this process, recorded by the first test to run. */
+	private static ?string $baselineTheme = null;
+
+	/**
+	 * Rewrite and theme state are process-global (the in-memory `$wp_rewrite`, the active theme)
+	 * and the harness resets neither outside core's own suite (`WP_RUN_CORE_TESTS`). The class
+	 * that mutates them (`ManageRouteTest`) puts both back in its tear_down, but tear_down is
+	 * exactly what a mid-test fatal or an aborted run skips - and the classes that would consume
+	 * the leak (`ShortcodeTest`, `BlockTest`, both calling `get_permalink()`) run directly after
+	 * it in directory order. Hoisted here for the same reason `delete_option('reservant_settings')`
+	 * was, above: neutralize the leak at the point of consumption, so it cannot recur in a class
+	 * that forgets its own cleanup. Both guards are one comparison on the no-leak path, so every
+	 * other test pays nothing.
+	 */
+	private function resetRewriteAndTheme(): void {
+		global $wp_rewrite;
+		if ( '' !== (string) $wp_rewrite->permalink_structure ) {
+			$this->set_permalink_structure( '' );
+		}
+		self::$baselineTheme ??= (string) get_stylesheet();
+		if ( get_stylesheet() !== self::$baselineTheme ) {
+			switch_theme( self::$baselineTheme );
+		}
+	}
+
+	/**
+	 * `RateLimiter::allow()` counts in a transient, and a hold's own locked write commits the
+	 * enclosing connection (AGENTS.md section 2.2) - so a counter left by an earlier test class
+	 * outlives the harness's per-test ROLLBACK. Every caller of `POST /holds` buckets on the same
+	 * client IP under this harness (`wordpress-phpunit/includes/functions.php` hard-codes
+	 * `$_SERVER['REMOTE_ADDR']` to `127.0.0.1` for the whole run, and nothing resets it per test), so
+	 * without this every integration test class shares one rate-limiter bucket by construction. This
+	 * used to be an opt-in per test class (`RestApiTest`, `RescheduleRouteTest`); hoisted here for the
+	 * same reason `reservant_settings` was, above.
+	 */
+	private static function clearRateLimiter(): void {
+		global $wpdb;
+		$wpdb->query( "DELETE FROM {$wpdb->options} WHERE option_name LIKE '\\_transient%reservant\\_rl\\_%'" ); // phpcs:ignore WordPress.DB.PreparedSQL
+		wp_cache_flush();
 	}
 
 	/**

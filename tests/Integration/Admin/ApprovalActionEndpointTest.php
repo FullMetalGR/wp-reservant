@@ -352,4 +352,151 @@ final class ApprovalActionEndpointTest extends ReservantTestCase {
 		// is a genuinely different scenario from a stale replay, where nothing changes at all.
 		self::assertSame( 'confirmed', ( new BookingRepository( $wpdb ) )->findByUuid( $booking['uuid'] )['status'] );
 	}
+
+	/**
+	 * A lock the approval could not take is a RETRY, not a booking somebody else already handled.
+	 *
+	 * The distinction is the whole point of `lock_unavailable` existing separately from
+	 * `stale_state`. `stale_state` means "a rival moved this booking between the plan and the
+	 * transaction" - genuinely benign here, which is why it is in `BENIGN_REFUSAL_REASONS` and
+	 * renders "may already have been handled". A busy lock means the opposite: nothing happened, the
+	 * booking is exactly where it was, and the staff member's click is still worth making. Rendering
+	 * that as benign would tell them the work was done when it was not, and would suppress precisely
+	 * the retry the `renderFailure()` docblock says must not be suppressed.
+	 *
+	 * The sabotage is the codebase's usual one (see
+	 * `RescheduleBookingTest::test_a_lock_that_cannot_be_taken_refuses_the_move_rather_than_writing_without_it`):
+	 * a `query` filter rewriting `LockManager`'s `SELECT ... FOR UPDATE` to a table that does not
+	 * exist, which is the `false`-with-`last_error` shape a 1205 lock-wait timeout produces.
+	 */
+	public function testALockFailureRendersARetryablePageRatherThanAlreadyHandled(): void {
+		global $wpdb;
+		// Same reason as the test above: a real wp_mail() has no transport here and would fire its
+		// own reservant/error, breaking the count below.
+		add_filter( 'pre_wp_mail', '__return_true' );
+		$booking   = $this->holdAwaitingApproval();
+		$updatedAt = (string) ( new BookingRepository( $wpdb ) )->findByUuid( $booking['uuid'] )['updated_at'];
+		$exp       = $this->farFutureExp();
+		$sig       = SignedAction::sign( wp_salt( 'auth' ), $booking['uuid'], 'approve', $exp, $updatedAt );
+
+		$this->setRequest( 'POST', $booking['uuid'], 'approve', $exp, $sig );
+
+		$sabotage = static function ( $query ) {
+			return 1 === preg_match( '/^\s*SELECT\s+resource_id\s+FROM\s+\S*reservant_resource_days\b.*FOR UPDATE/is', (string) $query )
+				? 'SELECT resource_id FROM reservant_no_such_table WHERE 1 = 1'
+				: $query;
+		};
+		$errors   = array();
+		$listener = static function ( \Throwable $e ) use ( &$errors ): void {
+			$errors[] = $e;
+		};
+		add_action( 'reservant/error', $listener );
+
+		// try/finally, matching this file's own idiom at testTamperedSignatureDies403()
+		// (`ob_start()` BEFORE the try, `ob_get_clean()` in the finally): a `\WPDieException` or an
+		// `Error` escaping `handle()` would otherwise leak a query-rewriting filter and an open output
+		// buffer into every test that runs after this one. Putting `ob_get_clean()` inside the try, as
+		// this test used to, does not protect against that - the very exception the comment warns about
+		// would skip straight past it, leaving the buffer open.
+		$suppressed = $wpdb->suppress_errors( true );
+		add_filter( 'query', $sabotage );
+		ob_start();
+		try {
+			( new ApprovalActionEndpoint() )->handle();
+		} finally {
+			$output = (string) ob_get_clean();
+			remove_filter( 'query', $sabotage );
+			$wpdb->suppress_errors( $suppressed );
+			remove_action( 'reservant/error', $listener );
+			remove_filter( 'pre_wp_mail', '__return_true' );
+		}
+
+		self::assertStringNotContainsString(
+			'no longer valid',
+			$output,
+			'a busy lock is not a booking someone else already handled - never render it as benign'
+		);
+		self::assertStringContainsString( 'Something went wrong', $output );
+		self::assertStringContainsString( 'try again', $output, 'the page must invite the staff member to retry' );
+		self::assertStringContainsString( 'was not changed', $output );
+		self::assertStringNotContainsString( $sig, $output, 'the signature must never be echoed back on a failure page' );
+
+		self::assertCount( 1, $errors, 'a lock failure is an infrastructure failure and must be logged' );
+		self::assertSame( 'lock_unavailable', $errors[0]->getMessage() );
+
+		// The committed state, not merely the page: nothing was decided, so the link still works.
+		self::assertSame(
+			'awaiting_approval',
+			( new BookingRepository( $wpdb ) )->findByUuid( $booking['uuid'] )['status'],
+			'a refused approval must leave the booking exactly where it was'
+		);
+	}
+
+	/**
+	 * The SECOND half of the lock order must answer the same way as the first.
+	 *
+	 * `BookingRepository::findByUuidForUpdate()` is the booking-row lock every decision use case takes
+	 * straight after `LockManager::acquire()` (`ApproveBooking:119` then `:124`). It reads through
+	 * `get_row()`, which answers `null` on a DB failure and `null` for a row that is genuinely gone -
+	 * and the caller maps `null` to `stale_state`, which is benign here. So a 1205 on that one
+	 * statement rendered "This link is no longer valid. The booking may already have been handled."
+	 * for a completely untouched booking: the exact false sentence the test above exists to prevent,
+	 * reached through a different statement.
+	 *
+	 * It fails closed, so this was a wrong-reason bug rather than a lost-mutex one - which is
+	 * precisely why it needed the same treatment. Two statements that are both part of one lock
+	 * sequence must not disagree about what a failure means.
+	 */
+	public function testALockFailureOnTheBookingRowAlsoRendersARetryablePage(): void {
+		global $wpdb;
+		add_filter( 'pre_wp_mail', '__return_true' );
+		$booking   = $this->holdAwaitingApproval();
+		$updatedAt = (string) ( new BookingRepository( $wpdb ) )->findByUuid( $booking['uuid'] )['updated_at'];
+		$exp       = $this->farFutureExp();
+		$sig       = SignedAction::sign( wp_salt( 'auth' ), $booking['uuid'], 'approve', $exp, $updatedAt );
+
+		$this->setRequest( 'POST', $booking['uuid'], 'approve', $exp, $sig );
+
+		// The booking-row lock only - the resource-day mutexes above it are left working, so this
+		// isolates the second statement of the lock sequence.
+		$sabotage = static function ( $query ) {
+			return 1 === preg_match( '/^\s*SELECT\s+\*\s+FROM\s+\S*reservant_bookings\s+WHERE\s+uuid\s*=.*FOR UPDATE/is', (string) $query )
+				? 'SELECT * FROM reservant_no_such_table WHERE 1 = 1'
+				: $query;
+		};
+		$errors   = array();
+		$listener = static function ( \Throwable $e ) use ( &$errors ): void {
+			$errors[] = $e;
+		};
+		add_action( 'reservant/error', $listener );
+
+		// Same idiom as the sabotage test above (`ob_start()` before the try, `ob_get_clean()` in the
+		// finally) - not the "both inside the try" form, which a `\WPDieException` or an `Error` would
+		// skip past, leaking the buffer.
+		$suppressed = $wpdb->suppress_errors( true );
+		add_filter( 'query', $sabotage );
+		ob_start();
+		try {
+			( new ApprovalActionEndpoint() )->handle();
+		} finally {
+			$output = (string) ob_get_clean();
+			remove_filter( 'query', $sabotage );
+			$wpdb->suppress_errors( $suppressed );
+			remove_action( 'reservant/error', $listener );
+			remove_filter( 'pre_wp_mail', '__return_true' );
+		}
+
+		self::assertStringNotContainsString( 'no longer valid', $output, 'a busy booking-row lock is not a settled decision either' );
+		self::assertStringContainsString( 'Something went wrong', $output );
+		self::assertStringContainsString( 'try again', $output );
+
+		self::assertCount( 1, $errors );
+		self::assertSame( 'lock_unavailable', $errors[0]->getMessage() );
+
+		self::assertSame(
+			'awaiting_approval',
+			( new BookingRepository( $wpdb ) )->findByUuid( $booking['uuid'] )['status'],
+			'a refused approval must leave the booking exactly where it was'
+		);
+	}
 }

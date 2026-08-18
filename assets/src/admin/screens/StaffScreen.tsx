@@ -1,7 +1,6 @@
 import { useState } from '@wordpress/element';
 import { __, sprintf } from '@wordpress/i18n';
 import { Button, CheckboxControl, ComboboxControl, Notice, SelectControl, Spinner, TextControl } from '@wordpress/components';
-import { errorMessage } from '../api/client';
 import {
 	useAddException,
 	useExceptions,
@@ -16,6 +15,7 @@ import {
 import type { AvailabilityExceptionListItem, Resource, Service } from '../api/types';
 import { RowSelectButton } from '../components/RowSelectButton';
 import { useToasts } from '../components/Toasts';
+import { errorMessage } from '../../shared';
 
 /** ISO-8601: 1 = Monday .. 7 = Sunday (`AvailabilityRule`'s own convention). */
 const WEEKDAYS: { value: number; label: string }[] = [
@@ -287,6 +287,10 @@ function StaffTable( { resources, selectedId, onSelect }: StaffTableProps ) {
 		<table className="reservant-staff-table">
 			<thead>
 				<tr>
+					{ /* The id is what the block's appearance panel and the shortcode's
+					     staff="" attribute ask for - this table is the one place an owner can
+					     read it (Task 17). */ }
+					<th>{ __( 'ID', 'reservant' ) }</th>
 					<th>{ __( 'Name', 'reservant' ) }</th>
 					<th>{ __( 'Email', 'reservant' ) }</th>
 					<th>{ __( 'Status', 'reservant' ) }</th>
@@ -301,6 +305,7 @@ function StaffTable( { resources, selectedId, onSelect }: StaffTableProps ) {
 						}
 						onClick={ () => onSelect( resource ) }
 					>
+						<td>{ resource.id }</td>
 						<td>
 							<RowSelectButton
 								label={ resource.name }

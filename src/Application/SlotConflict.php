@@ -25,6 +25,19 @@ final class SlotConflict extends \RuntimeException {
 	 * - `bad_seat`      the seat ids do not name real seats of the service's map, or the
 	 *                   grid/capacity-only mode was mismatched
 	 *
+	 * `RescheduleBooking` adds one of its own and otherwise refuses with the codes above - it holds a
+	 * moved booking to the same grid, notice period, horizon and working hours a fresh hold is held to,
+	 * through `HoldBooking`'s own assertions, so `bad_time`, `lead_time`, `horizon` and `outside_hours`
+	 * all mean there exactly what they mean here:
+	 *
+	 * - `not_reschedulable` the booking holds no slot to move (terminal status, or a hold that has
+	 *                       lapsed), the move does not match its shape (appointment vs event), or it
+	 *                       claims named grid seats, which a move cannot re-pick
+	 *
+	 * Its closed-window refusal is NOT a `SlotConflict`: it raises
+	 * `\RuntimeException('window_closed')`, the signal `CancelBooking` already uses for the same class
+	 * of refusal, so the two guest-facing policy refusals share one convention and one HTTP status.
+	 *
 	 * @param string $reason one of the codes above
 	 * @param int    $segmentIndex chain position of the failing segment, -1 when not per-segment
 	 */

@@ -1,11 +1,12 @@
 import { useState } from '@wordpress/element';
 import { __ } from '@wordpress/i18n';
 import { Button, Notice, Spinner, TextControl, TextareaControl } from '@wordpress/components';
-import { ApiError, errorMessage, isReferencedConflict } from '../api/client';
+import { isReferencedConflict } from '../api/client';
 import { useSaveSeatMap, useSeatMaps } from '../api/queries';
 import type { Seat, SeatMap } from '../api/types';
 import { RowSelectButton } from '../components/RowSelectButton';
 import { useToasts } from '../components/Toasts';
+import { ApiError, errorMessage } from '../../shared';
 
 const EXAMPLE_SPEC = 'rows A-J, 12 per row, aisle after 6';
 
