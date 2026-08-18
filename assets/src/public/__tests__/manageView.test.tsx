@@ -29,9 +29,15 @@
  *   network answer and must move nothing; swapping to the cancel confirmation is the visitor's
  *   own act and lands focus on the view container. The reschedule dialog is a real dialog -
  *   named, focused on open, Escape to close, focus restored to the trigger, focus contained.
- * - A resolution that lands after the visitor left the dialog applies to a journey that no
- *   longer exists: it must render nothing, and it must not leave the latch behind for the next
- *   journey (the Task 14 hung-recovery lesson).
+ * - A resolution that lands after the visitor abandoned its journey - left the dialog, kept
+ *   the booking - applies to a journey that no longer exists: it must render nothing, announce
+ *   nothing and move no focus, and it must not leave the latch behind for the next journey
+ *   (the Task 14 hung-recovery lesson). Only the hook-level invalidation may act on a stale
+ *   success: the refreshed booking is the server's truth however the visitor got there. On the
+ *   cancel path `keepBooking` is the ONLY latch release (`startCancel` resets nothing), so a
+ *   withdrawn-then-retried cancel must reach the wire a second time.
+ * - A reschedule slot is filed under its SITE calendar day (`startsOnDay`), pinned with a start
+ *   that straddles the site-day boundary so a browser-day filing cannot pass by accident.
  */
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import '@testing-library/jest-dom';
@@ -232,6 +238,24 @@ const NEW_SLOT_LABEL = new Intl.DateTimeFormat( undefined, {
 	hour: 'numeric',
 	minute: '2-digit',
 } ).format( new Date( 2026, 5, 3, 15, 0 ) );
+
+/**
+ * A start chosen to STRADDLE the site-day boundary: 12:00 UTC on June 3rd is 02:00 on June 4th
+ * at the site (UTC+14), while the runner's own Europe/Athens clock (UTC+3 in June) - and a bare
+ * `new Date()` parse of the wire string - keep it on June 3rd. That gap is the whole point of
+ * the fixture: a start whose site day and browser day agree would file identically under both
+ * clocks and make the site-day pin below vacuous. Only an instant in the 10:00-23:59 UTC band
+ * (past site midnight, before runner midnight) forces `startsOnDay` to consult the site zone.
+ */
+const STRADDLE_AVAILABILITY = {
+	granularity_min: 5,
+	starts: [ { utc: '2026-06-03 12:00:00', local: '2026-06-04T02:00:00+14:00' } ],
+};
+const DAY4_LABEL = STRIP_DAY.format( new Date( 2026, 5, 4 ) );
+const STRADDLE_SLOT_LABEL = new Intl.DateTimeFormat( undefined, {
+	hour: 'numeric',
+	minute: '2-digit',
+} ).format( new Date( 2026, 5, 4, 2, 0 ) );
 
 const EXACT_TEXT = { normalizer: ( text: string ): string => text };
 
@@ -513,6 +537,114 @@ describe( 'ManageView', () => {
 		expect( callsTo( fetchMock, '/cancel', 'POST' ) ).toHaveLength( 1 );
 	} );
 
+	it( 'ignores a cancel refusal that lands after the visitor kept the booking', async () => {
+		// The visitor confirms a cancel, changes their mind while it is in flight, and clicks
+		// "Keep this booking" - which bumps the abandonment ticket. When the request then
+		// settles with a refusal, that verdict belongs to a journey the visitor already
+		// withdrew: painting "too late to cancel" for a cancel they no longer want would read
+		// as the booking being stuck.
+		let resolveCancel: ( response: Response ) => void = () => {
+			throw new Error( 'cancel resolver was never captured' );
+		};
+		installFetch( {
+			booking: () => jsonResponse( chainBooking() ),
+			cancel: () =>
+				new Promise< Response >( ( resolve ) => {
+					resolveCancel = resolve;
+				} ),
+		} );
+		renderManage();
+
+		fireEvent.click( await screen.findByRole( 'button', { name: 'Cancel booking' } ) );
+		fireEvent.click( screen.getByRole( 'button', { name: 'Yes, cancel it' } ) );
+		// The mutationFn runs a microtask after mutate() - flush so the resolver is captured.
+		await act( async () => {} );
+		fireEvent.click( screen.getByRole( 'button', { name: 'Keep this booking' } ) );
+
+		await act( async () => {
+			resolveCancel( refusalResponse( 'window_closed', 403, WINDOW_SENTENCE ) );
+		} );
+
+		// The stale refusal renders nothing, and the view stays fully usable.
+		expect( screen.queryByText( WINDOW_SENTENCE ) ).not.toBeInTheDocument();
+		expect( screen.getByRole( 'button', { name: 'Cancel booking' } ) ).toBeInTheDocument();
+		expect( screen.getByText( FIRST_TIME, EXACT_TEXT ) ).toBeInTheDocument();
+	} );
+
+	it( 'ignores a cancel success that lands after the visitor kept the booking', async () => {
+		// The withdrawn cancel COMMITTED server-side, and its stale success settles while the
+		// visitor is already inside a NEW confirmation with focus parked on its confirm
+		// button. Only the hook-level invalidation may act on the stale verdict (the booking
+		// refetch is what tells the visitor the truth); the component half must not close a
+		// confirmation the visitor just opened, and must not steal their focus. The refetch is
+		// held pending here on purpose: the window between the stale settling and the refresh
+		// is exactly where an unguarded success path would act ahead of the server.
+		let resolveCancel: ( response: Response ) => void = () => {
+			throw new Error( 'cancel resolver was never captured' );
+		};
+		let bookingReads = 0;
+		installFetch( {
+			booking: () => {
+				bookingReads += 1;
+				return 1 === bookingReads
+					? jsonResponse( chainBooking() )
+					: new Promise< Response >( () => {} );
+			},
+			cancel: () =>
+				new Promise< Response >( ( resolve ) => {
+					resolveCancel = resolve;
+				} ),
+		} );
+		renderManage();
+
+		fireEvent.click( await screen.findByRole( 'button', { name: 'Cancel booking' } ) );
+		fireEvent.click( screen.getByRole( 'button', { name: 'Yes, cancel it' } ) );
+		// The mutationFn runs a microtask after mutate() - flush so the resolver is captured.
+		await act( async () => {} );
+		fireEvent.click( screen.getByRole( 'button', { name: 'Keep this booking' } ) );
+
+		// A fresh journey: the visitor re-opens the confirmation and focuses its button.
+		fireEvent.click( screen.getByRole( 'button', { name: 'Cancel booking' } ) );
+		const confirm = screen.getByRole( 'button', { name: 'Yes, cancel it' } );
+		act( () => {
+			confirm.focus();
+		} );
+
+		await act( async () => {
+			resolveCancel( jsonResponse( chainBooking( { status: 'cancelled' } ) ) );
+		} );
+
+		// The new confirmation still stands, focus exactly where the visitor put it.
+		expect( screen.getByRole( 'button', { name: 'Yes, cancel it' } ) ).toBeInTheDocument();
+		expect( confirm ).toHaveFocus();
+	} );
+
+	it( 'frees the cancel latch when the visitor keeps the booking mid-flight', async () => {
+		// `startCancel` deliberately resets nothing on the way back in, so `keepBooking`'s
+		// latch release is the ONLY thing between a hung cancel and a permanently dead Cancel
+		// button - unlike the dialog path, where `openDialog` re-arms on the sole route back.
+		// Withdraw a hanging cancel, then cancel again: the second confirmation must reach the
+		// wire instead of dying on the first journey's latch.
+		const fetchMock = installFetch( {
+			booking: () => jsonResponse( chainBooking() ),
+			cancel: () => new Promise< Response >( () => {} ),
+		} );
+		renderManage();
+
+		fireEvent.click( await screen.findByRole( 'button', { name: 'Cancel booking' } ) );
+		fireEvent.click( screen.getByRole( 'button', { name: 'Yes, cancel it' } ) );
+		// The mutationFn runs a microtask after mutate() - flush before counting the wire.
+		await act( async () => {} );
+		expect( callsTo( fetchMock, '/cancel', 'POST' ) ).toHaveLength( 1 );
+
+		fireEvent.click( screen.getByRole( 'button', { name: 'Keep this booking' } ) );
+		fireEvent.click( screen.getByRole( 'button', { name: 'Cancel booking' } ) );
+		fireEvent.click( screen.getByRole( 'button', { name: 'Yes, cancel it' } ) );
+		await act( async () => {} );
+
+		expect( callsTo( fetchMock, '/cancel', 'POST' ) ).toHaveLength( 2 );
+	} );
+
 	it( 'reschedules to the new time the server confirmed', async () => {
 		let bookingNow = chainBooking();
 		const fetchMock = installFetch( {
@@ -612,6 +744,34 @@ describe( 'ManageView', () => {
 		] );
 	} );
 
+	it( 'files an offered slot under its SITE day, not the browser day', async () => {
+		// `startsOnDay` is the whole reason a slot appears under the right date, and the salon
+		// day is the SITE zone's, never the visitor's browser's. The straddle fixture (see its
+		// docblock) is what gives this test teeth: 12:00 UTC on June 3rd is already 02:00 on
+		// June 4th at the site, while a browser-day filing - on this Europe/Athens runner or
+		// via a bare `new Date()` parse - would leave it on June 3rd.
+		installFetch( {
+			booking: () => jsonResponse( chainBooking() ),
+			availability: () => STRADDLE_AVAILABILITY,
+		} );
+		renderManage();
+
+		fireEvent.click( await screen.findByRole( 'button', { name: 'Pick a new time' } ) );
+
+		// On the site's June 4th the 02:00 slot is offered...
+		fireEvent.click( await screen.findByText( DAY4_LABEL, EXACT_TEXT ) );
+		expect( await screen.findByText( STRADDLE_SLOT_LABEL, EXACT_TEXT ) ).toBeInTheDocument();
+
+		// ...and on June 3rd - the slot's UTC and runner-local calendar day - it is not.
+		fireEvent.click( screen.getByText( DAY3_LABEL, EXACT_TEXT ) );
+		expect(
+			screen.queryByText( STRADDLE_SLOT_LABEL, EXACT_TEXT )
+		).not.toBeInTheDocument();
+		expect(
+			screen.getByText( 'No times are available on this day. Please pick another date.' )
+		).toBeInTheDocument();
+	} );
+
 	it( 'moves an event booking to another occurrence, decided from its own items', async () => {
 		let bookingNow = eventBooking();
 		const fetchMock = installFetch( {
@@ -695,6 +855,13 @@ describe( 'ManageView', () => {
 		renderManage();
 
 		expect( await screen.findByText( 'Haircut' ) ).toBeInTheDocument();
+		// Drain every scheduler the answer could have parked a focus() on before asserting -
+		// an under-flushed probe here would false-negative a LATE-landing steal (the Task 14
+		// auto-skip lesson).
+		await act( async () => {} );
+		act( () => {
+			jest.runOnlyPendingTimers();
+		} );
 		await act( async () => {} );
 		expect( document.body ).toHaveFocus();
 	} );
@@ -717,8 +884,12 @@ describe( 'ManageView', () => {
 
 	it( 'ignores a reschedule verdict that lands after the visitor left the dialog', async () => {
 		// The mutation is a fetch with no timeout, and Escape stays reachable while it hangs -
-		// so a resolution can land on a journey that no longer exists. It must render nothing,
-		// and it must not clobber the latch the NEXT journey now owns (the Task 14 lesson).
+		// so a resolution can land on a journey that no longer exists. Where that must show is
+		// chosen with care: `onSuccess` closes the dialog anyway, so "the dialog stays closed"
+		// would hold with or without the ticket guard - what the guard ALONE prevents is the
+		// stale verdict SPEAKING. The visitor here has already re-opened the dialog for a
+		// fresh journey when the abandoned flight's refusal settles; unguarded, that refusal
+		// would surface inside a journey that never made a request.
 		let resolveMove: ( response: Response ) => void = () => {
 			throw new Error( 'reschedule resolver was never captured' );
 		};
@@ -736,23 +907,65 @@ describe( 'ManageView', () => {
 		fireEvent.keyDown( screen.getByRole( 'dialog' ), { key: 'Escape' } );
 		expect( screen.queryByRole( 'dialog' ) ).not.toBeInTheDocument();
 
-		// The abandoned flight's refusal resolves with nobody in the dialog - and with no second
-		// mutate() yet, so its callbacks are still attached and only the ticket guard stands
-		// between this verdict and the screen. It must render nothing: no sentence, no dialog.
+		// A fresh journey: the dialog is open again - no pick made yet - when the abandoned
+		// flight's refusal finally lands. Its callbacks are still attached (no second
+		// mutate() yet), so only the ticket guard stands between this verdict and the screen.
+		fireEvent.click( screen.getByRole( 'button', { name: 'Pick a new time' } ) );
+		await screen.findByRole( 'dialog', { name: 'Pick a new time' } );
+
 		await act( async () => {
 			resolveMove( conflictResponse() );
 		} );
+		// The stale refusal renders nothing - not in the new dialog, not anywhere.
 		expect( screen.queryByText( CONFLICT_SENTENCE ) ).not.toBeInTheDocument();
-		expect( screen.queryByRole( 'dialog' ) ).not.toBeInTheDocument();
 
 		// And the stale path did not reclaim the latch closing the dialog already freed: the
-		// next journey fires its own move.
-		fireEvent.click( screen.getByRole( 'button', { name: 'Pick a new time' } ) );
+		// new journey fires its own move.
 		fireEvent.click( await screen.findByText( DAY3_LABEL, EXACT_TEXT ) );
 		fireEvent.click( await screen.findByText( NEW_SLOT_LABEL, EXACT_TEXT ) );
 		await act( async () => {} );
 		expect( callsTo( fetchMock, '/reschedule', 'POST' ) ).toHaveLength( 2 );
 		expect( screen.queryByText( CONFLICT_SENTENCE ) ).not.toBeInTheDocument();
+	} );
+
+	it( 'ignores a reschedule success that lands after the visitor left the dialog', async () => {
+		// The abandoned move COMMITTED. The hook-level invalidation may refresh the booking -
+		// the moved time is the server's truth and must show - but the component half stays
+		// silent: no "has been moved" announcement for a journey the visitor walked out of,
+		// and no focus steal seconds after they moved on to something else.
+		let resolveMove: ( response: Response ) => void = () => {
+			throw new Error( 'reschedule resolver was never captured' );
+		};
+		let bookingNow = chainBooking();
+		installFetch( {
+			booking: () => jsonResponse( bookingNow ),
+			availability: () => CHAIN_AVAILABILITY,
+			reschedule: () =>
+				new Promise< Response >( ( resolve ) => {
+					resolveMove = resolve;
+				} ),
+		} );
+		renderManage();
+
+		await pickNewSlot();
+		fireEvent.keyDown( screen.getByRole( 'dialog' ), { key: 'Escape' } );
+
+		// The visitor has moved on: focus sits on the cancel affordance, not the trigger.
+		const cancelButton = screen.getByRole( 'button', { name: 'Cancel booking' } );
+		act( () => {
+			cancelButton.focus();
+		} );
+
+		bookingNow = movedChainBooking();
+		await act( async () => {
+			resolveMove( jsonResponse( movedChainBooking() ) );
+		} );
+
+		// The refreshed query shows the server's new reality...
+		expect( await screen.findByText( MOVED_TIME, EXACT_TEXT ) ).toBeInTheDocument();
+		// ...but the abandoned journey announces nothing and steals nothing.
+		expect( screen.queryByText( 'Your booking has been moved.' ) ).not.toBeInTheDocument();
+		expect( cancelButton ).toHaveFocus();
 	} );
 
 	it( 'keeps the row whole while the catalog is still loading', async () => {

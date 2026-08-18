@@ -150,6 +150,11 @@ function Manage( { config }: { config: WidgetConfig } ): JSX.Element {
 	const keepBooking = (): void => {
 		// Abandons any in-flight cancel: bump the ticket so its late verdict renders nothing,
 		// free the latch (and its visible twin) so a hung request cannot deaden the next attempt.
+		// NOTE the asymmetry with `closeDialog`, which looks like this function's mirror image:
+		// THIS latch release is load-bearing - `startCancel` resets nothing on the way back in,
+		// so removing it deadens the Cancel button forever after one hung request - while
+		// closeDialog's is defence in depth only (`openDialog`, the sole route back into the
+		// dialog, re-arms). Do not "simplify" the pair by this resemblance.
 		cancelTicket.current += 1;
 		cancelBusy.current = false;
 		setCancelling( false );
@@ -204,6 +209,10 @@ function Manage( { config }: { config: WidgetConfig } ): JSX.Element {
 	};
 
 	const closeDialog = (): void => {
+		// The latch reset here is defence in depth, NOT load-bearing like `keepBooking`'s
+		// (whose comment owns the asymmetry): `openDialog` is the only route back into the
+		// dialog and resets `moveBusy`/`moving` itself, so this reset cannot change any
+		// reachable behaviour - it just keeps the invariant local.
 		dialogTicket.current += 1;
 		moveBusy.current = false;
 		setMoving( false );
