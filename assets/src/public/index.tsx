@@ -23,8 +23,8 @@
  *   <div class="reservant-widget" data-mode="manage" data-uuid="..."  data-token="...">
  */
 import { createRoot } from '@wordpress/element';
-import { __ } from '@wordpress/i18n';
 import { BookingFlow } from './BookingFlow';
+import { ManageView } from './ManageView';
 import './style.css';
 
 type WidgetMode = 'book' | 'manage';
@@ -80,22 +80,21 @@ function readConfig( el: HTMLElement ): WidgetConfig {
 }
 
 /**
- * The widget body. Book mode mounts the real journey (`BookingFlow`, plan Task 14); manage mode
- * still renders the scaffold state the manage view (plan Task 15) will replace.
+ * The widget body: book mode mounts the booking journey (`BookingFlow`, plan Task 14), manage
+ * mode the magic-link manage journey (`ManageView`, plan Task 15).
  *
- * The manage live region sits on the loading message itself, NOT on `.reservant-widget__panel`:
- * that class is the widget's generic visual panel, and a polite live region on it would make
- * screen readers re-announce the entire panel on every keystroke once a journey renders a form
- * inside it - which the book branch now does. The role dies with the loading state, so the manage
- * view cannot inherit it.
+ * The widget's live-region convention, which both journeys and every component follow: a live
+ * region never sits on `.reservant-widget__panel` or any other container that will hold a form -
+ * screen readers would re-announce the whole panel on every keystroke. `role="status"` is for a
+ * polite answer to something the visitor just did, `role="alert"` only for a genuine failure
+ * with nothing better to show, and a region must exist BEFORE its message lands - a region born
+ * with text announces nothing.
  */
 function Widget( { config }: { config: WidgetConfig } ): JSX.Element {
 	return (
 		<div className="reservant-widget__panel">
 			{ 'manage' === config.mode ? (
-				<span role="status" aria-live="polite">
-					{ __( 'Loading your booking...', 'reservant' ) }
-				</span>
+				<ManageView config={ config } />
 			) : (
 				<BookingFlow config={ config } />
 			) }

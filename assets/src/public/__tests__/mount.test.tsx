@@ -149,5 +149,7 @@ it( 'mounts every widget node on the page', () => {
 	expect( mounted ).toHaveLength( 2 );
 	// Book mode mounts the real journey (Task 14): its first frame is the catalog loading state.
 	expect( mounted[ 0 ]?.textContent ).toBe( 'Loading services...' );
-	expect( mounted[ 1 ]?.textContent ).toBe( 'Loading your booking...' );
+	// Manage mode mounts the manage journey (Task 15): with no uuid/token on the node it renders
+	// its neutral panel immediately, without a doomed request.
+	expect( mounted[ 1 ]?.textContent ).toContain( 'This link is no longer valid.' );
 } );
