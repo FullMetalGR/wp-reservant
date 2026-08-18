@@ -106,15 +106,11 @@ final class HoldsController {
 			return Errors::notFound();
 		}
 		if ( ! BookingStatus::from( (string) $booking['status'] )->isHeld() ) {
-			return new \WP_Error(
-				'reservant_conflict',
-				'not_held',
-				array(
-					'status'  => 409,
-					'segment' => -1,
-					'detail'  => __( 'This booking is no longer a reservation - cancel it instead.', 'reservant' ),
-				)
-			);
+			// Through `Errors` rather than hand-built, so this fast path and the use case's own
+			// in-transaction `not_held` refusal answer with one envelope. They did not: this route
+			// sent `reservant_conflict` plus its own sentence while the locked re-check sent
+			// `reservant_not_held` plus the generic one, for the same reason on the same request.
+			return Errors::failure( new \RuntimeException( 'not_held' ) );
 		}
 
 		try {

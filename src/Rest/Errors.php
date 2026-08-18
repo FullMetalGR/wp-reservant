@@ -160,7 +160,20 @@ final class Errors {
 		);
 	}
 
-	/** A human sentence per machine reason - the widget may show it verbatim (AGENTS.md section 7). */
+	/**
+	 * A human sentence per machine reason - the widget may show it verbatim (AGENTS.md section 7).
+	 *
+	 * **Every entry in `KNOWN_REASONS` must have an arm here**, and `ErrorsExhaustivenessTest`
+	 * enforces it rather than leaving the two lists to hand-synchronisation. They had already drifted:
+	 * `stale_state`, `not_held` and `currency_mismatch` reached the wire carrying the right machine
+	 * reason and the `default` sentence, so a caller rendering `data.detail` told the visitor "that
+	 * request could not be completed" about three situations with three different remedies.
+	 *
+	 * The `default` arm therefore covers no known reason and is unreachable through
+	 * `failure()`/`conflict()`, which both gate on `KNOWN_REASONS` first. It stays because `detail()`
+	 * takes a `string`, not a closed type - making the reason a type is the deeper fix, and until
+	 * then this arm is what stops a typo in a future call site from being a fatal error.
+	 */
 	private static function detail( string $reason ): string {
 		return match ( $reason ) {
 			'overlap'                 => __( 'That time was just taken. Please pick another.', 'reservant' ),
@@ -180,6 +193,9 @@ final class Errors {
 			'not_confirmable'         => __( 'This booking cannot be confirmed in its current state.', 'reservant' ),
 			'approval_required'       => __( 'This booking is waiting for our approval.', 'reservant' ),
 			'not_cancellable'         => __( 'This booking can no longer be cancelled.', 'reservant' ),
+			'not_held'                => __( 'This booking is no longer a reservation - cancel it instead.', 'reservant' ),
+			'stale_state'             => __( 'Someone else changed this booking a moment ago. Please try again.', 'reservant' ),
+			'currency_mismatch'       => __( 'Those services are priced in different currencies and cannot be booked together.', 'reservant' ),
 			'not_approvable'          => __( 'This booking can no longer be approved or rejected.', 'reservant' ),
 			'bad_outcome'             => __( 'That outcome is not recognised.', 'reservant' ),
 			'referenced'              => __( 'This item is still used by existing bookings. Deactivate it instead of deleting it.', 'reservant' ),
