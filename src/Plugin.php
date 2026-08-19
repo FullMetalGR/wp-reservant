@@ -131,6 +131,15 @@ final class Plugin {
 		// refund lands in wp-admin, and both must reach the observer.
 		if ( Application\Payment\Providers::wooCommerceActive() ) {
 			Integrations\WooCommerce\OrderObserver::register();
+			// The bridge's mouth and its brake, both front-of-house: CartBridge turns a held
+			// booking into cart lines (and a removed line back into a released booking), and
+			// CheckoutGuard re-validates the hold under lock at every door into payment - the
+			// cart checkouts and the pay-for-order link - so a cart or link that outlived its
+			// hold is refused BEFORE money moves (AGENTS.md section 6: the TTL is the
+			// authority). Outside the is_admin() split for the observer's reason: the Store API
+			// doors and the pay page are front-end requests.
+			Integrations\WooCommerce\CartBridge::register();
+			Integrations\WooCommerce\CheckoutGuard::register();
 		}
 
 		if ( is_admin() ) {

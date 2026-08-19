@@ -137,6 +137,12 @@ final class WooPaymentProvider implements PaymentProvider {
 	 * what makes the BOOKING's price win. `seats` is the quantity, so an event booking for three
 	 * reads as three on the invoice rather than one line the owner has to interpret.
 	 *
+	 * `price_minor` on a booking item is already the LINE total, for every shape: appointments and
+	 * grid seats carry seats=1, and `HoldBooking::planEvent()` stores `price * seats` on an
+	 * open-capacity event item. Multiplying by the quantity here again - as the first version of
+	 * this method did - billed an open event for three seats at NINE times the seat price, so the
+	 * quantity is display only and the amount is the item's own number, untouched.
+	 *
 	 * @param array<string, mixed> $item
 	 */
 	private function addLine( \WC_Order $order, array $item, string $currency ): void {
@@ -145,7 +151,7 @@ final class WooPaymentProvider implements PaymentProvider {
 		$product   = $productId > 0 ? wc_get_product( $productId ) : false;
 
 		$quantity = max( 1, (int) ( $item['seats'] ?? 1 ) );
-		$line     = Currency::toMajor( (int) ( $item['price_minor'] ?? 0 ), $currency ) * $quantity;
+		$line     = Currency::toMajor( (int) ( $item['price_minor'] ?? 0 ), $currency );
 
 		if ( $product instanceof \WC_Product ) {
 			$order->add_product(

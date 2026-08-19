@@ -3,7 +3,13 @@ declare( strict_types=1 );
 
 namespace Reservant\Tests\Integration\Integrations\WooCommerce;
 
+use Reservant\Application\Dto\Customer;
+use Reservant\Application\Dto\EventRequest;
+use Reservant\Application\Dto\HoldRequest;
+use Reservant\Application\HoldBooking;
 use Reservant\Domain\Enum\PaymentMode;
+use Reservant\Infrastructure\Db\BookingRepository;
+use Reservant\Infrastructure\Db\OccurrenceRepository;
 use Reservant\Infrastructure\Db\ServiceRepository;
 use Reservant\Integrations\WooCommerce\WooPaymentProvider;
 use Reservant\Tests\Integration\ReservantTestCase;
@@ -135,5 +141,52 @@ final class WooPaymentProviderTest extends ReservantTestCase {
 
 		self::assertNull( ( new WooPaymentProvider() )->syncService( (array) $services->find( $serviceId ) ) );
 		self::assertInstanceOf( \WC_Product::class, wc_get_product( $foreignId ), 'someone else\'s product must survive' );
+	}
+
+	/**
+	 * An open-capacity event booking bills seats x price ONCE. `price_minor` on the booking item is
+	 * already the line total (`HoldBooking::planEvent()` stores `price * seats`), and the first
+	 * version of `addLine()` multiplied it by the quantity again - an order for three seats at
+	 * 10.00 came out at 90.00. The chain total on the booking itself is the number the customer
+	 * agreed to, so the order must equal it exactly.
+	 */
+	public function test_an_open_event_order_bills_the_seats_once(): void {
+		global $wpdb;
+		$services  = new ServiceRepository( $wpdb );
+		$serviceId = $services->insert(
+			array(
+				'name'         => 'Seminar',
+				'type'         => 'event',
+				'price_minor'  => 1000,
+				'payment_mode' => PaymentMode::Online->value,
+			)
+		);
+		$occId     = ( new OccurrenceRepository( $wpdb ) )->insert(
+			array(
+				'service_id' => $serviceId,
+				'start_utc'  => $this->sql( 1, '18:00' ),
+				'end_utc'    => $this->sql( 1, '20:00' ),
+				'capacity'   => 10,
+			)
+		);
+
+		$held = HoldBooking::make( $wpdb )->execute(
+			new HoldRequest(
+				new Customer( 'Maria', 'maria@example.com' ),
+				null,
+				new EventRequest( $occId, 3 )
+			),
+			$this->utc( 0 )
+		);
+		self::assertSame( 3000, (int) $held['total_minor'] );
+
+		$booking = ( new BookingRepository( $wpdb ) )->findByUuid( (string) $held['uuid'] );
+		self::assertNotNull( $booking );
+		$orderId = ( new WooPaymentProvider() )->createOrder( $booking );
+		self::assertIsInt( $orderId );
+
+		$order = wc_get_order( $orderId );
+		self::assertInstanceOf( \WC_Order::class, $order );
+		self::assertSame( 30.0, (float) $order->get_total(), 'three seats at 10.00 is 30.00, not 90.00' );
 	}
 }

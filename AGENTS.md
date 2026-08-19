@@ -363,6 +363,10 @@ That namespace only loads when `class_exists( 'WooCommerce' )`. Everything else 
   - `reservant/hold/expired` `( BookingSnapshot $booking )` - the reaped hold.
   - `reservant/approval/nag` `( BookingSnapshot $booking, int $percent )` - fired at 25/50/75%
     of the approval window (an ACTION; the P6 mailer listens here).
+  - `reservant/booking/payment_due` `( BookingSnapshot $booking, string $url )` - fired by
+    `ApproveBooking` after an `online` booking lands on `awaiting_payment` and its order exists;
+    `$url` is the provider's pay-for-order link (the `approval/nag` two-argument shape - the URL
+    is the provider's answer, not a column, so it cannot ride on the snapshot).
   - `reservant/error` `( \Throwable $e )`, at some sites plus a string context (booking uuid or
     mail key) - the diagnostics channel for swallowed failures.
   - Policy filters, both `( bool $allowed, array $booking, \DateTimeImmutable $nowUtc )` - the
