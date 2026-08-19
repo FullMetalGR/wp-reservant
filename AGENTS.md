@@ -280,7 +280,7 @@ Migrations are versioned and run through `Infrastructure/Db/Migrations` on activ
 | `GET /admin/bookings` | search/list; `reservant_manage_bookings` |
 | `POST /admin/bookings` | the owner's manual booking - lands on `confirmed` directly, never a hold; `reservant_manage_bookings` |
 | `GET /admin/bookings/{uuid}` | detail plus the audit trail; `reservant_manage_bookings` |
-| `POST /admin/bookings/{uuid}/approve` , `/reject` | `reservant_approve_bookings` alone is enough - a staff member without `reservant_manage_bookings` is scoped to bookings with an item on their own resource. Approve lands the booking on `confirmed` unconditionally: the approve -> `awaiting_payment` -> payment-link step for a paid service is the WooCommerce bridge's job (section 6), and it is not built yet - see P7 in section 9 |
+| `POST /admin/bookings/{uuid}/approve` , `/reject` | `reservant_approve_bookings` alone is enough - a staff member without `reservant_manage_bookings` is scoped to bookings with an item on their own resource. Approve lands the booking on `confirmed` for a free/onsite service - and for an `online` one with no provider able to take money (the section 6 degrade). An `online` service with a live provider lands on `awaiting_payment` instead: the WC order is created after the transition commits, the customer is emailed the payment link, and the slot stays held for `payment_ttl_hours`, after which the ordinary hold sweeper reclaims it |
 | `POST /admin/bookings/{uuid}/cancel` , `/no_show` , `/complete` | manager overrides; `reservant_manage_bookings` |
 | `GET /admin/calendar` | the week/day grid; `reservant_manage_bookings` or `reservant_view_own_calendar` |
 

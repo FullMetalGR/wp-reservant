@@ -22,17 +22,16 @@ const TTL_ERROR = __( 'Must be a positive whole number.', 'reservant' );
 
 /**
  * `approval_ttl_hours` is live: `HoldBooking::holdExpiresAt()` falls back to it for a service that
- * stores no `approval_hold_hours` of its own. `payment_ttl_hours` is not - nothing reads it, because
- * the `awaiting_payment` state it would bound only exists once the WooCommerce bridge lands (AGENTS.md
- * section 6 / P7). The field stays (the value is stored and will be honoured then), but it says so
- * rather than pretending to control something today.
+ * stores no `approval_hold_hours` of its own. `payment_ttl_hours` is live too: `ApproveBooking`
+ * writes it into the payment hold when approving an online booking, and the sweeper reclaims the
+ * slot when the window lapses unpaid (AGENTS.md section 6).
  */
 const APPROVAL_TTL_HELP = __(
 	'Default window for approval holds. A service with its own approval window overrides this.',
 	'reservant'
 );
 const PAYMENT_TTL_HELP = __(
-	'Not in effect yet: payment links arrive with the WooCommerce bridge. Saved now and honoured then.',
+	'How long an approved online booking holds its slot while the payment link is unpaid.',
 	'reservant'
 );
 

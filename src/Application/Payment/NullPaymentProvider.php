@@ -9,10 +9,13 @@ namespace Reservant\Application\Payment;
  *
  * Every method answers rather than throws, and the answers are what make `online` degrade to
  * `onsite` (AGENTS.md section 6) instead of breaking: `isAvailable()` is false, so `ConfirmBooking`
- * stops refusing `online_payment_required` and the guest can book; `syncService()` returns null, so
- * a stale `wc_product_id` gets cleared rather than pointing at a product that no longer exists; and
- * `createOrder()` returns null, which is the signal `ApproveBooking` reads to keep landing approvals
- * on `confirmed` rather than stranding them in `awaiting_payment` with nothing to pay.
+ * stops refusing `online_payment_required` and the guest can book, and `ApproveBooking` keeps
+ * landing approvals on `confirmed` rather than stranding them in `awaiting_payment` with nothing to
+ * pay - both ask that one question BEFORE acting, so `createOrder()` is never reached on the
+ * degrade path; and `syncService()` returns null, so a stale `wc_product_id` gets cleared rather
+ * than pointing at a product that no longer exists. `createOrder()` answering null (the
+ * interface's "this provider cannot create orders at all") is therefore a backstop for a filtered
+ * provider that claims availability and then cannot deliver, not a signal any use case steers by.
  *
  * The owner is told, once, by `Admin\PaymentNotice` - silence here would look like the money simply
  * stopped arriving.

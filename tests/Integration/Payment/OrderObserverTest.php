@@ -203,11 +203,12 @@ final class OrderObserverTest extends ReservantTestCase {
 	}
 
 	/**
-	 * Force a booking into a status no use case can currently mint. `awaiting_payment` is produced
-	 * by the approve-then-pay half of the bridge, which is a later task; the observer must already
-	 * handle it, so the row is put there by hand - the same idiom `LifecycleTest` uses for lapsed
-	 * holds. The hold TTL is left as the hold minted it (days in the future for these fixtures),
-	 * which is a live payment-link window as far as the guards care.
+	 * Force a booking into a status by hand - the same idiom `LifecycleTest` uses for lapsed holds.
+	 * `awaiting_payment` is minted for real by `ApproveBooking` these days, but this suite is about
+	 * the OBSERVER, and rows placed by hand keep its claims independent of the approval flow's
+	 * fixtures (an approval-gated service, a human decision) that producing the status honestly
+	 * would drag in. The hold TTL is left as the hold minted it (days in the future for these
+	 * fixtures), which is a live payment-link window as far as the guards care.
 	 */
 	private function forceStatus( string $uuid, string $status ): void {
 		global $wpdb;

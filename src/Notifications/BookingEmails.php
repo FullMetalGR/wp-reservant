@@ -243,8 +243,7 @@ final class BookingEmails {
 	}
 
 	/**
-	 * One segment, in the SITE's timezone - the database is UTC (AGENTS.md section 1) and a guest
-	 * reading "14:00 UTC" would have to do arithmetic to find out when to turn up.
+	 * One segment, in the SITE's timezone (`SiteTime`, this rule's Notifications-side home).
 	 *
 	 * Two whole sentences rather than one built from pieces: AGENTS.md section 7 forbids
 	 * concatenating translated fragments, and a translator handed "%1$s with %2$s" separately from
@@ -253,18 +252,12 @@ final class BookingEmails {
 	 * The times are the CUSTOMER-facing span, never the buffer-widened block range - the same rule
 	 * `Calendar` follows, for the same reason.
 	 *
-	 * NOTE: `Admin\ApprovalActionEndpoint::summary()` builds the same site-local timestamp from the
-	 * same two options inline. Two copies of a formatting rule is how the money formatter came to
-	 * undercharge zero-decimal currencies by 100x; a third would want one home for it, which means a
-	 * namespace both a Notifications class and an Admin one may depend on, and there is no such
-	 * namespace today.
-	 *
 	 * @param array<string, mixed> $item a `findDetailByUuid()` item: joined to its service and staff names.
 	 */
 	private static function itemLine( array $item ): string {
 		$service  = trim( (string) ( $item['service_name'] ?? '' ) );
 		$resource = trim( (string) ( $item['resource_name'] ?? '' ) );
-		$when     = self::siteLocal( (string) ( $item['start_utc'] ?? '' ) );
+		$when     = SiteTime::local( (string) ( $item['start_utc'] ?? '' ) );
 
 		if ( '' === $resource ) {
 			return sprintf(
@@ -281,15 +274,6 @@ final class BookingEmails {
 			$resource,
 			$when
 		);
-	}
-
-	private static function siteLocal( string $sqlUtc ): string {
-		if ( '' === $sqlUtc ) {
-			return '';
-		}
-		$startUtc = new \DateTimeImmutable( $sqlUtc, new \DateTimeZone( 'UTC' ) );
-		$format   = trim( (string) get_option( 'date_format', 'F j, Y' ) . ' ' . (string) get_option( 'time_format', 'g:i a' ) );
-		return (string) wp_date( $format, $startUtc->getTimestamp(), wp_timezone() );
 	}
 
 	/** The site's name as a human wrote it - `get_bloginfo()` returns it HTML-encoded, and this is plain text. */
