@@ -122,6 +122,17 @@ final class Plugin {
 			20
 		);
 
+		// The bridge's ear: WooCommerce order transitions turned back into booking transitions
+		// (paid confirms, cancelled/failed/refunded releases). Gated on the one WooCommerce check
+		// the codebase has - `Providers` owns `class_exists( 'WooCommerce' )`, and this asks it
+		// rather than growing a second copy (AGENTS.md section 6: no WC reference outside
+		// `Integrations/WooCommerce/`, and the namespace only loads when WC is active). Outside the
+		// is_admin() split below on purpose: a gateway's webhook lands on the front end, an owner's
+		// refund lands in wp-admin, and both must reach the observer.
+		if ( Application\Payment\Providers::wooCommerceActive() ) {
+			Integrations\WooCommerce\OrderObserver::register();
+		}
+
 		if ( is_admin() ) {
 			( new Admin\AdminPage() )->register();
 			( new Admin\ApprovalActionEndpoint() )->register();

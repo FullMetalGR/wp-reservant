@@ -22,6 +22,22 @@ final class Providers {
 	private static ?PaymentProvider $resolved = null;
 
 	/**
+	 * Whether the WooCommerce integration is active - the question `Plugin::register()` asks before
+	 * wiring anything out of `Integrations\WooCommerce\` (currently `OrderObserver`).
+	 *
+	 * A method rather than letting callers repeat the check, because the check IS the thing this
+	 * class exists to contain: the class docblock above explains why `class_exists( 'WooCommerce' )`
+	 * may appear here and nowhere else, and a caller needing the same answer gets it by asking, not
+	 * by copying. Deliberately NOT the same question as `get()->isAvailable()`: a site can filter in
+	 * a non-WC provider while WooCommerce is active, and the order observer must keep listening to
+	 * WooCommerce's own hooks regardless of who is taking NEW money - orders created before the
+	 * switch still exist, still get refunded, and still carry booking uuids that must release.
+	 */
+	public static function wooCommerceActive(): bool {
+		return class_exists( 'WooCommerce' );
+	}
+
+	/**
 	 * The provider for this request.
 	 *
 	 * Filterable at `reservant/payment_provider` so a site can supply its own gateway without
@@ -37,7 +53,7 @@ final class Providers {
 			return self::$resolved;
 		}
 
-		$default = class_exists( 'WooCommerce' )
+		$default = self::wooCommerceActive()
 			? new \Reservant\Integrations\WooCommerce\WooPaymentProvider()
 			: new NullPaymentProvider();
 
