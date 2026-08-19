@@ -94,11 +94,13 @@ final class AdminSettingsTest extends ReservantTestCase {
 		self::assertSame( 200, $response->get_status() );
 		self::assertSame(
 			array(
-				'currency'           => 'EUR',
-				'checkout_ttl_min'   => 15,
-				'approval_ttl_hours' => 48,
-				'payment_ttl_hours'  => 24,
-				'purge_on_uninstall' => false,
+				'currency'            => 'EUR',
+				'checkout_ttl_min'    => 15,
+				'approval_ttl_hours'  => 48,
+				'payment_ttl_hours'   => 24,
+				'purge_on_uninstall'  => false,
+				'reminder_lead_hours' => 24,
+				'emails_off'          => array(),
 			),
 			$response->get_data()
 		);
@@ -160,11 +162,13 @@ final class AdminSettingsTest extends ReservantTestCase {
 		self::assertSame( 200, $response->get_status(), (string) wp_json_encode( $response->get_data() ) );
 		self::assertSame(
 			array(
-				'currency'           => 'USD',
-				'checkout_ttl_min'   => 15,
-				'approval_ttl_hours' => 48,
-				'payment_ttl_hours'  => 24,
-				'purge_on_uninstall' => false,
+				'currency'            => 'USD',
+				'checkout_ttl_min'    => 15,
+				'approval_ttl_hours'  => 48,
+				'payment_ttl_hours'   => 24,
+				'purge_on_uninstall'  => false,
+				'reminder_lead_hours' => 24,
+				'emails_off'          => array(),
 			),
 			$response->get_data()
 		);

@@ -20,14 +20,16 @@ use Reservant\Infrastructure\Db\ServiceRepository;
  */
 final class Jobs {
 
-	public const NAG     = 'reservant/job/approval_nag';
-	public const TIMEOUT = 'reservant/job/approval_timeout';
-	public const SWEEP   = 'reservant/job/expire_holds';
+	public const NAG      = 'reservant/job/approval_nag';
+	public const TIMEOUT  = 'reservant/job/approval_timeout';
+	public const SWEEP    = 'reservant/job/expire_holds';
+	public const REMINDER = 'reservant/job/booking_reminder';
 
 	public static function register(): void {
 		add_action( self::NAG, array( self::class, 'nag' ), 10, 2 );
 		add_action( self::TIMEOUT, array( self::class, 'timeout' ), 10, 1 );
 		add_action( self::SWEEP, array( self::class, 'sweep' ), 10, 0 );
+		add_action( self::REMINDER, array( self::class, 'reminder' ), 10, 1 );
 	}
 
 	/**
@@ -95,6 +97,27 @@ final class Jobs {
 	public static function sweep(): void {
 		global $wpdb;
 		ExpireHolds::make( $wpdb )->run();
+	}
+
+	/**
+	 * The "your appointment is tomorrow" timer, fired with the current snapshot -
+	 * `Notifications\Reminders` attaches the mailer. No state changes here at all, exactly like
+	 * `nag()`.
+	 *
+	 * **The re-read is the authority, not the timer.** `Scheduler::cancel()` is called when a
+	 * booking is cancelled or moved, but a cancel that lost the race with the queue runner, or a
+	 * job whose args no longer match, would otherwise send a guest a reminder about an appointment
+	 * that is not happening - a worse failure than no reminder at all. A booking that is not still
+	 * `confirmed` when this runs gets nothing. That is the same benign, expected race
+	 * `timeout()` and `nag()` document, and the reason this reads instead of trusting its payload.
+	 */
+	public static function reminder( string $uuid ): void {
+		global $wpdb;
+		$booking = ( new BookingRepository( $wpdb ) )->findByUuid( $uuid );
+		if ( null === $booking || BookingStatus::Confirmed->value !== $booking['status'] ) {
+			return;
+		}
+		do_action( 'reservant/booking/reminder', BookingSnapshot::fromArray( $booking ) );
 	}
 
 	/**

@@ -291,9 +291,20 @@ them because the booking is their own. `id` and `manage_token_hash` reach nobody
 | `GET\|PUT /admin/settings` | plugin settings; `reservant_manage_settings` |
 
 Auth: `X-WP-Nonce` for logged-in/admin; for guests a **signed manage token** - random secret in the
-email link, only its hash stored (`manage_token_hash`), compared with `hash_equals()`. Token
-expiry is NOT implemented yet: the hash lives as long as the booking row does. Expiring it a
-fixed period after the booking ends is P6 work, alongside the emailed link that carries it.
+email link, only its hash stored (`manage_token_hash`), compared with `hash_equals()`. The token
+expires 30 days after the LAST segment ends, filterable via `reservant/manage_token_days_after`
+(zero switches expiry off). It has no stored expiry of its own, so the lifetime is derived from the
+booking in `Routes::guard()` - the single verifier - and an expired link is refused in the same
+shape as a wrong one, adding no way to tell the two apart. What the expiry protects is the contact
+details on `GET /bookings/{uuid}`: the lifecycle routes are already self-limiting, since a finished
+booking cannot be cancelled or rescheduled, but a link that lives in a mailbox forever would
+otherwise disclose the customer's email and phone to whoever holds that mailbox years later.
+
+The plaintext secret exists only inside `HoldBooking::execute()`, so exactly two moments can put it
+in an email and both do: the `held` hook (grafted onto the snapshot BEFORE the action fires - it
+used to be grafted after, so no listener could ever see it) and `ConfirmBooking`, which echoes back
+the token the guest just presented after re-verifying it against that booking's own hash.
+`BookingSnapshot::toArray()` refuses to emit it in either case.
 
 Sanitize at the REST boundary, escape at output, `$wpdb->prepare()` always. Domain objects never
 see `$_POST`. Every route declares a real `permission_callback` - `__return_true` is only
@@ -353,12 +364,42 @@ That namespace only loads when `class_exists( 'WooCommerce' )`. Everything else 
     narrows which staff may serve a segment. Applied in `Application\SegmentEligibility`, the one
     module both the advisory read and the authoritative write draw their pool from, so a narrowing
     binds the hold and not only the offer. `$eligible` is active staff only.
+  - `reservant/manage_token_days_after` `( int $days )`, default 30 - how long a guest's magic
+    link outlives the last segment. Zero switches expiry off.
   - `reservant/holds/rate_limit` `( int $maxPerMinute )`, default 10.
   - `reservant/hold_ttl_minutes` `( int $minutes )` - the checkout hold TTL.
+  - `reservant/reminder_lead_hours` `( int $hours )` - how long before the appointment the
+    reminder goes out. The `reminder_lead_hours` setting is the default and this is the last word,
+    the same shape as `hold_ttl_minutes` over `checkout_ttl_min`. Zero means no reminder.
   - `reservant/granularity_min` `( int $minutes )`, default 5.
   - `reservant/allow_direct_confirm` `( bool $allowed, array $booking )` - lets an `online`
     booking confirm without payment (the bridge's escape hatch).
-  - Planned, NOT yet implemented: `reservant/email/{key}/args` (P6's mailer).
+  - `reservant/booking/reminder` `( BookingSnapshot $booking )` - fired by
+    `Infrastructure\Scheduler\Jobs::reminder()` once it has re-read the booking and confirmed it
+    still stands. The timer is scheduled optimistically and cancelled best-effort; THIS re-read is
+    what keeps a reminder off an appointment that is not happening.
+  - `reservant/email/{key}/args` `( array{to,subject,body,attachments} $args, array $context )` -
+    the last word on every message, per key. `attachments` is `filename => file CONTENTS`;
+    `Notifications\Mailer` materializes and unlinks the temp files itself. A filter that returns
+    only the original three keys leaves attachments UNCHANGED - absence means "unchanged", not
+    "none" - so a site rewriting a subject cannot silently strip a guest's `.ics`. The keys are
+    listed in `Notifications\EmailCatalog::KEYS`, and the owner's per-key off switch
+    (`emails_off`) is honoured in `Mailer::send()` before this filter runs, because there is
+    nothing to filter about a message that is not being sent.
+- **Notifications:** `Notifications\Mailer` is the one seam every message passes through - it
+  applies the per-key filter, honours the owner's `emails_off` switch, materializes and unlinks
+  attachment temp files, and never throws (a broken transport degrades to a logged
+  `reservant/error`). `Notifications\EmailCatalog` is the list of messages and their owner-facing
+  labels; the admin Settings screen renders one checkbox per entry from the bootstrap rather than
+  from a hard-coded list of its own. **Which holds get an acknowledgement is a rule, not an
+  oversight:** a `checkout` hold is a guest still inside the widget, so mailing there would mail
+  every abandoned checkout; an `approval` hold is a guest waiting on a human, and
+  `approval_request` goes to the APPROVER, so without `booking_received` they hear nothing until
+  someone decides; an admin-created booking has no hold at all and gets the confirmation instead.
+  The same rule runs on expiry - an abandoned checkout lapsing is not news, a timed-out approval
+  request is the guest's answer. Every listener runs AFTER its transition committed, so none of
+  them may throw, and the post-commit re-reads they need are guarded and degrade to "skip the
+  email" (see `ApprovalEmails::sendApproverEmail()` for the full pre-decision / post-commit split).
 - **Capabilities:** custom caps (`reservant_manage_bookings`, `reservant_approve_bookings`,
   `reservant_manage_settings`, `reservant_view_own_calendar`) mapped on activation, plus a
   `reservant_staff` role that can approve bookings assigned to them. Never check `manage_options`.
@@ -430,7 +471,11 @@ UI, not data.
 5. **P4** `[DONE]` Admin: services, staff, availability, calendar, manual booking.
 6. **P5** `[DONE]` Booking widget (shortcode + block): chain builder, staff picker, guest flow,
    magic-link manage page.
-7. **P6** Notifications: emails, `.ics`, reminders, hold-expiry sweeper.
+7. **P6** `[DONE]` Notifications: `Notifications\BookingEmails` (the customer set, on
+   `held`/`confirmed`/`rescheduled`/`cancelled`/`hold expired`/`reminder`),
+   `Notifications\Calendar` (the `.ics`), `Notifications\Reminders` (the timer),
+   `Notifications\EmailCatalog` (the switchable list), and the hold-expiry sweeper, which was
+   already built and is verified rather than rebuilt - see below.
 8. **P7** WooCommerce bridge.
 9. **P8** Licensing stub, packaging, docs.
 

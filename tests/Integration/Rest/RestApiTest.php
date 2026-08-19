@@ -348,6 +348,101 @@ final class RestApiTest extends ReservantTestCase {
 		self::assertSame( 404, rest_do_request( $missing )->get_status() );
 	}
 
+	/**
+	 * The guest's link outlives the appointment by a window, not forever.
+	 *
+	 * The credential has no stored expiry - only the hash is kept - so `Routes::guard()` derives its
+	 * lifetime from the booking's last segment. What that protects is the contact details on this
+	 * very route: the lifecycle routes are already self-limiting, so a link that never expired would
+	 * leak the customer's own email and phone to whoever holds that mailbox years later.
+	 */
+	public function test_a_manage_link_stops_working_a_month_after_the_appointment(): void {
+		$created = $this->hold( $this->sql( 1, '11:00' ) );
+
+		self::assertSame(
+			200,
+			$this->request( 'GET', "/reservant/v1/bookings/{$created['uuid']}", array( 'token' => $created['manage_token'] ) )->get_status(),
+			'a booking that has not happened yet must of course still be reachable'
+		);
+
+		$this->ageBookingBy( (string) $created['uuid'], 40 );
+
+		self::assertSame(
+			403,
+			$this->request( 'GET', "/reservant/v1/bookings/{$created['uuid']}", array( 'token' => $created['manage_token'] ) )->get_status()
+		);
+	}
+
+	/** Inside the window it still works, so the refusal above is about age and not a broken guard. */
+	public function test_a_manage_link_still_works_a_week_after_the_appointment(): void {
+		$created = $this->hold( $this->sql( 1, '11:00' ) );
+		$this->ageBookingBy( (string) $created['uuid'], 8 );
+
+		self::assertSame(
+			200,
+			$this->request( 'GET', "/reservant/v1/bookings/{$created['uuid']}", array( 'token' => $created['manage_token'] ) )->get_status()
+		);
+	}
+
+	/** Zero is the opt-out, for a site that would rather keep a link alive indefinitely. */
+	public function test_a_site_can_switch_the_expiry_off(): void {
+		$created = $this->hold( $this->sql( 1, '11:00' ) );
+		$this->ageBookingBy( (string) $created['uuid'], 400 );
+
+		$never = static fn (): int => 0;
+		add_filter( 'reservant/manage_token_days_after', $never );
+		$status = $this->request( 'GET', "/reservant/v1/bookings/{$created['uuid']}", array( 'token' => $created['manage_token'] ) )->get_status();
+		remove_filter( 'reservant/manage_token_days_after', $never );
+
+		self::assertSame( 200, $status );
+	}
+
+	/** An expired link is refused in the SAME shape as a wrong one - no new way to tell them apart. */
+	public function test_an_expired_link_is_indistinguishable_from_a_wrong_one(): void {
+		$created = $this->hold( $this->sql( 1, '11:00' ) );
+		$this->ageBookingBy( (string) $created['uuid'], 400 );
+
+		$expired = $this->request( 'GET', "/reservant/v1/bookings/{$created['uuid']}", array( 'token' => $created['manage_token'] ) );
+		$wrong   = $this->request( 'GET', "/reservant/v1/bookings/{$created['uuid']}", array( 'token' => 'wrong-token' ) );
+
+		self::assertSame( $wrong->get_status(), $expired->get_status() );
+		self::assertSame( $wrong->get_data(), $expired->get_data() );
+	}
+
+	/**
+	 * Drags a whole booking that many days into the past - the only way to reach the expiry, since
+	 * every fixture here books into the future on purpose (`ReservantTestCase::utc()`).
+	 */
+	private function ageBookingBy( string $uuid, int $days ): void {
+		global $wpdb;
+		$wpdb->query( // phpcs:ignore WordPress.DB.PreparedSQL
+			$wpdb->prepare(
+				"UPDATE {$wpdb->prefix}reservant_bookings
+				 SET created_at = created_at - INTERVAL %d DAY, updated_at = updated_at - INTERVAL %d DAY
+				 WHERE uuid = %s",
+				$days,
+				$days,
+				$uuid
+			)
+		);
+		$wpdb->query( // phpcs:ignore WordPress.DB.PreparedSQL
+			$wpdb->prepare(
+				"UPDATE {$wpdb->prefix}reservant_booking_items i
+				 INNER JOIN {$wpdb->prefix}reservant_bookings b ON b.id = i.booking_id
+				 SET i.start_utc = i.start_utc - INTERVAL %d DAY,
+				     i.end_utc = i.end_utc - INTERVAL %d DAY,
+				     i.block_start_utc = i.block_start_utc - INTERVAL %d DAY,
+				     i.block_end_utc = i.block_end_utc - INTERVAL %d DAY
+				 WHERE b.uuid = %s",
+				$days,
+				$days,
+				$days,
+				$days,
+				$uuid
+			)
+		);
+	}
+
 	/** A token is a credential for ONE booking: valid elsewhere is still 403 here. */
 	public function test_a_valid_token_does_not_open_another_booking(): void {
 		$first  = $this->hold( $this->sql( 1, '11:00' ), $this->staffA );

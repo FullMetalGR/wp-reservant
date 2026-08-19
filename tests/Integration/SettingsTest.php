@@ -25,11 +25,13 @@ final class SettingsTest extends ReservantTestCase {
 		self::assertFalse( $settings->purgeOnUninstall() );
 		self::assertSame(
 			array(
-				'currency'           => 'EUR',
-				'checkout_ttl_min'   => 15,
-				'approval_ttl_hours' => 48,
-				'payment_ttl_hours'  => 24,
-				'purge_on_uninstall' => false,
+				'currency'            => 'EUR',
+				'checkout_ttl_min'    => 15,
+				'approval_ttl_hours'  => 48,
+				'payment_ttl_hours'   => 24,
+				'purge_on_uninstall'  => false,
+				'reminder_lead_hours' => 24,
+				'emails_off'          => array(),
 			),
 			$settings->toArray()
 		);
@@ -38,6 +40,39 @@ final class SettingsTest extends ReservantTestCase {
 	public function testUpdatePersistsAndRoundTrips(): void {
 		Settings::make()->update( array( 'currency' => 'USD' ) );
 		self::assertSame( 'USD', Settings::make()->currency() );
+	}
+
+	public function testReminderLeadHoursAcceptsZeroAsTheOffSwitch(): void {
+		// The one field where zero is an answer rather than a malformed value: a reminder scheduled
+		// for the appointment's own start time would be a notification about something already
+		// happening, so "no reminders" is what zero means.
+		self::assertSame( 0, Settings::make()->update( array( 'reminder_lead_hours' => 0 ) )->reminderLeadHours() );
+	}
+
+	public function testUpdateRejectsANegativeReminderLeadTime(): void {
+		$this->expectException( \InvalidArgumentException::class );
+		Settings::make()->update( array( 'reminder_lead_hours' => -1 ) );
+	}
+
+	public function testEmailsOffRoundTripsTheKeysItIsGiven(): void {
+		self::assertSame(
+			array( 'booking_reminder', 'approval_nag' ),
+			Settings::make()->update( array( 'emails_off' => array( 'booking_reminder', 'approval_nag' ) ) )->emailsOff()
+		);
+	}
+
+	/**
+	 * A switch for a message that does not exist is a typo, and storing it would leave the owner
+	 * believing they had turned something off.
+	 */
+	public function testUpdateRejectsASwitchForAnEmailThisPluginDoesNotSend(): void {
+		$this->expectException( \InvalidArgumentException::class );
+		Settings::make()->update( array( 'emails_off' => array( 'booking_confirmed', 'no_such_email' ) ) );
+	}
+
+	public function testUpdateRejectsANonListEmailsOff(): void {
+		$this->expectException( \InvalidArgumentException::class );
+		Settings::make()->update( array( 'emails_off' => 'booking_reminder' ) );
 	}
 
 	public function testUpdateRejectsBadCurrency(): void {

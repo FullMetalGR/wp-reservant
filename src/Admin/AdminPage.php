@@ -206,7 +206,13 @@ final class AdminPage {
 	 * do, e.g. hiding action buttons for a staff-only viewer), currency, site timezone, and the
 	 * slot granularity.
 	 *
-	 * @return array{restRoot:string,nonce:string,caps:list<string>,currency:string,timezone:string,granularityMin:int}
+	 * `emailChoices` is the notification catalog (`Notifications\EmailCatalog::choices()`): the key
+	 * and the owner-facing label of every message this build can send, so the Settings screen
+	 * renders one checkbox each without a hard-coded list of its own. A list living in TypeScript
+	 * could not be compared against the PHP one by any test, and an email added in a later phase
+	 * would simply have no switch.
+	 *
+	 * @return array{restRoot:string,nonce:string,caps:list<string>,currency:string,timezone:string,granularityMin:int,emailChoices:list<array{key:string,label:string}>}
 	 */
 	private function config(): array {
 		$caps = array_values(
@@ -223,6 +229,7 @@ final class AdminPage {
 			'currency'       => Settings::make()->currency(),
 			'timezone'       => wp_timezone_string(),
 			'granularityMin' => self::granularityMin(),
+			'emailChoices'   => \Reservant\Notifications\EmailCatalog::choices(),
 		);
 	}
 

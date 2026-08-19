@@ -310,6 +310,10 @@ export interface SettingsPayload {
 	approval_ttl_hours: number;
 	payment_ttl_hours: number;
 	purge_on_uninstall: boolean;
+	/** Hours before the appointment a reminder goes out. Zero switches reminders off. */
+	reminder_lead_hours: number;
+	/** The email keys the owner has switched off - an OFF list, so a new message is on by default. */
+	emails_off: string[];
 }
 
 /** `BookingsAdminController::customer()` - the manual booking body's customer block. */

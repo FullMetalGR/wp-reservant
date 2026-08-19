@@ -17,17 +17,19 @@ final class Settings {
 
 	private const OPTION = 'reservant_settings';
 
-	/** @var array{currency:string,checkout_ttl_min:int,approval_ttl_hours:int,payment_ttl_hours:int,purge_on_uninstall:bool} */
+	/** @var array{currency:string,checkout_ttl_min:int,approval_ttl_hours:int,payment_ttl_hours:int,purge_on_uninstall:bool,reminder_lead_hours:int,emails_off:list<string>} */
 	private const DEFAULTS = array(
-		'currency'           => 'EUR',
-		'checkout_ttl_min'   => 15,
-		'approval_ttl_hours' => 48,
-		'payment_ttl_hours'  => 24,
-		'purge_on_uninstall' => false,
+		'currency'            => 'EUR',
+		'checkout_ttl_min'    => 15,
+		'approval_ttl_hours'  => 48,
+		'payment_ttl_hours'   => 24,
+		'purge_on_uninstall'  => false,
+		'reminder_lead_hours' => 24,
+		'emails_off'          => array(),
 	);
 
 	/**
-	 * @param array{currency:string,checkout_ttl_min:int,approval_ttl_hours:int,payment_ttl_hours:int,purge_on_uninstall:bool} $values
+	 * @param array{currency:string,checkout_ttl_min:int,approval_ttl_hours:int,payment_ttl_hours:int,purge_on_uninstall:bool,reminder_lead_hours:int,emails_off:list<string>} $values
 	 */
 	private function __construct( private readonly array $values ) {}
 
@@ -74,6 +76,29 @@ final class Settings {
 	}
 
 	/**
+	 * How long before the appointment the reminder goes out. Zero switches reminders off outright -
+	 * the one place a zero is meaningful here, since a reminder scheduled for the appointment's own
+	 * start time would be a notification about something already happening.
+	 */
+	public function reminderLeadHours(): int {
+		return $this->values['reminder_lead_hours'];
+	}
+
+	/**
+	 * The email keys the owner has switched off. Honoured in `Notifications\Mailer::send()`, the one
+	 * seam every message passes through.
+	 *
+	 * Stored as the OFF list rather than the on one so that an email added by a later release is on
+	 * by default: a stored on-list written before that key existed would silently suppress it, and a
+	 * site would never learn that its guests had stopped being told something.
+	 *
+	 * @return list<string>
+	 */
+	public function emailsOff(): array {
+		return $this->values['emails_off'];
+	}
+
+	/**
 	 * Validates a partial change against the current values, persists the merged result, and
 	 * returns the settings reflecting it. Unknown keys in `$partial` are ignored.
 	 *
@@ -83,11 +108,13 @@ final class Settings {
 	public function update( array $partial ): self {
 		$merged = self::validate(
 			array(
-				'currency'           => $partial['currency'] ?? $this->values['currency'],
-				'checkout_ttl_min'   => $partial['checkout_ttl_min'] ?? $this->values['checkout_ttl_min'],
-				'approval_ttl_hours' => $partial['approval_ttl_hours'] ?? $this->values['approval_ttl_hours'],
-				'payment_ttl_hours'  => $partial['payment_ttl_hours'] ?? $this->values['payment_ttl_hours'],
-				'purge_on_uninstall' => $partial['purge_on_uninstall'] ?? $this->values['purge_on_uninstall'],
+				'currency'            => $partial['currency'] ?? $this->values['currency'],
+				'checkout_ttl_min'    => $partial['checkout_ttl_min'] ?? $this->values['checkout_ttl_min'],
+				'approval_ttl_hours'  => $partial['approval_ttl_hours'] ?? $this->values['approval_ttl_hours'],
+				'payment_ttl_hours'   => $partial['payment_ttl_hours'] ?? $this->values['payment_ttl_hours'],
+				'purge_on_uninstall'  => $partial['purge_on_uninstall'] ?? $this->values['purge_on_uninstall'],
+				'reminder_lead_hours' => $partial['reminder_lead_hours'] ?? $this->values['reminder_lead_hours'],
+				'emails_off'          => $partial['emails_off'] ?? $this->values['emails_off'],
 			)
 		);
 		update_option( self::OPTION, $merged, false );
@@ -95,7 +122,7 @@ final class Settings {
 	}
 
 	/**
-	 * @return array{currency:string,checkout_ttl_min:int,approval_ttl_hours:int,payment_ttl_hours:int,purge_on_uninstall:bool}
+	 * @return array{currency:string,checkout_ttl_min:int,approval_ttl_hours:int,payment_ttl_hours:int,purge_on_uninstall:bool,reminder_lead_hours:int,emails_off:list<string>}
 	 */
 	public function toArray(): array {
 		return $this->values;
@@ -110,7 +137,7 @@ final class Settings {
 	 * shapes `update()` rejects, and the two sides must agree on what a valid value is.
 	 *
 	 * @param array<string, mixed> $stored
-	 * @return array{currency:string,checkout_ttl_min:int,approval_ttl_hours:int,payment_ttl_hours:int,purge_on_uninstall:bool}
+	 * @return array{currency:string,checkout_ttl_min:int,approval_ttl_hours:int,payment_ttl_hours:int,purge_on_uninstall:bool,reminder_lead_hours:int,emails_off:list<string>}
 	 */
 	private static function coerce( array $stored ): array {
 		$currency = $stored['currency'] ?? null;
@@ -121,11 +148,41 @@ final class Settings {
 		$purge = $stored['purge_on_uninstall'] ?? null;
 
 		return array(
-			'currency'           => $currency,
-			'checkout_ttl_min'   => self::positiveIntOr( $stored['checkout_ttl_min'] ?? null, self::DEFAULTS['checkout_ttl_min'] ),
-			'approval_ttl_hours' => self::positiveIntOr( $stored['approval_ttl_hours'] ?? null, self::DEFAULTS['approval_ttl_hours'] ),
-			'payment_ttl_hours'  => self::positiveIntOr( $stored['payment_ttl_hours'] ?? null, self::DEFAULTS['payment_ttl_hours'] ),
-			'purge_on_uninstall' => is_bool( $purge ) ? $purge : self::DEFAULTS['purge_on_uninstall'],
+			'currency'            => $currency,
+			'checkout_ttl_min'    => self::positiveIntOr( $stored['checkout_ttl_min'] ?? null, self::DEFAULTS['checkout_ttl_min'] ),
+			'approval_ttl_hours'  => self::positiveIntOr( $stored['approval_ttl_hours'] ?? null, self::DEFAULTS['approval_ttl_hours'] ),
+			'payment_ttl_hours'   => self::positiveIntOr( $stored['payment_ttl_hours'] ?? null, self::DEFAULTS['payment_ttl_hours'] ),
+			'purge_on_uninstall'  => is_bool( $purge ) ? $purge : self::DEFAULTS['purge_on_uninstall'],
+			'reminder_lead_hours' => self::nonNegativeIntOr( $stored['reminder_lead_hours'] ?? null, self::DEFAULTS['reminder_lead_hours'] ),
+			'emails_off'          => self::knownKeys( $stored['emails_off'] ?? null ),
+		);
+	}
+
+	/** Zero is a real answer here - "send no reminders" - so this is the non-negative sibling of the above. */
+	private static function nonNegativeIntOr( mixed $value, int $fallback ): int {
+		return is_int( $value ) && $value >= 0 ? $value : $fallback;
+	}
+
+	/**
+	 * The subset of a stored off-list that names an email this build actually sends.
+	 *
+	 * An unknown key is dropped rather than kept: it is either a typo, or a key from a version that
+	 * no longer exists, and keeping it would let the list quietly grow into a record of nothing.
+	 * Read-side leniency, matching every other field here - `validate()` refuses the same input.
+	 *
+	 * @return list<string>
+	 */
+	private static function knownKeys( mixed $value ): array {
+		if ( ! is_array( $value ) ) {
+			return array();
+		}
+		return array_values(
+			array_unique(
+				array_filter(
+					array_map( static fn ( $key ): string => is_string( $key ) ? $key : '', $value ),
+					static fn ( string $key ): bool => in_array( $key, Notifications\EmailCatalog::KEYS, true )
+				)
+			)
 		);
 	}
 
@@ -139,7 +196,7 @@ final class Settings {
 	 * it - reads go through `coerce()` instead.
 	 *
 	 * @param array<string, mixed> $values
-	 * @return array{currency:string,checkout_ttl_min:int,approval_ttl_hours:int,payment_ttl_hours:int,purge_on_uninstall:bool}
+	 * @return array{currency:string,checkout_ttl_min:int,approval_ttl_hours:int,payment_ttl_hours:int,purge_on_uninstall:bool,reminder_lead_hours:int,emails_off:list<string>}
 	 * @throws \InvalidArgumentException When a value fails validation.
 	 */
 	private static function validate( array $values ): array {
@@ -155,12 +212,28 @@ final class Settings {
 			}
 		}
 
+		if ( ! is_int( $values['reminder_lead_hours'] ) || $values['reminder_lead_hours'] < 0 ) {
+			throw new \InvalidArgumentException( 'reminder_lead_hours must be zero or a positive integer' );
+		}
+
+		$emailsOff = $values['emails_off'];
+		if ( ! is_array( $emailsOff ) ) {
+			throw new \InvalidArgumentException( 'emails_off must be a list of email keys' );
+		}
+		foreach ( $emailsOff as $key ) {
+			if ( ! is_string( $key ) || ! in_array( $key, Notifications\EmailCatalog::KEYS, true ) ) {
+				throw new \InvalidArgumentException( 'emails_off names an email this plugin does not send' );
+			}
+		}
+
 		return array(
-			'currency'           => $currency,
-			'checkout_ttl_min'   => $values['checkout_ttl_min'],
-			'approval_ttl_hours' => $values['approval_ttl_hours'],
-			'payment_ttl_hours'  => $values['payment_ttl_hours'],
-			'purge_on_uninstall' => (bool) $values['purge_on_uninstall'],
+			'currency'            => $currency,
+			'checkout_ttl_min'    => $values['checkout_ttl_min'],
+			'approval_ttl_hours'  => $values['approval_ttl_hours'],
+			'payment_ttl_hours'   => $values['payment_ttl_hours'],
+			'purge_on_uninstall'  => (bool) $values['purge_on_uninstall'],
+			'reminder_lead_hours' => $values['reminder_lead_hours'],
+			'emails_off'          => array_values( array_unique( $emailsOff ) ),
 		);
 	}
 }

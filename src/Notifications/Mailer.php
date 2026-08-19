@@ -33,6 +33,14 @@ final class Mailer {
 	 *                                           and so is unlinking it afterwards.
 	 */
 	public static function send( string $key, string $to, string $subject, string $body, array $context = array(), array $attachments = array() ): bool {
+		// The owner's switch is honoured HERE rather than in each listener, so it covers every
+		// message including any a future phase adds, and so a switched-off key never reaches
+		// `reservant/email/{$key}/args` - there is nothing to filter about a message not being sent.
+		// Not an error and not reported: this is the configured answer, not a failure.
+		if ( in_array( $key, \Reservant\Settings::make()->emailsOff(), true ) ) {
+			return false;
+		}
+
 		$files = array();
 		try {
 			$filtered = apply_filters(

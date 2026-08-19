@@ -48,6 +48,7 @@ final class BookingEmails {
 		add_action( 'reservant/booking/cancelled', array( self::class, 'onCancelled' ) );
 		add_action( 'reservant/booking/rescheduled', array( self::class, 'onRescheduled' ) );
 		add_action( 'reservant/hold/expired', array( self::class, 'onExpired' ) );
+		add_action( 'reservant/booking/reminder', array( self::class, 'onReminder' ) );
 	}
 
 	/** `reservant/booking/held` - an acknowledgement only where silence would leave the guest waiting. */
@@ -79,6 +80,17 @@ final class BookingEmails {
 			return;
 		}
 		self::deliver( 'booking_expired', $snapshot, null );
+	}
+
+	/**
+	 * `reservant/booking/reminder` - fired by `Infrastructure\Scheduler\Jobs::reminder()`, which
+	 * owns the re-read that decides whether a reminder is still warranted at all.
+	 *
+	 * No .ics: the guest received one with their confirmation, carrying this same UID, and a second
+	 * copy at the same SEQUENCE tells their calendar nothing it does not already know.
+	 */
+	public static function onReminder( BookingSnapshot $snapshot ): void {
+		self::deliver( 'booking_reminder', $snapshot, null );
 	}
 
 	/**
@@ -141,6 +153,8 @@ final class BookingEmails {
 				return __( 'Your booking has moved to a new time', 'reservant' );
 			case 'booking_expired':
 				return __( 'Your booking request has expired', 'reservant' );
+			case 'booking_reminder':
+				return __( 'A reminder about your booking', 'reservant' );
 			default:
 				return __( 'Your booking is confirmed', 'reservant' );
 		}
@@ -160,7 +174,9 @@ final class BookingEmails {
 			$lines[] = self::itemLine( $item );
 		}
 
-		if ( 'booking_cancelled' !== $key && $snapshot->totalMinor > 0 ) {
+		// Not on the two emails about a booking that is no longer happening: a price beside "nothing
+		// has been reserved for you" reads as a bill.
+		if ( ! in_array( $key, array( 'booking_cancelled', 'booking_expired' ), true ) && $snapshot->totalMinor > 0 ) {
 			$lines[] = '';
 			$lines[] = sprintf(
 				/* translators: 1: the amount, already formatted for the site's locale. 2: three-letter currency code, e.g. EUR. */
@@ -209,6 +225,12 @@ final class BookingEmails {
 				return sprintf(
 					/* translators: %s: the customer's name. */
 					__( 'Hi %s, your booking request expired before it could be approved, so nothing has been reserved for you. Please book again if you would still like to come.', 'reservant' ),
+					$customerName
+				);
+			case 'booking_reminder':
+				return sprintf(
+					/* translators: %s: the customer's name. */
+					__( 'Hi %s, this is a reminder about your booking. We are looking forward to seeing you.', 'reservant' ),
 					$customerName
 				);
 			default:
