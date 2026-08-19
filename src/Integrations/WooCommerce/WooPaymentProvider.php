@@ -43,8 +43,7 @@ final class WooPaymentProvider implements PaymentProvider {
 		$existing = null === ( $service['wc_product_id'] ?? null ) ? 0 : (int) $service['wc_product_id'];
 
 		// Not an online service (any more). Trash whatever we mirrored and tell the caller to clear
-		// the id - `wc_get_product()` on a deleted product returns false, and a stored id pointing at
-		// nothing is worse than no id at all.
+		// the id, so a later resync creates a fresh product rather than reviving a retired one.
 		if ( PaymentMode::Online->value !== (string) ( $service['payment_mode'] ?? '' ) ) {
 			if ( $existing > 0 ) {
 				$this->trashMirror( $existing );
@@ -170,6 +169,16 @@ final class WooPaymentProvider implements PaymentProvider {
 		$order->add_item( $fee );
 	}
 
+	/**
+	 * Trashed, never force-deleted, and the difference is the shop's order history: a past order
+	 * that bought this service still holds a line item pointing at the product, and WooCommerce
+	 * renders that line from the product when it can. A trashed product keeps rendering; a purged
+	 * one leaves the owner reading an order with a blank line on it.
+	 *
+	 * Note what this means for the caller: `wc_get_product()` still returns an object for a trashed
+	 * product (with `post_status` `trash`), so "did we retire it" is a status question, not an
+	 * existence one.
+	 */
 	private function trashMirror( int $productId ): void {
 		$product = wc_get_product( $productId );
 		// Only ever our own mirror: a shop that reused the id for a real product must not have it
