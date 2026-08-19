@@ -3,14 +3,9 @@ declare( strict_types=1 );
 
 namespace Reservant\Application;
 
-use Reservant\Application\Dto\BookingSnapshot;
 use Reservant\Domain\Enum\BookingStatus;
-use Reservant\Infrastructure\Db\AuditLog;
 use Reservant\Infrastructure\Db\BookingRepository;
 use Reservant\Infrastructure\Db\LockKey;
-use Reservant\Infrastructure\Db\LockManager;
-use Reservant\Infrastructure\Db\ResourceDayRepository;
-use Reservant\Infrastructure\Db\TransactionRunner;
 
 /**
  * Owner refusal of a booking that required approval (AGENTS.md "Approval queue"). Releases the
@@ -30,26 +25,19 @@ use Reservant\Infrastructure\Db\TransactionRunner;
  * defect that is unfindable once the reader lands three releases later.
  *
  * Lock order is the codebase-wide one: resource_days/occurrences via `LockManager::acquire()`
- * FIRST, the bookings row (`findByUuidForUpdate()`) after.
+ * FIRST, the bookings row (`findByUuidForUpdate()`) after. `GuardedWrite` owns both that order and
+ * the `bumpRev()` this class's docblock argues for, so the near-miss described above is now
+ * structurally impossible rather than merely remembered.
  */
 final class RejectBooking {
 
 	public function __construct(
-		private readonly TransactionRunner $txn,
-		private readonly LockManager $locks,
-		private readonly ResourceDayRepository $resourceDays,
+		private readonly GuardedWrite $guarded,
 		private readonly BookingRepository $bookings,
-		private readonly AuditLog $audit,
 	) {}
 
 	public static function make( \wpdb $db ): self {
-		return new self(
-			new TransactionRunner( $db ),
-			new LockManager( $db ),
-			new ResourceDayRepository( $db ),
-			new BookingRepository( $db ),
-			new AuditLog( $db )
-		);
+		return new self( GuardedWrite::make( $db ), new BookingRepository( $db ) );
 	}
 
 	/** @return array<string, mixed> */
@@ -66,47 +54,25 @@ final class RejectBooking {
 
 		/** @var list<array<string, mixed>> $items */
 		$items = $booking['items'];
-		$keys  = LockKey::forItems( $items );
-		// Mutex rows must exist before the transaction opens - SELECT ... FOR UPDATE cannot lock a
-		// row that is not there (AGENTS.md section 2.2).
-		$this->resourceDays->ensure( $keys );
 
-		$snapshot = $this->txn->run(
-			function () use ( $keys, $uuid, $nowUtc, $reason, $actor ): array {
-				// The slot mutexes FIRST, the booking row after - the codebase-wide lock order.
-				$this->locks->acquire( $keys );
-
-				// Re-read under FOR UPDATE: a lapsed hold or a rival decision (approve/cancel) may
-				// have landed between the unlocked read above and this transaction opening, and the
-				// row this one acts on is the one read here.
-				$fresh = $this->bookings->findByUuidForUpdate( $uuid );
-				if ( null === $fresh ) {
-					throw new \RuntimeException( 'stale_state' );
-				}
+		return $this->guarded->transition(
+			LockKey::forItems( $items ),
+			$uuid,
+			BookingStatus::Rejected,
+			// Re-read under FOR UPDATE and re-decided: a lapsed hold or a rival decision
+			// (approve/cancel) may have landed between the unlocked read above and the transaction
+			// opening, and the row this acts on is the one read there.
+			static function ( array $fresh ) use ( $nowUtc ): void {
 				if ( ! self::approvable( $fresh, $nowUtc ) ) {
-					throw new \RuntimeException( 'not_approvable' );
+					throw new TransitionRefused( 'not_approvable' );
 				}
-
-				if ( ! $this->bookings->transition(
-					(int) $fresh['id'],
-					BookingStatus::AwaitingApproval,
-					BookingStatus::Rejected,
-					array( 'rejection_reason' => $reason )
-				) ) {
-					throw new \RuntimeException( 'not_approvable' );
-				}
-				$this->bookings->releaseSeatClaims( (int) $fresh['id'] );
-				$this->resourceDays->bumpRev( $keys );
-				$this->audit->record( (int) $fresh['id'], $actor, 'reject' );
-
-				/** @var array<string, mixed> $stored */
-				$stored = $this->bookings->findByUuid( $uuid );
-				return $stored;
-			}
+			},
+			'not_approvable',
+			$actor,
+			'reject',
+			'reservant/booking/rejected',
+			array( 'rejection_reason' => $reason )
 		);
-
-		do_action( 'reservant/booking/rejected', BookingSnapshot::fromArray( $snapshot ) );
-		return $snapshot;
 	}
 
 	/**

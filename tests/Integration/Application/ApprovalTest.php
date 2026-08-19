@@ -179,39 +179,7 @@ final class ApprovalTest extends ReservantTestCase {
 
 	public function testRejectStopsBlocking(): void {
 		global $wpdb;
-		$seatMaps    = new SeatMapRepository( $wpdb );
-		$occurrences = new OccurrenceRepository( $wpdb );
-		$services    = new ServiceRepository( $wpdb );
-
-		$spec    = 'rows A-B, 4 per row';
-		$mapId   = $seatMaps->insert( 'Hall', $spec );
-		$seatIds = array();
-		$cells   = SeatMapSpec::parse( $spec )->seats();
-		foreach ( $seatMaps->insertSeats( $mapId, $cells ) as $index => $seatId ) {
-			if ( 'seat' === $cells[ $index ]->kind ) {
-				$seatIds[] = $seatId;
-			}
-		}
-		$eventId = $services->insert(
-			array(
-				'name'                => 'GridShow',
-				'type'                => 'event',
-				'capacity'            => 8,
-				'seat_map_id'         => $mapId,
-				'price_minor'         => 1000,
-				'payment_mode'        => 'onsite',
-				'requires_approval'   => 1,
-				'approval_hold_hours' => 48,
-			)
-		);
-		$occId   = $occurrences->insert(
-			array(
-				'service_id' => $eventId,
-				'start_utc'  => $this->sql( 10, '18:00' ),
-				'end_utc'    => $this->sql( 10, '20:00' ),
-				'capacity'   => 8,
-			)
-		);
+		list( $occId, $seatIds ) = $this->seatedApprovalEvent();
 
 		global $wpdb;
 		$hold    = HoldBooking::make( $wpdb )->execute(
@@ -257,6 +225,89 @@ final class ApprovalTest extends ReservantTestCase {
 			$this->utc( 0 )
 		);
 		self::assertSame( 'awaiting_approval', $rival['status'] );
+	}
+
+	/**
+	 * A seated, approval-gated event with its seat map built out - the fixture both seat-claim
+	 * tests below need. Returned as `[occurrenceId, seatIds]`; a hold on `$seatIds[0]` lands
+	 * `awaiting_approval` and claims that seat.
+	 *
+	 * @return array{0: int, 1: list<int>}
+	 */
+	private function seatedApprovalEvent(): array {
+		$seatMaps    = new SeatMapRepository( $GLOBALS['wpdb'] );
+		$occurrences = new OccurrenceRepository( $GLOBALS['wpdb'] );
+		$services    = new ServiceRepository( $GLOBALS['wpdb'] );
+
+		$spec    = 'rows A-B, 4 per row';
+		$mapId   = $seatMaps->insert( 'Hall', $spec );
+		$seatIds = array();
+		$cells   = SeatMapSpec::parse( $spec )->seats();
+		foreach ( $seatMaps->insertSeats( $mapId, $cells ) as $index => $seatId ) {
+			if ( 'seat' === $cells[ $index ]->kind ) {
+				$seatIds[] = $seatId;
+			}
+		}
+		$eventId = $services->insert(
+			array(
+				'name'                => 'GridShow',
+				'type'                => 'event',
+				'capacity'            => 8,
+				'seat_map_id'         => $mapId,
+				'price_minor'         => 1000,
+				'payment_mode'        => 'onsite',
+				'requires_approval'   => 1,
+				'approval_hold_hours' => 48,
+			)
+		);
+		$occId   = $occurrences->insert(
+			array(
+				'service_id' => $eventId,
+				'start_utc'  => $this->sql( 10, '18:00' ),
+				'end_utc'    => $this->sql( 10, '20:00' ),
+				'capacity'   => 8,
+			)
+		);
+		return array( $occId, $seatIds );
+	}
+
+	/**
+	 * The mirror of `testRejectStopsBlocking`, and the one that was missing: approving must KEEP the
+	 * seat claim. Every other guarded transition in the codebase releases it, so `GuardedWrite` asks
+	 * `BookingStatus::releasesSeatClaims()` rather than taking a flag - and until this test existed,
+	 * making that method return true unconditionally broke nothing. What it would break in
+	 * production is the worst thing this codebase can do: the seat comes back on sale while a
+	 * confirmed booking still holds it, and the event is sold twice over.
+	 */
+	public function testApproveKeepsTheSeatClaim(): void {
+		global $wpdb;
+		list( $occId, $seatIds ) = $this->seatedApprovalEvent();
+
+		$hold = HoldBooking::make( $wpdb )->execute(
+			new HoldRequest( $this->customer(), null, new EventRequest( $occId, 1, array( $seatIds[0] ) ) ),
+			$this->utc( 0 )
+		);
+		self::assertSame( 'awaiting_approval', $hold['status'] );
+		self::assertSame( $seatIds[0], $hold['items'][0]['seat_claim'] );
+
+		$approved = ApproveBooking::make( $wpdb )->execute( $hold['uuid'], $this->utc( 0, '01:00' ), 'admin' );
+		self::assertSame( 'confirmed', $approved['status'] );
+
+		$stored = ( new BookingRepository( $wpdb ) )->findByUuid( $hold['uuid'] );
+		self::assertSame( $seatIds[0], $stored['items'][0]['seat_claim'], 'Approving must not hand the seat back.' );
+
+		// And the seat is still genuinely unavailable to anyone else - the claim column being set is
+		// only half the story if the blocking predicate disagrees with it.
+		$refusal = null;
+		try {
+			HoldBooking::make( $wpdb )->execute(
+				new HoldRequest( $this->customer(), null, new EventRequest( $occId, 1, array( $seatIds[0] ) ) ),
+				$this->utc( 0, '02:00' )
+			);
+		} catch ( \Reservant\Application\SlotConflict $e ) {
+			$refusal = $e->reason;
+		}
+		self::assertSame( 'seat_taken', $refusal );
 	}
 
 	public function testOutcomeOnlyFromConfirmed(): void {

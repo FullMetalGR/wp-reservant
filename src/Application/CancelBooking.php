@@ -3,40 +3,32 @@ declare( strict_types=1 );
 
 namespace Reservant\Application;
 
-use Reservant\Application\Dto\BookingSnapshot;
 use Reservant\Domain\Booking\CancellationPolicy;
 use Reservant\Domain\Enum\BookingStatus;
-use Reservant\Infrastructure\Db\AuditLog;
 use Reservant\Infrastructure\Db\BookingRepository;
 use Reservant\Infrastructure\Db\LockKey;
-use Reservant\Infrastructure\Db\LockManager;
-use Reservant\Infrastructure\Db\ResourceDayRepository;
 use Reservant\Infrastructure\Db\ServiceRepository;
-use Reservant\Infrastructure\Db\TransactionRunner;
 
 /**
  * Whole-booking cancellation (AGENTS.md section 1: items have no independent lifecycle). Releases the
  * slot under the same locks a hold takes; refunds are flagged for the owner, never automatic.
+ *
+ * The lock/re-read/transition/audit/hook sequence lives in `GuardedWrite`; what stays here is what is
+ * particular to cancelling - the policy window, and which statuses the caller will still accept.
  */
 final class CancelBooking {
 
 	public function __construct(
-		private readonly TransactionRunner $txn,
-		private readonly LockManager $locks,
-		private readonly ResourceDayRepository $resourceDays,
+		private readonly GuardedWrite $guarded,
 		private readonly BookingRepository $bookings,
 		private readonly ServiceRepository $services,
-		private readonly AuditLog $audit,
 	) {}
 
 	public static function make( \wpdb $db ): self {
 		return new self(
-			new TransactionRunner( $db ),
-			new LockManager( $db ),
-			new ResourceDayRepository( $db ),
+			GuardedWrite::make( $db ),
 			new BookingRepository( $db ),
-			new ServiceRepository( $db ),
-			new AuditLog( $db )
+			new ServiceRepository( $db )
 		);
 	}
 
@@ -70,48 +62,34 @@ final class CancelBooking {
 			throw new \RuntimeException( 'window_closed' );
 		}
 
-		$keys     = LockKey::forItems( $items );
-		$released = array(
-			'hold_expires_at' => null,
-			'hold_class'      => null,
-		);
-		$this->resourceDays->ensure( $keys );
-
-		$snapshot = $this->txn->run(
-			function () use ( $keys, $booking, $uuid, $released, $onlyFromStatuses ): array {
-				$this->locks->acquire( $keys );
-
-				// Re-read inside the transaction. Every check above ran on an unlocked snapshot, and
-				// ConfirmBooking takes no lock at all - it is one guarded UPDATE - so the booking may
-				// have moved on since. The status this transaction acts on is the one read here, and
-				// the transition below is guarded by it, so the residual window between the two is a
-				// `stale_state` refusal rather than a wrong outcome.
-				$fresh = $this->bookings->findById( (int) $booking['id'] );
-				if ( null === $fresh ) {
-					throw new \RuntimeException( 'stale_state' );
-				}
-				$from = BookingStatus::from( (string) $fresh['status'] );
+		return $this->guarded->transition(
+			LockKey::forItems( $items ),
+			$uuid,
+			BookingStatus::Cancelled,
+			// Re-decided under the lock, which is what actually binds. Both refusals below were
+			// already checked on the unlocked read above; a rival confirm or expiry landing in
+			// between is exactly what this second pass exists to catch.
+			static function ( array $fresh, BookingStatus $from ) use ( $onlyFromStatuses ): void {
 				if ( null !== $onlyFromStatuses && ! in_array( $from, $onlyFromStatuses, true ) ) {
-					throw new \RuntimeException( 'not_held' );
+					throw new TransitionRefused( 'not_held' );
 				}
 				if ( ! $from->canTransitionTo( BookingStatus::Cancelled ) ) {
-					throw new \RuntimeException( 'not_cancellable' );
+					throw new TransitionRefused( 'not_cancellable' );
 				}
-				if ( ! $this->bookings->transition( (int) $booking['id'], $from, BookingStatus::Cancelled, $released ) ) {
-					throw new \RuntimeException( 'stale_state' );
-				}
-				$this->bookings->releaseSeatClaims( (int) $booking['id'] );
-				$this->resourceDays->bumpRev( $keys );
-				$this->audit->record( (int) $booking['id'], 'customer', 'cancelled' );
-
-				/** @var array<string, mixed> $stored */
-				$stored = $this->bookings->findByUuid( $uuid );
-				return $stored;
-			}
+			},
+			'stale_state',
+			'customer',
+			'cancelled',
+			'reservant/booking/cancelled',
+			array(
+				'hold_expires_at' => null,
+				'hold_class'      => null,
+			),
+			// Plain re-read, as this use case has always done: the guarded compare-and-set decides
+			// the race, and `findByUuid()` raises `lock_unavailable` rather than returning null if
+			// the read itself fails. See `GuardedWrite`'s docblock on why this is not unified.
+			false
 		);
-
-		do_action( 'reservant/booking/cancelled', BookingSnapshot::fromArray( $snapshot ) );
-		return $snapshot;
 	}
 
 	/**
