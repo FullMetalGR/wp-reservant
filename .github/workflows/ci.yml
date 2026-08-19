@@ -6,6 +6,7 @@ on:
 jobs:
   static-and-unit:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       matrix: { php: [ '8.1', '8.3' ] }
     steps:
@@ -19,6 +20,7 @@ jobs:
 
   assets:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
@@ -46,6 +48,11 @@ jobs:
 
   integration-and-concurrency:
     runs-on: ubuntu-latest
+    # Every job here caps its own wall clock. The default is 360 minutes, which is not a
+    # timeout so much as a whole working day of a stalled runner: on 2026-08-19 an apt call
+    # inside `playwright install --with-deps` hung on an Azure mirror outage and sat there
+    # unnoticed. This job's honest budget is about six minutes.
+    timeout-minutes: 30
     # wp-env names the plugin mount after the host directory basename, and the
     # test scripts address wp-content/plugins/reservant. Check out to a fixed
     # "reservant" path so CI matches local development regardless of repo name.
@@ -66,7 +73,14 @@ jobs:
       - run: npm run build
       - run: npx wp-env start
       - run: composer test:integration
-      - run: sudo apt-get install -y jq && chmod +x bin/run-concurrency.sh && ./bin/run-concurrency.sh
+      # jq ships preinstalled on the ubuntu-24.04 image, so this install is a fallback for an
+      # image that ever drops it, not the normal path. The `command -v` guard is what keeps the
+      # happy path from touching apt at all: an unguarded apt call on the hot path is an
+      # unbounded hang waiting for the next mirror outage, the same one that cost us the
+      # playwright step below.
+      - run: command -v jq >/dev/null || sudo apt-get install -y jq
+        timeout-minutes: 5
+      - run: chmod +x bin/run-concurrency.sh && ./bin/run-concurrency.sh
       # Admin smoke e2e (AGENTS.md P4, final task): installs the one browser the spec uses, then
       # drives the running wp-env site through Playwright. The bundle `Admin\AdminPage` enqueues is
       # already built above (nothing has changed a source file since), so it is not rebuilt here.
@@ -74,5 +88,19 @@ jobs:
       # permalinks as part of `wp-env start` above - a fresh WordPress install defaults to plain
       # permalinks, under which any REST call carrying its own query string 404s (`rest_route=...`
       # collides with the request's own `?`), so this is not optional environment polish.
-      - run: npx playwright install --with-deps chromium
+      #
+      # Deliberately NOT `--with-deps`, and please do not add it back. That flag makes Playwright
+      # shell out to `apt-get update` unconditionally - it never checks whether the libraries are
+      # already there - and apt inherits no timeout from anything, so when GitHub's Azure Ubuntu
+      # mirrors stall the step hangs until the job limit kills it. Two runs burned that way on
+      # 2026-08-19. The `ubuntu-24.04` image that `ubuntu-latest` resolves to already ships Google
+      # Chrome, Chromium and Edge as .deb installs, so every library `--with-deps` would fetch for
+      # chromium (libnss3, libgbm1, libasound2t64, the atk/cups/x11 set) is already on the box as
+      # their apt dependency. Plain `playwright install` talks to the browser CDN and nothing else.
+      # Installing the one browser is not a shortcut either: playwright.config.ts declares a single
+      # `chromium` project, so no firefox or webkit libraries are wanted here.
+      - run: npx playwright install chromium
+        # If the CDN ever goes the way apt just did, fail in five minutes rather than stall the
+        # branch for six hours. The download normally lands in well under one.
+        timeout-minutes: 5
       - run: npm run test:e2e
