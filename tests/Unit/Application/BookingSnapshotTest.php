@@ -59,6 +59,7 @@ final class BookingSnapshotTest extends TestCase {
 			$snapshot->items
 		);
 		self::assertNull( $snapshot->rejectionReason );
+		self::assertNull( $snapshot->manageToken ); // Not a column - only HoldBooking ever supplies it.
 
 		// toArray() matches the row shape verbatim, except requires_approval is normalised to
 		// bool (fromArray's job), never round-tripped back to the DB's raw '1' string.
@@ -110,5 +111,30 @@ final class BookingSnapshotTest extends TestCase {
 		self::assertSame( 'confirmed', $snapshot->status );
 		self::assertSame( 0, $snapshot->id );
 		self::assertSame( array(), $snapshot->items );
+	}
+
+	public function test_from_array_carries_the_plaintext_manage_token_when_the_row_has_one(): void {
+		$row                 = $this->row();
+		$row['manage_token'] = 'the-secret';
+		self::assertSame( 'the-secret', BookingSnapshot::fromArray( $row )->manageToken );
+	}
+
+	/**
+	 * The credential travels in and does not travel out.
+	 *
+	 * `toArray()` is the shape a listener reaches for when it wants to store, log or forward the
+	 * booking, and only the SHA-256 hash of this secret is ever meant to be at rest
+	 * (`Application\ManageToken`). Emitting it here would put the plaintext wherever any
+	 * third-party listener puts the array. The asymmetry with `fromArray()` is deliberate, so it
+	 * gets a test of its own rather than being left to whoever reads the docblock next.
+	 */
+	public function test_to_array_never_emits_the_manage_token(): void {
+		$row                 = $this->row();
+		$row['manage_token'] = 'the-secret';
+		$emitted             = BookingSnapshot::fromArray( $row )->toArray();
+
+		self::assertArrayNotHasKey( 'manage_token', $emitted );
+		self::assertNotContains( 'the-secret', $emitted );
+		self::assertSame( 'the-secret', BookingSnapshot::fromArray( $row )->manageToken, 'the DTO still carries it - only the array form withholds it' );
 	}
 }

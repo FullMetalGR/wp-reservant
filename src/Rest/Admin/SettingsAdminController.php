@@ -31,6 +31,8 @@ final class SettingsAdminController {
 		'approval_ttl_hours',
 		'payment_ttl_hours',
 		'purge_on_uninstall',
+		'reminder_lead_hours',
+		'emails_off',
 	);
 
 	/** GET /admin/settings */
@@ -84,9 +86,52 @@ final class SettingsAdminController {
 			// Pre-trimmed only; format (three uppercase letters) is Settings::validate()'s call.
 			'currency' => sanitize_text_field( Input::text( $value ) ),
 			'checkout_ttl_min', 'approval_ttl_hours', 'payment_ttl_hours' => self::posIntOrThrow( $value, $field ),
+			// Zero is a real answer for this one - it is how "send no reminders" is stored - so it
+			// cannot go through posIntOrThrow(), which exists to refuse it everywhere else.
+			'reminder_lead_hours' => self::nonNegIntOrThrow( $value, $field ),
+			'emails_off' => self::emailKeysOrThrow( $value, $field ),
 			'purge_on_uninstall' => rest_sanitize_boolean( is_scalar( $value ) ? (string) $value : '' ),
 			default => throw new \InvalidArgumentException( 'Unsupported field.' ),
 		};
+	}
+
+	/**
+	 * A list of email keys the owner has switched off.
+	 *
+	 * Only the SHAPE is settled here - that it is a list of strings. Whether each string names an
+	 * email this build actually sends is `Settings::validate()`'s call, exactly as the currency's
+	 * three-uppercase-letters rule is: this controller pre-sanitizes, it does not duplicate the
+	 * rules, and one place has to be the authority on what a valid value is.
+	 *
+	 * @return list<string>
+	 * @throws \InvalidArgumentException
+	 */
+	private static function emailKeysOrThrow( mixed $value, string $field ): array {
+		if ( ! is_array( $value ) ) {
+			// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Caught in update(); never echoed. $field is always a literal from self::FIELDS.
+			throw new \InvalidArgumentException( '"' . $field . '" must be a list of email keys.' );
+		}
+		$keys = array();
+		foreach ( $value as $key ) {
+			if ( ! is_string( $key ) ) {
+				// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Caught in update(); never echoed. $field is always a literal from self::FIELDS.
+				throw new \InvalidArgumentException( '"' . $field . '" must be a list of email keys.' );
+			}
+			$keys[] = sanitize_key( $key );
+		}
+		return $keys;
+	}
+
+	/** @throws \InvalidArgumentException */
+	private static function nonNegIntOrThrow( mixed $value, string $field ): int {
+		if ( is_int( $value ) && $value >= 0 ) {
+			return $value;
+		}
+		if ( is_string( $value ) && 1 === preg_match( '/^\d+$/', $value ) ) {
+			return (int) $value;
+		}
+		// phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Caught in update(); never echoed. $field is always a literal from self::FIELDS.
+		throw new \InvalidArgumentException( '"' . $field . '" is not valid.' );
 	}
 
 	/** @throws \InvalidArgumentException */

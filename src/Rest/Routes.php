@@ -268,10 +268,61 @@ final class Routes {
 			return $hideNotFound ? self::forbidden() : true;
 		}
 		$storedHash = null === $booking['manage_token_hash'] ? null : (string) $booking['manage_token_hash'];
-		if ( ManageToken::verify( (string) $request->get_param( 'token' ), $storedHash ) ) {
+		if ( ManageToken::verify( (string) $request->get_param( 'token' ), $storedHash ) && self::withinTokenLifetime( $booking ) ) {
 			return true;
 		}
 		return self::forbidden();
+	}
+
+	/**
+	 * Whether the guest's credential is still live, on top of whether it is correct.
+	 *
+	 * The secret has no stored expiry of its own - only the hash is kept - so its lifetime is
+	 * derived from the booking it belongs to: valid until `reservant/manage_token_days_after` days
+	 * past the end of the last segment. Nothing here is a second authorisation decision; a wrong
+	 * token and an expired one get the same `forbidden()`, so this adds no way to tell them apart.
+	 *
+	 * WHY IT EXPIRES AT ALL. The link lives in the guest's inbox forever, and it is the whole
+	 * credential: whoever holds it can read the booking's contact details on `GET /bookings/{uuid}`.
+	 * The lifecycle routes are already self-limiting (a finished booking cannot be cancelled or
+	 * rescheduled), so what a stale link really leaks is the customer's own email and phone number,
+	 * years after the appointment, to whoever has the mailbox by then. Thirty days past the
+	 * appointment is long enough to cover a receipt-hunting guest and short enough that a link is
+	 * not a permanent disclosure.
+	 *
+	 * Zero switches expiry off, for a site that would rather keep the old behaviour; a negative
+	 * filter answer is treated as zero rather than as a link that expired before it was sent.
+	 *
+	 * The fallback when a booking has no items is `created_at`, not "valid forever": a container
+	 * with nothing in it is a malformed row, and the safe direction to fail on a credential is
+	 * closed.
+	 *
+	 * @param array<string, mixed> $booking `BookingRepository::findByUuid()` shape.
+	 */
+	private static function withinTokenLifetime( array $booking ): bool {
+		/** @var mixed $filtered */
+		$filtered = apply_filters( 'reservant/manage_token_days_after', 30 );
+		$days     = is_int( $filtered ) ? $filtered : 30;
+		if ( $days <= 0 ) {
+			return true;
+		}
+
+		$utc  = new \DateTimeZone( 'UTC' );
+		$last = (string) ( $booking['created_at'] ?? '' );
+		/** @var list<array<string, mixed>> $items */
+		$items = is_array( $booking['items'] ?? null ) ? $booking['items'] : array();
+		foreach ( $items as $item ) {
+			$end = (string) ( $item['end_utc'] ?? '' );
+			if ( $end > $last ) {
+				$last = $end; // `Y-m-d H:i:s` sorts lexically, and both sides are always UTC.
+			}
+		}
+		if ( '' === $last ) {
+			return false;
+		}
+
+		$expiresAt = ( new \DateTimeImmutable( $last, $utc ) )->modify( '+' . $days . ' days' );
+		return new \DateTimeImmutable( 'now', $utc ) <= $expiresAt;
 	}
 
 	private static function forbidden(): \WP_Error {

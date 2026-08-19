@@ -110,14 +110,46 @@ final class SettingsCorruptOptionTest extends ReservantTestCase {
 
 		self::assertSame(
 			array(
-				'currency'           => 'EUR',
-				'checkout_ttl_min'   => 15,
-				'approval_ttl_hours' => 48,
-				'payment_ttl_hours'  => 24,
-				'purge_on_uninstall' => false,
+				'currency'            => 'EUR',
+				'checkout_ttl_min'    => 15,
+				'approval_ttl_hours'  => 48,
+				'payment_ttl_hours'   => 24,
+				'purge_on_uninstall'  => false,
+				'reminder_lead_hours' => 24,
+				'emails_off'          => array(),
 			),
 			Settings::make()->toArray()
 		);
+	}
+
+	/**
+	 * The lenient read has to be lenient about the two new shapes too, and for the same reason: a
+	 * corrupt row must still leave the settings screen loadable, since that screen is the only way
+	 * to write a good value back.
+	 */
+	public function testAJunkReminderLeadTimeFallsBackToTheDefault(): void {
+		$this->storeRaw( array( 'reminder_lead_hours' => -5 ) );
+		self::assertSame( 24, Settings::make()->reminderLeadHours() );
+
+		$this->storeRaw( array( 'reminder_lead_hours' => 'soon' ) );
+		self::assertSame( 24, Settings::make()->reminderLeadHours() );
+	}
+
+	public function testAnEmailsOffListDropsWhateverDoesNotNameARealEmail(): void {
+		$this->storeRaw(
+			array(
+				'emails_off' => array( 'booking_reminder', 'no_such_email', 42, 'booking_reminder' ),
+			)
+		);
+
+		// The known key survives; the typo, the non-string and the duplicate do not. Keeping an
+		// unknown key would let the list grow into a record of nothing.
+		self::assertSame( array( 'booking_reminder' ), Settings::make()->emailsOff() );
+	}
+
+	public function testAScalarEmailsOffYieldsAnEmptyList(): void {
+		$this->storeRaw( array( 'emails_off' => 'booking_reminder' ) );
+		self::assertSame( array(), Settings::make()->emailsOff() );
 	}
 
 	public function testUnknownKeysAreDropped(): void {
@@ -129,7 +161,7 @@ final class SettingsCorruptOptionTest extends ReservantTestCase {
 		);
 
 		self::assertSame(
-			array( 'currency', 'checkout_ttl_min', 'approval_ttl_hours', 'payment_ttl_hours', 'purge_on_uninstall' ),
+			array( 'currency', 'checkout_ttl_min', 'approval_ttl_hours', 'payment_ttl_hours', 'purge_on_uninstall', 'reminder_lead_hours', 'emails_off' ),
 			array_keys( Settings::make()->toArray() )
 		);
 	}

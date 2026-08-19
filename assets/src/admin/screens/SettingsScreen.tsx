@@ -2,6 +2,7 @@ import { useEffect, useState } from '@wordpress/element';
 import { __ } from '@wordpress/i18n';
 import { Button, CheckboxControl, Notice, Spinner, TextControl } from '@wordpress/components';
 import { useSaveSettings, useSettings } from '../api/queries';
+import { bootConfig } from '../boot';
 import type { SettingsPayload } from '../api/types';
 import { useToasts } from '../components/Toasts';
 import { errorMessage } from '../../shared';
@@ -35,12 +36,38 @@ const PAYMENT_TTL_HELP = __(
 	'reservant'
 );
 
+/**
+ * Zero is a real answer for the reminder lead time and a malformed one for every TTL above it, so
+ * this field cannot share `isPositiveIntString`. `SettingsAdminController::nonNegIntOrThrow()` is
+ * the server side of the same rule.
+ */
+function isNonNegativeIntString( value: string ): boolean {
+	return /^[0-9]+$/.test( value.trim() );
+}
+
+const LEAD_ERROR = __( 'Must be zero or a positive whole number.', 'reservant' );
+
+const REMINDER_HELP = __(
+	'How long before the appointment a reminder is sent. Zero switches reminders off.',
+	'reservant'
+);
+
+/**
+ * Stored as an OFF list, and the checkbox reads the other way round - "send this" - because that is
+ * how an owner thinks about it. The inversion lives here and nowhere else: `Settings::emailsOff()`
+ * keeps the negative form so that an email added by a later release is on by default, which a
+ * stored ON list could not manage.
+ */
+const EMAILS_HELP = __( 'Uncheck a message to stop sending it.', 'reservant' );
+
 interface SettingsFormState {
 	currency: string;
 	checkoutTtlMin: string;
 	approvalTtlHours: string;
 	paymentTtlHours: string;
 	purgeOnUninstall: boolean;
+	reminderLeadHours: string;
+	emailsOff: string[];
 }
 
 function formFromSettings( settings: SettingsPayload ): SettingsFormState {
@@ -50,6 +77,8 @@ function formFromSettings( settings: SettingsPayload ): SettingsFormState {
 		approvalTtlHours: String( settings.approval_ttl_hours ),
 		paymentTtlHours: String( settings.payment_ttl_hours ),
 		purgeOnUninstall: settings.purge_on_uninstall,
+		reminderLeadHours: String( settings.reminder_lead_hours ),
+		emailsOff: settings.emails_off,
 	};
 }
 
@@ -67,15 +96,21 @@ function toPatch( form: SettingsFormState ): Partial< SettingsPayload > {
 		approval_ttl_hours: parseInt( form.approvalTtlHours, 10 ) || 0,
 		payment_ttl_hours: parseInt( form.paymentTtlHours, 10 ) || 0,
 		purge_on_uninstall: form.purgeOnUninstall,
+		// Not `|| 0`: zero is this field's own meaningful value, so the guard is `canSave` above
+		// refusing to submit anything that is not a whole number in the first place.
+		reminder_lead_hours: parseInt( form.reminderLeadHours, 10 ),
+		emails_off: form.emailsOff,
 	};
 }
 
 /**
  * The business settings screen (Task 16 brief): currency (a 3-letter uppercase input), the three
- * TTL fields, the uninstall-purge checkbox, and a save that reports through the shared toast queue
- * rather than an inline banner.
+ * TTL fields, the reminder lead time, one checkbox per message the plugin can send, the
+ * uninstall-purge checkbox, and a save that reports through the shared toast queue rather than an
+ * inline banner.
  */
 export function SettingsScreen() {
+	const { emailChoices } = bootConfig();
 	const { addToast } = useToasts();
 	const settingsQuery = useSettings();
 	const saveSettings = useSaveSettings();
@@ -112,7 +147,8 @@ export function SettingsScreen() {
 	const approvalValid = null !== form && isPositiveIntString( form.approvalTtlHours );
 	const paymentValid = null !== form && isPositiveIntString( form.paymentTtlHours );
 	const currencyValid = null !== form && /^[A-Za-z]{3}$/.test( form.currency.trim() );
-	const canSave = currencyValid && checkoutValid && approvalValid && paymentValid;
+	const reminderValid = null !== form && isNonNegativeIntString( form.reminderLeadHours );
+	const canSave = currencyValid && checkoutValid && approvalValid && paymentValid && reminderValid;
 
 	return (
 		<div className="reservant-settings-screen">
@@ -164,6 +200,37 @@ export function SettingsScreen() {
 						value={ form.paymentTtlHours }
 						onChange={ ( value ) => patchForm( { paymentTtlHours: value } ) }
 					/>
+					<TextControl
+						__next40pxDefaultSize
+						__nextHasNoMarginBottom
+						type="number"
+						min={ 0 }
+						label={ __( 'Reminder lead time (hours)', 'reservant' ) }
+						help={ reminderValid ? REMINDER_HELP : LEAD_ERROR }
+						value={ form.reminderLeadHours }
+						onChange={ ( value ) => patchForm( { reminderLeadHours: value } ) }
+					/>
+
+					<fieldset className="reservant-settings-emails">
+						<legend>{ __( 'Emails', 'reservant' ) }</legend>
+						<p>{ EMAILS_HELP }</p>
+						{ emailChoices.map( ( choice ) => (
+							<CheckboxControl
+								__nextHasNoMarginBottom
+								key={ choice.key }
+								label={ choice.label }
+								checked={ ! form.emailsOff.includes( choice.key ) }
+								onChange={ ( on ) =>
+									patchForm( {
+										emailsOff: on
+											? form.emailsOff.filter( ( key ) => key !== choice.key )
+											: [ ...form.emailsOff, choice.key ],
+									} )
+								}
+							/>
+						) ) }
+					</fieldset>
+
 					<CheckboxControl
 						__nextHasNoMarginBottom
 						label={ __( 'Purge all data on uninstall', 'reservant' ) }
