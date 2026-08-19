@@ -27,7 +27,24 @@ abstract class ReservantTestCase extends \WP_UnitTestCase {
 		delete_option( 'reservant_settings' );
 		self::clearRateLimiter();
 		self::silenceMailTransport();
+		// The provider is memoized per request; a test that installs a fake must not leak it into
+		// the next one, and - just as important - WooCommerce IS active in this container, so a
+		// class that never touches payments still needs the memo cleared or it inherits whichever
+		// provider ran last.
+		\Reservant\Application\Payment\Providers::reset();
 		$this->resetRewriteAndTheme();
+	}
+
+	/**
+	 * Install a `PaymentProvider` for this test and return it.
+	 *
+	 * The filter is the documented extension point (`reservant/payment_provider`), so a test that
+	 * uses this is exercising the same seam a site would - not a back door.
+	 */
+	protected function usePaymentProvider( \Reservant\Application\Payment\PaymentProvider $provider ): \Reservant\Application\Payment\PaymentProvider {
+		\Reservant\Application\Payment\Providers::reset();
+		add_filter( 'reservant/payment_provider', static fn () => $provider, 10, 1 );
+		return $provider;
 	}
 
 	/**

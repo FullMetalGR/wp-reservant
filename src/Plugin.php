@@ -125,6 +125,9 @@ final class Plugin {
 		if ( is_admin() ) {
 			( new Admin\AdminPage() )->register();
 			( new Admin\ApprovalActionEndpoint() )->register();
+			// Admin-only on purpose: it is a message TO the owner, and the degrade it reports is
+			// already handled silently and correctly on the front end by `ConfirmBooking`.
+			( new Admin\PaymentNotice() )->register();
 		}
 
 		// The mount-point renderer wraps an Assets instance so that rendering a mount point can

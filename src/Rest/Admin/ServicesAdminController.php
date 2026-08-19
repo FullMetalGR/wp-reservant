@@ -3,6 +3,7 @@ declare( strict_types=1 );
 
 namespace Reservant\Rest\Admin;
 
+use Reservant\Application\Payment\Providers;
 use Reservant\Domain\Enum\PaymentMode;
 use Reservant\Domain\Enum\ServiceType;
 use Reservant\Infrastructure\Db\ResourceRepository;
@@ -99,7 +100,40 @@ final class ServicesAdminController {
 
 		$repo = new ServiceRepository( $this->db );
 		$id   = $repo->insert( $patch );
+		$this->mirror( $repo, $id );
 		return new \WP_REST_Response( self::present( (array) $repo->find( $id ) ), 201 );
+	}
+
+	/**
+	 * Resync the payment provider's mirror of this service and store whatever id it reports
+	 * (AGENTS.md section 6: "resynced on save").
+	 *
+	 * Runs AFTER the row is written, on the freshly-read record, so the mirror is built from what
+	 * was actually stored rather than from the patch - a partial PUT that changes only the price
+	 * still needs the name, and the effective record is the only thing that has both.
+	 *
+	 * **A mirror failure must never fail the save.** The service row is already committed by the time
+	 * this runs, so throwing would answer 500 for an edit that succeeded and invite a retry that
+	 * changes nothing. It is reported on `reservant/error` and left for the next save (or the
+	 * provider's own repair) to fix - the same post-commit reasoning `Notifications\Mailer` and
+	 * `AuditLog::recordAfterCommit()` are built on.
+	 */
+	private function mirror( ServiceRepository $repo, int $id ): void {
+		$service = $repo->find( $id );
+		if ( null === $service ) {
+			return;
+		}
+		try {
+			$productId = Providers::get()->syncService( $service );
+		} catch ( \Throwable $e ) {
+			do_action( 'reservant/error', $e );
+			return;
+		}
+		if ( (int) ( $service['wc_product_id'] ?? 0 ) !== (int) $productId ) {
+			// `wc_product_id` is outside FIELDS - the bridge owns it, not the caller - so this is
+			// the one write in this controller that does not come from a request parameter.
+			$repo->update( $id, array( 'wc_product_id' => $productId ) );
+		}
 	}
 
 	/** PUT /admin/services/{id} - a partial patch; only the given fields change. */
@@ -131,6 +165,7 @@ final class ServicesAdminController {
 		if ( array() !== $patch ) {
 			$repo->update( $id, $patch );
 		}
+		$this->mirror( $repo, $id );
 		return new \WP_REST_Response( self::present( (array) $repo->find( $id ) ) );
 	}
 

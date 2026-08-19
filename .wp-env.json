@@ -1,7 +1,12 @@
 {
   "phpVersion": "8.1",
-  "plugins": [ "." ],
-  "config": { "WP_DEBUG": true },
+  "plugins": [
+    ".",
+    "https://downloads.wordpress.org/plugin/woocommerce.11.0.1.zip"
+  ],
+  "config": {
+    "WP_DEBUG": true
+  },
   "lifecycleScripts": {
     "afterStart": "npx wp-env run cli wp rewrite structure '/%postname%/' --hard"
   }

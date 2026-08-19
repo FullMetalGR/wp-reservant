@@ -59,7 +59,15 @@ final class ConfirmBooking {
 		if ( BookingStatus::Pending !== $from ) {
 			throw new \RuntimeException( BookingStatus::AwaitingApproval === $from ? 'approval_required' : 'not_confirmable' );
 		}
-		if ( PaymentMode::Online->value === $booking['payment_mode'] && ! apply_filters( 'reservant/allow_direct_confirm', false, $booking ) ) {
+		// `isAvailable()` FIRST, and it is the degrade-to-onsite rule of AGENTS.md section 6 rather
+		// than an optimisation: with no payment provider - WooCommerce never installed, or
+		// deactivated yesterday - refusing here would strand every `online` booking on a site where
+		// no order could ever be created to satisfy the refusal. The owner is told once by
+		// `Admin\PaymentNotice` and takes the money in person; the alternative is a booking form
+		// that answers 402 forever and looks broken.
+		if ( PaymentMode::Online->value === $booking['payment_mode']
+			&& Payment\Providers::get()->isAvailable()
+			&& ! apply_filters( 'reservant/allow_direct_confirm', false, $booking ) ) {
 			throw new \RuntimeException( 'online_payment_required' );
 		}
 		// The hold TTL is the authority: a checkout that outlives it loses the slot (section 6).
