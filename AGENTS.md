@@ -111,6 +111,15 @@ Rules that are not optional:
 - The availability endpoint is advisory. It may return a slot that is gone 200ms later. The hold
   endpoint is the only authority, and `409 Conflict` is a normal, expected response.
 
+The block above is the HOLD (insert) shape. The four guarded **state transitions** - cancel,
+approve, reject, expire - run the same protocol with a compare-and-set in place of the insert, and
+share one implementation in `Application\GuardedWrite`: mutex rows outside the transaction, lock in
+sorted order, re-read under the mutex, guard, compare-and-set on the status read there, release seat
+claims where the target status frees them, bump `rev`, audit, commit, and only then fire the hook.
+A new transition of that shape goes through it rather than transcribing the sequence again;
+`HoldBooking` (insert plus nested reap) and `RescheduleBooking` (delete-then-insert behind a key-set
+guard) are different acts and stay outside it.
+
 This protocol gets tests before it gets a UI. Concurrency tests - parallel holds on one slot,
 parallel chains in opposing lock order, parallel claims on one seat - are mandatory and may not
 be skipped in CI.
@@ -198,6 +207,7 @@ reservant/
 |   |   +-- Enum/              # BookingStatus, ServiceType, PaymentMode, HoldClass
 |   +-- Application/           # use cases: HoldBooking, ConfirmBooking, ApproveBooking,
 |   |                          #   RejectBooking, CancelBooking, RescheduleBooking, ExpireHolds
+|   |                          #   GuardedWrite: the shared section-2.2 state transition
 |   +-- Infrastructure/
 |   |   +-- Db/                # Repositories, Schema, Migrations, LockManager, TransactionRunner
 |   |   +-- Scheduler/         # Action Scheduler wrapper

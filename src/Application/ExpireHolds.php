@@ -3,14 +3,9 @@ declare( strict_types=1 );
 
 namespace Reservant\Application;
 
-use Reservant\Application\Dto\BookingSnapshot;
 use Reservant\Domain\Enum\BookingStatus;
-use Reservant\Infrastructure\Db\AuditLog;
 use Reservant\Infrastructure\Db\BookingRepository;
 use Reservant\Infrastructure\Db\LockKey;
-use Reservant\Infrastructure\Db\LockManager;
-use Reservant\Infrastructure\Db\ResourceDayRepository;
-use Reservant\Infrastructure\Db\TransactionRunner;
 
 /**
  * The hold sweeper. Correctness never depends on it having run (AGENTS.md section 2.1): expired holds
@@ -20,21 +15,12 @@ use Reservant\Infrastructure\Db\TransactionRunner;
 final class ExpireHolds {
 
 	public function __construct(
-		private readonly TransactionRunner $txn,
-		private readonly LockManager $locks,
-		private readonly ResourceDayRepository $resourceDays,
+		private readonly GuardedWrite $guarded,
 		private readonly BookingRepository $bookings,
-		private readonly AuditLog $audit,
 	) {}
 
 	public static function make( \wpdb $db ): self {
-		return new self(
-			new TransactionRunner( $db ),
-			new LockManager( $db ),
-			new ResourceDayRepository( $db ),
-			new BookingRepository( $db ),
-			new AuditLog( $db )
-		);
+		return new self( GuardedWrite::make( $db ), new BookingRepository( $db ) );
 	}
 
 	/**
@@ -127,45 +113,37 @@ final class ExpireHolds {
 		}
 		/** @var list<array<string, mixed>> $items */
 		$items = $booking['items'];
-		$keys  = LockKey::forItems( $items );
-		$this->resourceDays->ensure( $keys );
 
-		$snapshot = $this->txn->run( fn (): ?array => $this->expire( $keys, $uuid ) );
-		if ( null !== $snapshot ) {
-			do_action( 'reservant/hold/expired', BookingSnapshot::fromArray( $snapshot ) );
-		}
-		return $snapshot;
-	}
-
-	/**
-	 * Re-read and re-check under the lock - the row may have been confirmed or cancelled
-	 * between the batch query and here.
-	 *
-	 * @param list<\Reservant\Infrastructure\Db\LockKey> $keys
-	 * @return array<string, mixed>|null
-	 */
-	private function expire( array $keys, string $uuid ): ?array {
-		$this->locks->acquire( $keys );
-		$fresh = $this->bookings->findByUuid( $uuid );
-		if ( null === $fresh ) {
+		// The `null` half of this class's contract, and the reason `TransitionRefused` is its own
+		// type. Every refusal below - the row gone, no longer held, not actually lapsed yet, or the
+		// compare-and-set losing to a rival - is a benign "somebody else already decided this one",
+		// which is the sweeper's ordinary path rather than an error. Catching the narrow type keeps
+		// that conversion from also swallowing `lock_unavailable`, which `run()` handles under its
+		// own deliberately narrower rule, or a genuine bug in a post-commit listener.
+		try {
+			return $this->guarded->transition(
+				LockKey::forItems( $items ),
+				$uuid,
+				BookingStatus::Expired,
+				static function ( array $fresh, BookingStatus $from ): void {
+					if ( ! $from->isHeld() ) {
+						throw new TransitionRefused( 'stale_state' );
+					}
+					if ( null === $fresh['hold_expires_at'] || (string) $fresh['hold_expires_at'] > gmdate( 'Y-m-d H:i:s' ) ) {
+						throw new TransitionRefused( 'stale_state' );
+					}
+				},
+				'stale_state',
+				'system',
+				'expired',
+				'reservant/hold/expired',
+				array(),
+				// Plain re-read, as this sweeper has always done - see `GuardedWrite`'s docblock on
+				// why the locking/non-locking split is preserved rather than unified.
+				false
+			);
+		} catch ( TransitionRefused ) {
 			return null;
 		}
-		$from = BookingStatus::from( (string) $fresh['status'] );
-		if ( ! $from->isHeld() ) {
-			return null;
-		}
-		if ( null === $fresh['hold_expires_at'] || (string) $fresh['hold_expires_at'] > gmdate( 'Y-m-d H:i:s' ) ) {
-			return null;
-		}
-		if ( ! $this->bookings->transition( (int) $fresh['id'], $from, BookingStatus::Expired ) ) {
-			return null;
-		}
-		$this->bookings->releaseSeatClaims( (int) $fresh['id'] );
-		$this->resourceDays->bumpRev( $keys );
-		$this->audit->record( (int) $fresh['id'], 'system', 'expired' );
-
-		/** @var array<string, mixed> $stored */
-		$stored = $this->bookings->findByUuid( $uuid );
-		return $stored;
 	}
 }

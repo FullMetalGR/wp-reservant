@@ -711,4 +711,33 @@ final class GuardedWritesTest extends ReservantTestCase {
 		self::assertSame( 'lock_unavailable', $refusal, 'a pre-commit audit write must still abort the change it was recording' );
 		self::assertSame( 'confirmed', ( new BookingRepository( $wpdb ) )->findByUuid( (string) $booking['uuid'] )['status'] );
 	}
+
+	/**
+	 * `GuardedWrite` re-runs `ResourceDayRepository::ensure()` before opening its transaction, even
+	 * though the hold that created the booking already made those mutex rows. That looks redundant
+	 * and is not: `LockManager::acquire()` refuses `lock_unavailable` when a resource-day key has no
+	 * row to lock (SELECT ... FOR UPDATE cannot lock a row that is not there, AGENTS.md section
+	 * 2.2), so a booking whose mutex rows have gone would become permanently uncancellable rather
+	 * than merely unlocked.
+	 *
+	 * Deleting the rows is the only way to reach that state today, which is exactly why the step was
+	 * invisible: removing the `ensure()` call broke no test in the suite. It is defensive, it is one
+	 * upsert, and this pins it so a later reader cannot see it as dead weight and drop it.
+	 */
+	public function test_a_transition_recreates_mutex_rows_that_have_gone_missing(): void {
+		global $wpdb;
+		$booking = $this->holdAppointment( '10:00' );
+		ConfirmBooking::make( $wpdb )->execute( (string) $booking['uuid'], $this->utc( 0, '00:05' ) );
+
+		$deleted = $wpdb->query( "DELETE FROM {$wpdb->prefix}reservant_resource_days" ); // phpcs:ignore WordPress.DB.PreparedSQL, WordPress.DB.DirectDatabaseQuery
+		self::assertGreaterThan( 0, $deleted, 'the fixture must have had mutex rows to remove' );
+
+		$cancelled = CancelBooking::make( $wpdb )->execute( (string) $booking['uuid'], $this->utc( 0, '00:06' ), true );
+		self::assertSame( 'cancelled', $cancelled['status'] );
+		self::assertGreaterThan(
+			0,
+			(int) $wpdb->get_var( "SELECT COUNT(*) FROM {$wpdb->prefix}reservant_resource_days" ), // phpcs:ignore WordPress.DB.PreparedSQL, WordPress.DB.DirectDatabaseQuery
+			'the transition must have recreated the mutex row it needed'
+		);
+	}
 }

@@ -50,4 +50,34 @@ final class BookingStatusTest extends TestCase {
 		self::assertSame( HoldClass::Payment, HoldClass::forStatus( BookingStatus::AwaitingPayment ) );
 		self::assertNull( HoldClass::forStatus( BookingStatus::Confirmed ) );
 	}
+
+	/**
+	 * `Application\GuardedWrite` derives the seat release from the target status rather than taking
+	 * a flag, so this predicate decides - for every transition in the codebase, including ones not
+	 * yet written - whether the seat goes back on sale. Asserted over ALL nine cases rather than the
+	 * three that are true, because the interesting half is what stays false.
+	 */
+	public function test_only_the_three_statuses_that_undo_a_booking_release_its_seat(): void {
+		$releasing = array( BookingStatus::Cancelled, BookingStatus::Rejected, BookingStatus::Expired );
+		foreach ( BookingStatus::cases() as $status ) {
+			self::assertSame(
+				in_array( $status, $releasing, true ),
+				$status->releasesSeatClaims(),
+				"releasesSeatClaims() disagrees for {$status->value}"
+			);
+		}
+	}
+
+	/**
+	 * The distinction the predicate exists to protect, spelled out because an `isTerminal()`-shaped
+	 * rewrite would pass every other assertion here: `completed` and `no_show` are exactly as
+	 * terminal as `cancelled`, and both must KEEP the seat. `MarkBookingOutcome` is the transition
+	 * that would silently start handing seats back on sale.
+	 */
+	public function test_a_booking_that_happened_keeps_its_seat_though_its_status_is_terminal(): void {
+		self::assertFalse( BookingStatus::Completed->releasesSeatClaims() );
+		self::assertFalse( BookingStatus::NoShow->releasesSeatClaims() );
+		self::assertFalse( BookingStatus::Confirmed->releasesSeatClaims() );
+		self::assertTrue( BookingStatus::Cancelled->releasesSeatClaims() );
+	}
 }

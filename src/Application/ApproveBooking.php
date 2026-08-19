@@ -3,14 +3,9 @@ declare( strict_types=1 );
 
 namespace Reservant\Application;
 
-use Reservant\Application\Dto\BookingSnapshot;
 use Reservant\Domain\Enum\BookingStatus;
-use Reservant\Infrastructure\Db\AuditLog;
 use Reservant\Infrastructure\Db\BookingRepository;
 use Reservant\Infrastructure\Db\LockKey;
-use Reservant\Infrastructure\Db\LockManager;
-use Reservant\Infrastructure\Db\ResourceDayRepository;
-use Reservant\Infrastructure\Db\TransactionRunner;
 
 /**
  * Owner approval of a booking that required it (AGENTS.md "Approval queue"). Free/onsite only:
@@ -47,9 +42,15 @@ use Reservant\Infrastructure\Db\TransactionRunner;
  *    settles - and it would make a human approval both more expensive and, if the exclusion were
  *    ever wrong, capable of failing where today it cannot.
  *
- * `bumpRev()` for the same reason `CancelBooking` and `ExpireHolds` call it: on the timeout path a
- * lapsed hold is not in the free/busy mask and a confirmed booking is, so the mask cache key
- * (`reservant_resource_days.rev`, AGENTS.md section 2.4 step 6) must move.
+ * `GuardedWrite` bumps `rev` on every transition it runs, and this use case needs it for a reason
+ * worth keeping written down: on the timeout path a lapsed hold is not in the free/busy mask and a
+ * confirmed booking is, so the mask cache key (`reservant_resource_days.rev`, AGENTS.md section 2.4
+ * step 6) must move.
+ *
+ * This is also the one of the four transitions that does NOT release its seat claims - the booking
+ * is going ahead. `GuardedWrite` derives that from the target status
+ * (`BookingStatus::releasesSeatClaims()`) rather than taking a flag, so approving cannot acquire the
+ * slot and hand the seat back in the same statement.
  *
  * What the lock covers, and what it does not: it serialises this use case against every other
  * writer that also takes the same resource-day/occurrence mutex - `HoldBooking`, `CancelBooking`,
@@ -65,26 +66,18 @@ use Reservant\Infrastructure\Db\TransactionRunner;
  * not a regression this class introduces; just not a case the lock reaches.
  *
  * Lock order is the codebase-wide one and must stay so: resource_days/occurrences via
- * `LockManager::acquire()` FIRST, the bookings row (`findByUuidForUpdate()`) after.
+ * `LockManager::acquire()` FIRST, the bookings row (`findByUuidForUpdate()`) after. `GuardedWrite`
+ * owns that order now, for all four transitions rather than this one alone.
  */
 final class ApproveBooking {
 
 	public function __construct(
-		private readonly TransactionRunner $txn,
-		private readonly LockManager $locks,
-		private readonly ResourceDayRepository $resourceDays,
+		private readonly GuardedWrite $guarded,
 		private readonly BookingRepository $bookings,
-		private readonly AuditLog $audit,
 	) {}
 
 	public static function make( \wpdb $db ): self {
-		return new self(
-			new TransactionRunner( $db ),
-			new LockManager( $db ),
-			new ResourceDayRepository( $db ),
-			new BookingRepository( $db ),
-			new AuditLog( $db )
-		);
+		return new self( GuardedWrite::make( $db ), new BookingRepository( $db ) );
 	}
 
 	/**
@@ -109,47 +102,30 @@ final class ApproveBooking {
 
 		/** @var list<array<string, mixed>> $items */
 		$items = $booking['items'];
-		$keys  = LockKey::forItems( $items );
-		// Mutex rows must exist before the transaction opens - SELECT ... FOR UPDATE cannot lock a
-		// row that is not there (AGENTS.md section 2.2).
-		$this->resourceDays->ensure( $keys );
 
-		$snapshot = $this->txn->run(
-			function () use ( $keys, $uuid, $nowUtc, $actor, $actorUserId ): array {
-				// The slot mutexes FIRST, the booking row after - the codebase-wide lock order.
-				$this->locks->acquire( $keys );
-
-				// Re-read under FOR UPDATE: a lapsed hold or a rival decision (reject/cancel) may
-				// have landed between the unlocked read above and this transaction opening, and the
-				// row this one acts on is the one read here.
-				$fresh = $this->bookings->findByUuidForUpdate( $uuid );
-				if ( null === $fresh ) {
-					throw new \RuntimeException( 'stale_state' );
-				}
+		return $this->guarded->transition(
+			LockKey::forItems( $items ),
+			$uuid,
+			BookingStatus::Confirmed,
+			// Re-read under FOR UPDATE and re-decided: a lapsed hold or a rival decision
+			// (reject/cancel) may have landed between the unlocked read above and the transaction
+			// opening, and the row this acts on is the one read there.
+			static function ( array $fresh ) use ( $nowUtc ): void {
 				if ( ! self::approvable( $fresh, $nowUtc ) ) {
-					throw new \RuntimeException( 'not_approvable' );
+					throw new TransitionRefused( 'not_approvable' );
 				}
-
-				$extra = array(
-					'hold_class'      => null,
-					'hold_expires_at' => null,
-					'approved_at'     => $nowUtc->format( 'Y-m-d H:i:s' ),
-					'approved_by'     => $actorUserId,
-				);
-				if ( ! $this->bookings->transition( (int) $fresh['id'], BookingStatus::AwaitingApproval, BookingStatus::Confirmed, $extra ) ) {
-					throw new \RuntimeException( 'not_approvable' );
-				}
-				$this->resourceDays->bumpRev( $keys );
-				$this->audit->record( (int) $fresh['id'], $actor, 'approve' );
-
-				/** @var array<string, mixed> $stored */
-				$stored = $this->bookings->findByUuid( $uuid );
-				return $stored;
-			}
+			},
+			'not_approvable',
+			$actor,
+			'approve',
+			'reservant/booking/approved',
+			array(
+				'hold_class'      => null,
+				'hold_expires_at' => null,
+				'approved_at'     => $nowUtc->format( 'Y-m-d H:i:s' ),
+				'approved_by'     => $actorUserId,
+			)
 		);
-
-		do_action( 'reservant/booking/approved', BookingSnapshot::fromArray( $snapshot ) );
-		return $snapshot;
 	}
 
 	/**
