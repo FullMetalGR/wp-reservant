@@ -1,3 +1,5 @@
+import type { LicenseStatus } from './api/types';
+
 /**
  * One switchable message: `Notifications\EmailCatalog::choices()`.
  *
@@ -18,6 +20,20 @@ export interface BootConfig {
   timezone: string;
   granularityMin: number;
   emailChoices: EmailChoice[];
+  /**
+   * The site's license as `Rest\Admin\LicensePayload` renders it - the same shape
+   * `GET /admin/license` answers with, so the SPA parses one shape whether the status arrived with
+   * the page or came back from an activation.
+   *
+   * It rides in the bootstrap rather than being fetched because an unlicensed owner should not
+   * watch the Settings screen render once wrongly and then correct itself.
+   *
+   * `null` means "not known right now", NOT "unlicensed": `Admin\AdminPage::license()` answers null
+   * both for a caller without `reservant_manage_settings` (a staff-only viewer, who has nothing to
+   * act on) and for a `reservant/license_manager` implementation that threw. A screen that needs the
+   * answer falls back to `GET /admin/license`; a screen that does not, ignores it.
+   */
+  license: LicenseStatus | null;
 }
 
 declare global {

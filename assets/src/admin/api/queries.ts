@@ -18,6 +18,7 @@ import type {
 	BookingListResponse,
 	BookingSummary,
 	CalendarResponse,
+	LicenseStatus,
 	ManualBookingRequest,
 	ManualBookingSegment,
 	Occurrence,
@@ -383,6 +384,68 @@ export function useSaveSettings(): UseMutationResult< SettingsPayload, Error, Pa
 			apiFetch< SettingsPayload >( '/admin/settings', { method: 'PUT', body: JSON.stringify( patch ) } ),
 		onSuccess: () => {
 			void queryClient.invalidateQueries( { queryKey: [ 'settings' ] } );
+		},
+	} );
+}
+
+/**
+ * `GET /admin/license` - the FALLBACK read, not the primary one.
+ *
+ * The admin bootstrap already carries the license (`boot.ts`'s `license`), so the Settings screen
+ * draws itself with no round trip at all; this exists for the case that bootstrap value is `null`,
+ * which means "not known right now" rather than "unlicensed" (a `reservant/license_manager` that
+ * threw while the page rendered). Hence `enabled` rather than an unconditional fetch: an owner
+ * whose bootstrap answered must not pay for a request whose answer they already have.
+ *
+ * There is no license-gate on this route by design - it is the way back for a lapsed site
+ * (`Rest\Admin\LicenseAdminController`) - so it answers whatever the site's state.
+ */
+export function useLicense( enabled: boolean ): UseQueryResult< LicenseStatus, Error > {
+	return useQuery( {
+		queryKey: [ 'license' ],
+		queryFn: () => apiFetch< LicenseStatus >( '/admin/license' ),
+		enabled,
+	} );
+}
+
+/**
+ * `POST /admin/license` - bind a key to this site.
+ *
+ * **A 200 here is not an activation.** A key the validator refuses comes back 200 with
+ * `state: 'invalid'`, and an EMPTY key comes back 200 with whatever was already stored (a
+ * documented no-op, so a blank field posted by accident cannot cost a site the license it paid
+ * for - `Licensing\LicenseManager::activate()`). The caller must read `active`/`state` off the
+ * answer to know what happened; `onSuccess` here means only that the request completed.
+ *
+ * The answer is written straight into the cache rather than invalidated, which is the one place
+ * this diverges from every other mutation on this file. Every `LicenseManager` method returns the
+ * resulting status for the express purpose that no caller writes and then reads back - the two
+ * halves of that pair are exactly where an implementation gets to disagree with itself - so
+ * refetching what we were just told would reintroduce the round trip the contract exists to remove.
+ */
+export function useActivateLicense(): UseMutationResult< LicenseStatus, Error, string > {
+	const queryClient = useQueryClient();
+	return useMutation( {
+		mutationFn: ( key: string ) =>
+			apiFetch< LicenseStatus >( '/admin/license', { method: 'POST', body: JSON.stringify( { key } ) } ),
+		onSuccess: ( status ) => {
+			queryClient.setQueryData( [ 'license' ], status );
+		},
+	} );
+}
+
+/**
+ * `DELETE /admin/license` - unbind this site so the seat can be used somewhere else.
+ *
+ * Always 200 and always `inactive` (`LicenseManager::deactivate()`): "stop claiming to be licensed"
+ * has no failure mode worth reporting. Same cache write as the activation, for the same reason.
+ */
+export function useDeactivateLicense(): UseMutationResult< LicenseStatus, Error, void > {
+	const queryClient = useQueryClient();
+	return useMutation( {
+		mutationFn: () => apiFetch< LicenseStatus >( '/admin/license', { method: 'DELETE' } ),
+		onSuccess: ( status ) => {
+			queryClient.setQueryData( [ 'license' ], status );
 		},
 	} );
 }
