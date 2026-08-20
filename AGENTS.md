@@ -208,6 +208,7 @@ reservant/
 |   +-- Application/           # use cases: HoldBooking, ConfirmBooking, ApproveBooking,
 |   |                          #   RejectBooking, CancelBooking, RescheduleBooking, ExpireHolds
 |   |                          #   GuardedWrite: the shared section-2.2 state transition
+|   |   +-- Payment/           # PaymentProvider seam, NullPaymentProvider, Providers (resolution)
 |   +-- Infrastructure/
 |   |   +-- Db/                # Repositories, Schema, Migrations, LockManager, TransactionRunner
 |   |   +-- Scheduler/         # Action Scheduler wrapper
@@ -272,7 +273,7 @@ Migrations are versioned and run through `Infrastructure/Db/Migrations` on activ
 | `GET /services`, `GET /services/{id}` | public |
 | `GET /availability` | the query string describes the **whole chain**: `items` (a JSON list of `{service_id, resource_id\|null}`), `from`, `to`, optional `same_staff` and `tz`. Appointments answer the start times for which a complete valid chain exists; an EVENT service answers its occurrences with remaining places instead. Advisory either way. |
 | `GET /occurrences/{id}/seats` | seat grid + which seats are currently blocking |
-| `POST /holds` | takes `items[]` (with optional `seat_ids`), creates the container + items under lock. Returns the booking (`uuid`, `status`, `hold_expires_at`, items) plus `manage_token` - the guest's only credential, shown exactly once, in a `no-store` response. `409` names the failing segment. **Rate-limited.** |
+| `POST /holds` | takes `items[]` (with optional `seat_ids`), creates the container + items under lock. Returns the booking (`uuid`, `status`, `hold_expires_at`, items) plus `manage_token` - the guest's only credential, shown exactly once, in a `no-store` response - and, for a hold that cannot be confirmed until it is paid, `checkout_url`: the section 6 entry link, built from that same once-shown token because this is the only moment it exists. `409` names the failing segment. **Rate-limited.** |
 | `DELETE /holds/{uuid}` | releases immediately; requires `token` |
 | `POST /bookings/{uuid}/confirm` | free / pay-on-site path; `token` or `reservant_manage_bookings` |
 | `GET /bookings/{uuid}` | guest self-service read, requires `token` (or `reservant_manage_bookings`) |
@@ -280,7 +281,7 @@ Migrations are versioned and run through `Infrastructure/Db/Migrations` on activ
 | `GET /admin/bookings` | search/list; `reservant_manage_bookings` |
 | `POST /admin/bookings` | the owner's manual booking - lands on `confirmed` directly, never a hold; `reservant_manage_bookings` |
 | `GET /admin/bookings/{uuid}` | detail plus the audit trail; `reservant_manage_bookings` |
-| `POST /admin/bookings/{uuid}/approve` , `/reject` | `reservant_approve_bookings` alone is enough - a staff member without `reservant_manage_bookings` is scoped to bookings with an item on their own resource. Approve lands the booking on `confirmed` unconditionally: the approve -> `awaiting_payment` -> payment-link step for a paid service is the WooCommerce bridge's job (section 6), and it is not built yet - see P7 in section 9 |
+| `POST /admin/bookings/{uuid}/approve` , `/reject` | `reservant_approve_bookings` alone is enough - a staff member without `reservant_manage_bookings` is scoped to bookings with an item on their own resource. Approve lands the booking on `confirmed` for a free/onsite service - and for an `online` one with no provider able to take money (the section 6 degrade). An `online` service with a live provider lands on `awaiting_payment` instead: the WC order is created after the transition commits, the customer is emailed the payment link, and the slot stays held for `payment_ttl_hours`, after which the ordinary hold sweeper reclaims it |
 | `POST /admin/bookings/{uuid}/cancel` , `/no_show` , `/complete` | manager overrides; `reservant_manage_bookings` |
 | `GET /admin/calendar` | the week/day grid; `reservant_manage_bookings` or `reservant_view_own_calendar` |
 
@@ -325,23 +326,86 @@ acceptable on genuinely public reads.
 ## 6. WooCommerce bridge
 
 **No WC class, function, or constant may be referenced outside `src/Integrations/WooCommerce/`.**
-That namespace only loads when `class_exists( 'WooCommerce' )`. Everything else talks to
-`PaymentProvider`; with WC absent the null provider is used and `online` services degrade to
-`onsite` with an admin notice.
+That namespace only loads when `class_exists( 'WooCommerce' )`, and that call itself appears in
+exactly one place: `Application\Payment\Providers`, which decides who takes the money. Everything
+else - use cases, REST controllers, the admin - talks to the six methods of
+`Application\Payment\PaymentProvider` (`isAvailable`, `syncService`, `createOrder`, `paymentUrl`,
+`checkoutUrl`, `flagOrder`) and never learns whose order it holds. The resolved provider is filterable at
+`reservant/payment_provider`, which is how a site supplies its own gateway - and how the test suite
+reaches the WC-absent path on a machine where WooCommerce is installed.
 
-- Each service with `payment_mode=online` mirrors to a **virtual WC product** (`wc_product_id`).
-  Reservant's service is the price source of truth; the WC product is a mirror, resynced on save.
-- **One WC order per booking, one line item per booking item.** The order carries `booking_uuid`;
-  cart item meta carries it too.
-- Non-approval flow: hold -> cart -> order paid -> `ConfirmBooking`.
-- Approval flow: **no order exists until approval.** On approve, create the order and email
-  `$order->get_checkout_payment_url()`. The booking moves to `awaiting_payment` with its own TTL.
-- Order cancelled/failed/refunded, cart item removed, or any hold TTL elapsed -> release.
-- **The hold TTL is the authority, not the cart and not the payment link.** A cart or link that
-  outlives its hold loses the slot; checkout must re-validate under lock and fail loudly rather
-  than silently overbook.
-- Taxes, invoicing and refunds are WooCommerce's job. Cancellation flags the order for the owner;
-  the plugin never issues a refund by itself in v1.
+**Absence is a supported configuration, not an error.** `NullPaymentProvider` answers every method
+instead of throwing: `ConfirmBooking` stops refusing `online_payment_required`, `ApproveBooking`
+keeps landing approvals on `confirmed` rather than stranding them in a state nothing could ever
+pay for, and an `online` service behaves as `onsite` - the booking completes and the owner takes
+the money in person. Silent to the guest, loud to the owner: `Admin\PaymentNotice` warns in
+wp-admin whenever active `online` services exist and no provider does, because from the outside the
+degrade is indistinguishable from bookings that simply stopped being paid for.
+
+- **The service mirror.** Each service with `payment_mode=online` mirrors to a **virtual,
+  catalog-hidden WC product** (`services.wc_product_id`), rewritten by
+  `WooPaymentProvider::syncService()` on every save through `ServicesAdminController` - which owns
+  that column; no request may set it. Reservant's price is the source of truth and nothing is ever
+  read back out of the mirror. Virtual, so WooCommerce skips shipping and stock; hidden, because a
+  product page "Add to cart" would sell time nobody reserved. Leaving `online` mode **trashes** the
+  mirror rather than purging it - past orders still render their line items from the product - and
+  a product without `_reservant_service_id` is never touched, so a shop that reused the id keeps
+  it. A mirror failure never fails the save: it is reported on `reservant/error` and repaired by
+  the next save, or on demand when a cart line needs a product to hang on.
+- **One WC order per booking, one line item per booking item.** The order carries the booking uuid
+  (`_reservant_booking_uuid`), cart lines carry it too, and each order line names the
+  `booking_items` row it settles. Every line is priced from the BOOKING, never from the mirrored
+  product: the price was fixed when the hold was taken, and a service repriced since must not
+  silently reprice a total the customer already saw.
+- **Non-approval flow: hold -> cart -> order paid -> `ConfirmBooking`.** `CartBridge` boards a live
+  `pending` hold from the front-channel link `?reservant_checkout={uuid}&token={manage_token}` -
+  the guest's manage token is the credential here as everywhere else (section 5), and a missing
+  booking and a wrong token give the same answer, so the entry is no existence oracle. **The guest
+  gets that link from the `POST /holds` 201, as `checkout_url` beside the manage token**: the
+  plaintext credential exists only while `HoldBooking::execute()` runs, so no later read could
+  build it and no email covers the gap (`BookingEmails` deliberately says nothing about a
+  `checkout` hold). It appears for exactly the holds whose confirm would answer 402 -
+  `ConfirmBooking::requiresOnlinePayment()` is the one implementation of that question - and only
+  where the provider has somewhere to send them, which is `CartBridge::boardable()`'s ruling and
+  the same one the door itself enforces. The widget's review step then reads "Continue to payment"
+  and goes there rather than pressing a confirm it knows is refused. Boarding
+  empties the cart first (an order that also sold a shampoo would tie that shampoo's fate to the
+  booking's), re-asserts the booking's prices on every totals run, and refuses quantity edits.
+  Removing a booking line releases the whole booking and sweeps its siblings out of the cart -
+  cancellation granularity is the container (section 1), and half a chain must never reach
+  checkout.
+- **Approval flow: no order exists until approval.** On approve, `ApproveBooking` lands an `online`
+  booking on `awaiting_payment` with `hold_expires_at = now + payment_ttl_hours` in the same
+  compare-and-set, creates the order AFTER that commits, and fires `reservant/booking/payment_due`
+  with the pay-for-order URL, which `Notifications\ApprovalEmails` mails as `booking_payment_due`.
+  All of it post-commit and unfailable: an order that cannot be created is reported on
+  `reservant/error` and the payment TTL reclaims the seat - a committed approval never reports
+  failure. `awaiting_payment` is a held status (section 2.1) and is already selected by the hold
+  sweeper, so payment expiry needs no machinery of its own.
+- **Order status is the ear.** `OrderObserver` listens on `woocommerce_order_status_changed` and
+  nowhere else - every path money takes ends in a status change. Arrival at a paid status
+  (`wc_get_is_paid_statuses()`, so a shop that widened the definition is honoured) confirms the
+  booking; `cancelled`, `failed` or `refunded` releases it. A PARTIAL refund changes no status and
+  deliberately releases nothing: that is the owner compensating a customer whose booking still
+  stands. An order with no booking uuid on it is not ours and is ignored completely. Repeat
+  deliveries are normal and are told apart from real failures by re-reading the booking.
+- **The hold TTL is the authority, not the cart and not the payment link.** `CheckoutGuard`
+  re-validates under the section-2.2 locks at every door into payment: classic checkout
+  (`woocommerce_after_checkout_validation`), the Store API / block checkout
+  (`woocommerce_store_api_cart_errors`), and the emailed pay-for-order link
+  (`woocommerce_checkout_validate_order_before_payment`, `woocommerce_before_pay_action`, plus
+  `before_woocommerce_pay_form` for the courtesy display). A cart or link that outlived its hold is
+  refused before the gateway is reached. On the cart doors the guard also checks that the cart
+  still says what the booking says - every item present, at the quantity it boarded with - so a
+  tampered cart cannot pay for one seat and confirm three. It fails CLOSED: a check that cannot run
+  refuses the payment, while carts and orders carrying no booking of ours are never touched, so a
+  Reservant fault can never block a shop's ordinary sales.
+- **Nothing in this namespace may throw at WooCommerce.** Every handler fires mid-checkout, mid
+  webhook or mid order screen, outside any Reservant transaction; failures are caught, reported on
+  `reservant/error` with the booking uuid as context, and swallowed.
+- Taxes, invoicing and refunds are WooCommerce's job, and the plugin never issues a refund by
+  itself in v1. `PaymentProvider::flagOrder()` is the seam for leaving the owner a note on the
+  order (a note, deliberately not a refund); no cancellation path calls it yet.
 
 ---
 
@@ -363,6 +427,10 @@ That namespace only loads when `class_exists( 'WooCommerce' )`. Everything else 
   - `reservant/hold/expired` `( BookingSnapshot $booking )` - the reaped hold.
   - `reservant/approval/nag` `( BookingSnapshot $booking, int $percent )` - fired at 25/50/75%
     of the approval window (an ACTION; the P6 mailer listens here).
+  - `reservant/booking/payment_due` `( BookingSnapshot $booking, string $url )` - fired by
+    `ApproveBooking` after an `online` booking lands on `awaiting_payment` and its order exists;
+    `$url` is the provider's pay-for-order link (the `approval/nag` two-argument shape - the URL
+    is the provider's answer, not a column, so it cannot ride on the snapshot).
   - `reservant/error` `( \Throwable $e )`, at some sites plus a string context (booking uuid or
     mail key) - the diagnostics channel for swallowed failures.
   - Policy filters, both `( bool $allowed, array $booking, \DateTimeImmutable $nowUtc )` - the
@@ -431,6 +499,7 @@ That namespace only loads when `class_exists( 'WooCommerce' )`. Everything else 
 composer install && npm install
 npm run build                 # production build - REQUIRED before any suite that renders wp-admin
 npx wp-env start              # local WP + DB - REQUIRED before the integration, concurrency and e2e suites
+                              #   (it also installs WooCommerce, which the bridge suite exercises for real)
 npx playwright install chromium   # once, before the first e2e run
 
 npm run start                 # watch build (development)
@@ -486,12 +555,20 @@ UI, not data.
    `Notifications\Calendar` (the `.ics`), `Notifications\Reminders` (the timer),
    `Notifications\EmailCatalog` (the switchable list), and the hold-expiry sweeper, which was
    already built and is verified rather than rebuilt - see below.
-8. **P7** WooCommerce bridge.
+8. **P7** `[DONE]` WooCommerce bridge: the `Application\Payment\PaymentProvider` seam and the
+   null provider behind it (with WooCommerce absent an `online` service degrades to `onsite` and
+   `Admin\PaymentNotice` says so out loud), `Integrations\WooCommerce\WooPaymentProvider` (the
+   mirrored virtual product, the one order per booking), `CartBridge` (hold -> cart -> order),
+   `OrderObserver` (a paid order confirms, a dead one releases), `CheckoutGuard` (the hold
+   re-validated under lock at every door into payment), and the approval -> `awaiting_payment` ->
+   emailed payment link, whose window is `payment_ttl_hours` and whose expiry the existing hold
+   sweeper already reclaims.
 9. **P8** Licensing stub, packaging, docs.
 
 **v1.1 - approval queue.** Statuses and columns already exist. Adds the admin inbox, signed
-approve/reject links with a one-click confirm page, nag + timeout jobs, and the approval ->
-payment-link path in the bridge.
+approve/reject links with a one-click confirm page, and nag + timeout jobs. The approval ->
+`awaiting_payment` -> payment-link path is NOT among them: P7 built it, because an approval-gated
+`online` service that can never take money is not a shippable half.
 
 **v1.2 - assigned seats.** Seat picker in the widget. The admin builder is a **text spec**
 ("rows A-J, 12 per row, aisle after 6"), not a drag-and-drop canvas - identical data model, a
@@ -504,7 +581,12 @@ Ship v1.0 to one real salon and watch it run before starting v1.2.
 ## 10. Assumptions made without asking - correct if wrong
 
 - Single business location; site timezone is the business timezone.
-- Default TTLs: checkout 15 min, approval 48 h, payment link 24 h - all filterable per service.
+- Default TTLs: checkout 15 min, approval 48 h, payment link 24 h. Only the approval window is
+  per service: `services.approval_hold_hours`, with the site-wide `approval_ttl_hours` behind it.
+  Checkout is the site-wide `checkout_ttl_min` with a site-wide filter
+  (`reservant/hold_ttl_minutes`); the payment link is the site-wide `payment_ttl_hours` with
+  neither a filter nor a per-service column. Making either of those two per service is a product
+  decision nobody has taken.
 - Slot granularity defaults to 5 minutes; durations, buffers and processing times are rounded up
   to a multiple of it. Changing granularity after bookings exist is not supported.
 - `on_approval_timeout` defaults to `expire`; `auto_approve` is opt-in per service.

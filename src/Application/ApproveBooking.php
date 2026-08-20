@@ -3,14 +3,22 @@ declare( strict_types=1 );
 
 namespace Reservant\Application;
 
+use Reservant\Application\Dto\BookingSnapshot;
 use Reservant\Domain\Enum\BookingStatus;
+use Reservant\Domain\Enum\HoldClass;
+use Reservant\Domain\Enum\PaymentMode;
 use Reservant\Infrastructure\Db\BookingRepository;
 use Reservant\Infrastructure\Db\LockKey;
+use Reservant\Settings;
 
 /**
- * Owner approval of a booking that required it (AGENTS.md "Approval queue"). Free/onsite only:
- * the approve -> payment-link step for a paid service is the WooCommerce bridge's job, not this
- * use case's - it always lands the booking `confirmed`.
+ * Owner approval of a booking that required it (AGENTS.md "Approval queue"). Where the approval
+ * lands depends on whether there is money to collect (section 2.3): a free/onsite booking goes
+ * straight to `confirmed`, while an `online` booking with a provider able to take payment goes to
+ * `awaiting_payment` - the order is created and the guest is emailed the payment link, and the paid
+ * order confirms the booking through `Integrations\WooCommerce\OrderObserver`, never through this
+ * use case. With no provider available the same degrade rule as `ConfirmBooking`'s applies: the
+ * booking confirms rather than stranding the guest in a state nothing could ever pay for.
  *
  * Runs under the section-2.2 locks, the same ones a hold takes (`CancelBooking`'s shape). For a
  * HUMAN approval that looks like belt and braces: `approvable()` demands a hold that has not
@@ -36,7 +44,8 @@ use Reservant\Infrastructure\Db\LockKey;
  *    `expired` first, and `approvable()` here then refuses it as `not_approvable` (which
  *    `Jobs::timeout()` already swallows as the benign outcome it is). If the approval wins, the
  *    hold's snapshot is taken after this commit and its `overlapCount()`/`blockingSeatSum()` see a
- *    `confirmed` row, so it is refused `overlap`/`capacity`.
+ *    `confirmed` row (or a freshly re-armed `awaiting_payment` hold, equally blocking), so it is
+ *    refused `overlap`/`capacity`.
  *  - Re-validating instead would have to exclude the booking's own items from every count (a live
  *    approval hold blocks against itself), i.e. new repository surface for a case the lock already
  *    settles - and it would make a human approval both more expensive and, if the exclusion were
@@ -103,10 +112,22 @@ final class ApproveBooking {
 		/** @var list<array<string, mixed>> $items */
 		$items = $booking['items'];
 
-		return $this->guarded->transition(
+		// The landing is decided on the unlocked read, and that is safe where deciding the STATUS
+		// there would not be: `payment_mode` is fixed when the hold is inserted and no transition
+		// writes it, and the provider's availability is a property of the request, not the row.
+		// Everything a rival could have changed - the status itself - is re-decided by the guard
+		// under the lock. Landing on `awaiting_payment` re-arms the hold: `AwaitingPayment` is a
+		// held status (section 2.1), so the slot stays blocked while the payment-link window
+		// (`Settings::paymentTtlHours()`) runs, and the existing sweeper reclaims it if the money
+		// never arrives - `BookingRepository::expiredHeldIds()` already selects `awaiting_payment`
+		// rows, so payment expiry needs no machinery of its own.
+		$online = PaymentMode::Online->value === (string) $booking['payment_mode']
+			&& Payment\Providers::get()->isAvailable();
+
+		$snapshot = $this->guarded->transition(
 			LockKey::forItems( $items ),
 			$uuid,
-			BookingStatus::Confirmed,
+			$online ? BookingStatus::AwaitingPayment : BookingStatus::Confirmed,
 			// Re-read under FOR UPDATE and re-decided: a lapsed hold or a rival decision
 			// (reject/cancel) may have landed between the unlocked read above and the transaction
 			// opening, and the row this acts on is the one read there.
@@ -120,12 +141,62 @@ final class ApproveBooking {
 			'approve',
 			'reservant/booking/approved',
 			array(
-				'hold_class'      => null,
-				'hold_expires_at' => null,
+				'hold_class'      => $online ? HoldClass::Payment->value : null,
+				'hold_expires_at' => $online
+					? $nowUtc->modify( '+' . Settings::make()->paymentTtlHours() . ' hours' )->format( 'Y-m-d H:i:s' )
+					: null,
 				'approved_at'     => $nowUtc->format( 'Y-m-d H:i:s' ),
 				'approved_by'     => $actorUserId,
 			)
 		);
+
+		return $online ? $this->issuePaymentLink( $snapshot ) : $snapshot;
+	}
+
+	/**
+	 * Create the one order this booking pays and announce the link - POST-COMMIT, all of it.
+	 *
+	 * The booking is `awaiting_payment` by the time this runs, and an order write is an external
+	 * side effect that must never sit inside Reservant's transaction (section 2.2: hooks fire after
+	 * commit and no listener may throw - the same rule binds this block, which runs in the same
+	 * position). So nothing here may turn the committed approval into a failure report: any
+	 * `\Throwable` - `WooPaymentProvider::createOrder()` refusing, the id write failing, a provider
+	 * that cannot mint a URL - is reported on `reservant/error` with the uuid as context and
+	 * swallowed. The booking is deliberately NOT rolled back to `awaiting_approval`: the approval
+	 * happened, and the payment TTL just written is exactly the mechanism that reclaims the seat if
+	 * no order ever materializes for the guest to pay.
+	 *
+	 * `reservant/booking/payment_due` carries the URL as its second argument (the
+	 * `reservant/approval/nag` shape) because the snapshot cannot: `BookingSnapshot` carries
+	 * columns, and the URL is the provider's answer, not a column.
+	 *
+	 * @param array<string, mixed> $snapshot the stored post-transition row, plus `wc_order_id` once
+	 *                                       the order exists - grafted here so the caller's response
+	 *                                       reports the order it just created without a re-read that
+	 *                                       could itself refuse post-commit.
+	 * @return array<string, mixed>
+	 */
+	private function issuePaymentLink( array $snapshot ): array {
+		try {
+			$provider = Payment\Providers::get();
+			$orderId  = $provider->createOrder( $snapshot );
+			if ( null === $orderId ) {
+				// The interface's "this provider cannot create orders at all" answer, from a
+				// provider that claimed `isAvailable()`. Internal - never a wire reason.
+				throw new \RuntimeException( 'order_create_failed' );
+			}
+			$this->bookings->storeOrderId( (int) $snapshot['id'], $orderId );
+			$snapshot['wc_order_id'] = $orderId;
+
+			$url = $provider->paymentUrl( $orderId );
+			if ( null === $url ) {
+				throw new \RuntimeException( 'payment_url_unavailable' );
+			}
+			do_action( 'reservant/booking/payment_due', BookingSnapshot::fromArray( $snapshot ), $url );
+		} catch ( \Throwable $e ) {
+			do_action( 'reservant/error', $e, (string) $snapshot['uuid'] );
+		}
+		return $snapshot;
 	}
 
 	/**

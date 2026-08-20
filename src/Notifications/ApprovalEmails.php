@@ -5,6 +5,7 @@ namespace Reservant\Notifications;
 
 use Reservant\Admin\ApprovalActionEndpoint;
 use Reservant\Application\Dto\BookingSnapshot;
+use Reservant\Domain\Enum\BookingStatus;
 use Reservant\Infrastructure\Db\BookingRepository;
 use Reservant\Infrastructure\Db\ResourceRepository;
 
@@ -12,16 +13,19 @@ use Reservant\Infrastructure\Db\ResourceRepository;
  * The approval-flow email set (AGENTS.md "Approval holds": "Owner emails carry one-click signed
  * approve/reject links so the decision never requires a wp-admin login").
  *
- * Four keys, one per hook this class listens on: `approval_request` (`reservant/booking/held`,
+ * Five keys, one per hook this class listens on: `approval_request` (`reservant/booking/held`,
  * only when the snapshot requires approval) and `approval_nag` (`reservant/approval/nag`, the
  * 25/50/75% reminder `Infrastructure\Scheduler\Jobs::nag()` fires) both go to the approver - the
  * staff member assigned to the booking, or the site admin when none is assigned - and both carry a
- * signed approve URL and a signed reject URL (`ApprovalActionEndpoint::url()`). `booking_approved`
- * and `booking_rejected` go to the customer, the latter carrying the owner's rejection reason
- * verbatim.
+ * signed approve URL and a signed reject URL (`ApprovalActionEndpoint::url()`). `booking_approved`,
+ * `booking_payment_due` and `booking_rejected` go to the customer, the last carrying the owner's
+ * rejection reason verbatim. An approval that landed on `awaiting_payment` sends
+ * `booking_payment_due` (from `reservant/booking/payment_due`, which carries the provider's
+ * checkout URL) INSTEAD of `booking_approved`: the plain approval email has nothing actionable to
+ * say to a guest who still owes money, and two emails announcing one decision reads as a mistake.
  *
  * `Mailer::send()` never throws (its own contract), so a broken mail transport degrades to a logged
- * `reservant/error`, never a failed booking transition. Every one of these four hooks fires AFTER the
+ * `reservant/error`, never a failed booking transition. Every one of these five hooks fires AFTER the
  * transition it announces has committed, so that rule binds this whole class and not only the mailer:
  * nothing here may throw out of a listener, because doing so converts a committed booking into the
  * caller's failure report. The one statement that can fail on its own is the booking re-read in
@@ -35,6 +39,7 @@ final class ApprovalEmails {
 		add_action( 'reservant/booking/held', array( self::class, 'onHeld' ) );
 		add_action( 'reservant/approval/nag', array( self::class, 'onNag' ), 10, 2 );
 		add_action( 'reservant/booking/approved', array( self::class, 'onApproved' ) );
+		add_action( 'reservant/booking/payment_due', array( self::class, 'onPaymentDue' ), 10, 2 );
 		add_action( 'reservant/booking/rejected', array( self::class, 'onRejected' ) );
 	}
 
@@ -51,14 +56,46 @@ final class ApprovalEmails {
 		self::sendApproverEmail( 'approval_nag', $snapshot, array( 'percent' => $percent ) );
 	}
 
-	/** `reservant/booking/approved` - confirmation to the customer. */
+	/**
+	 * `reservant/booking/approved` - the decision, announced to the customer.
+	 *
+	 * NOT for an approval that landed on `awaiting_payment`: the hook still fires (the decision
+	 * happened, and listeners beyond this one are entitled to it), but the guest's news is the
+	 * payment link, which `onPaymentDue()` sends once the order exists - see the class docblock.
+	 */
 	public static function onApproved( BookingSnapshot $snapshot ): void {
+		if ( BookingStatus::AwaitingPayment->value === $snapshot->status ) {
+			return;
+		}
 		Mailer::send(
 			'booking_approved',
 			$snapshot->customerEmail,
 			self::approvedSubject(),
 			self::approvedBody( $snapshot ),
 			array( 'booking' => $snapshot )
+		);
+	}
+
+	/**
+	 * `reservant/booking/payment_due` - the approval that still needs paying for, fired by
+	 * `ApproveBooking::issuePaymentLink()` AFTER the order exists, with the provider's checkout URL
+	 * as the second argument (the snapshot carries columns; the URL is the provider's answer).
+	 *
+	 * The deadline in the body is the snapshot's own `hold_expires_at` - the payment window
+	 * `ApproveBooking` just wrote - because a link that quietly outlives its hold is the trap
+	 * AGENTS.md section 6 warns about: the TTL is the authority, and a guest paying after it has
+	 * lapsed is refused the slot. Telling them the deadline is the honest half of enforcing it.
+	 */
+	public static function onPaymentDue( BookingSnapshot $snapshot, string $paymentUrl ): void {
+		Mailer::send(
+			'booking_payment_due',
+			$snapshot->customerEmail,
+			self::paymentDueSubject(),
+			self::paymentDueBody( $snapshot, $paymentUrl ),
+			array(
+				'booking'     => $snapshot,
+				'payment_url' => $paymentUrl,
+			)
 		);
 	}
 
@@ -198,6 +235,34 @@ final class ApprovalEmails {
 			__( 'Hi %s, your booking has been approved.', 'reservant' ),
 			$snapshot->customerName
 		);
+	}
+
+	private static function paymentDueSubject(): string {
+		return __( 'Your booking is approved - please complete payment', 'reservant' );
+	}
+
+	private static function paymentDueBody( BookingSnapshot $snapshot, string $paymentUrl ): string {
+		$lines   = array();
+		$lines[] = sprintf(
+			/* translators: %s: customer name */
+			__( 'Hi %s, your booking has been approved. To confirm it, please complete your payment.', 'reservant' ),
+			$snapshot->customerName
+		);
+		$lines[] = '';
+		$lines[] = sprintf(
+			/* translators: %s: the checkout link where the customer pays for the booking */
+			__( 'Pay here: %s', 'reservant' ),
+			$paymentUrl
+		);
+		if ( null !== $snapshot->holdExpiresAt ) {
+			$lines[] = '';
+			$lines[] = sprintf(
+				/* translators: %s: date and time, in the site's timezone */
+				__( 'Your slot is held until %s. If payment has not arrived by then, the reservation is released.', 'reservant' ),
+				SiteTime::local( $snapshot->holdExpiresAt )
+			);
+		}
+		return implode( "\n", $lines );
 	}
 
 	private static function rejectedSubject(): string {

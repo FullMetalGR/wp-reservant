@@ -14,7 +14,19 @@ staff, availability, calendar, manual booking) and the public booking widget (sh
 and block, chain builder, guest flow, magic-link manage page) are complete as well, as are
 notifications: the customer and approver email sets, `.ics` invitations that move a booking
 in the guest's calendar rather than duplicating it, reminders on Action Scheduler, and the
-hold-expiry sweeper. The WooCommerce bridge is the next milestone.
+hold-expiry sweeper.
+
+The optional WooCommerce bridge is complete too. A service set to "pay online" mirrors to a
+virtual, hidden WooCommerce product; a held booking becomes a cart, and a paid order confirms
+the booking, while a cancelled, failed or refunded one releases the slot. An approved booking
+for a paid service moves to `awaiting_payment` and the customer is emailed a payment link that
+lives as long as the hold does. The hold is the authority throughout: a cart or a payment link
+that outlives it is refused under lock, before any money moves.
+
+WooCommerce remains optional. With no payment plugin active the whole thing degrades on
+purpose - "pay online" behaves as pay-on-arrival, bookings still complete, and wp-admin says
+plainly that nothing is currently taking money. Licensing, packaging and shipping docs are the
+last milestone before v1.0.
 
 See `AGENTS.md` for the full product spec, invariants, schema, and conventions.
 

@@ -29,13 +29,14 @@ final class EmailCatalog {
 		'approval_request',
 		'approval_nag',
 		'booking_approved',
+		'booking_payment_due',
 		'booking_rejected',
 	);
 
 	/**
 	 * Key plus a label naming WHO receives it, because that is the question an owner is actually
 	 * answering when they reach for the switch - "stop emailing my customers" and "stop emailing
-	 * me" are different intentions and four of these ten go to the approver, not the guest.
+	 * me" are different intentions and four of these eleven go to the approver, not the guest.
 	 *
 	 * @return list<array{key: string, label: string}>
 	 */
@@ -50,6 +51,7 @@ final class EmailCatalog {
 			'approval_request'    => __( 'Approver: a booking needs your decision', 'reservant' ),
 			'approval_nag'        => __( 'Approver: reminder that a booking is still waiting', 'reservant' ),
 			'booking_approved'    => __( 'Customer: your booking was approved', 'reservant' ),
+			'booking_payment_due' => __( 'Customer: approved - here is your payment link', 'reservant' ),
 			'booking_rejected'    => __( 'Customer: your booking was declined', 'reservant' ),
 		);
 

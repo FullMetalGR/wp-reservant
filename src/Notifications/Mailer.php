@@ -16,12 +16,9 @@ namespace Reservant\Notifications;
 final class Mailer {
 
 	/**
-	 * @param string                $key         One of the email keys this plugin sends:
-	 *                                           `approval_request`, `approval_nag`,
-	 *                                           `booking_approved`, `booking_rejected`,
-	 *                                           `booking_received`, `booking_confirmed`,
-	 *                                           `booking_cancelled`, `booking_rescheduled`,
-	 *                                           `booking_reminder`.
+	 * @param string                $key         One of the email keys this plugin sends - the list
+	 *                                           is `EmailCatalog::KEYS`, stated there once rather
+	 *                                           than restated here where it would drift.
 	 * @param array<string, mixed>  $context     Extra data threaded through as the filter's second
 	 *                                           argument, alongside the `to`/`subject`/`body`
 	 *                                           array being filtered - e.g. the booking snapshot,

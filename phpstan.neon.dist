@@ -11,6 +11,12 @@ parameters:
         - tests/stubs/wp-cli.php
         # Action Scheduler ships no PHPStan stub set of its own. See the file header.
         - tests/stubs/action-scheduler.php
+        # WooCommerce, unlike WP-CLI and Action Scheduler above, DOES publish a maintained stub
+        # set, so this is the package rather than a hand-written file. Analysis must see it even
+        # though `src/Integrations/WooCommerce/` only ever LOADS when `class_exists( 'WooCommerce' )`
+        # is true (AGENTS.md section 6): the guard is a runtime fact, and without stubs every WC
+        # symbol behind it would be an unknown class at level 6.
+        - vendor/php-stubs/woocommerce-stubs/woocommerce-stubs.php
     # The stub must define WP_CLI for the class to resolve; whether it is really defined is a
     # runtime question, so the `defined() && WP_CLI` guard must stay analysable in both directions.
     dynamicConstantNames:

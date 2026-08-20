@@ -588,6 +588,32 @@ final class BookingRepository {
 		}
 	}
 
+	/**
+	 * Record the payment order that belongs to this booking - the booking's half of the
+	 * one-order-per-booking pairing (AGENTS.md section 6; the order's half is the uuid meta
+	 * `WooPaymentProvider::createOrder()` writes). Not a status transition and deliberately not
+	 * `transition()`-shaped: the caller (`ApproveBooking::issuePaymentLink()`) runs post-commit,
+	 * after the order it is recording was created outside any Reservant transaction, so there is no
+	 * guard to lose and no `from` to compare against.
+	 *
+	 * @throws \RuntimeException `lock_unavailable` when the write failed at the DB level - the
+	 *                           caller's post-commit catch reports it rather than letting it
+	 *                           surface as the failure of an approval that already committed.
+	 */
+	public function storeOrderId( int $bookingId, int $orderId ): void {
+		$ok = $this->db->update(
+			$this->db->prefix . 'reservant_bookings',
+			array(
+				'wc_order_id' => $orderId,
+				'updated_at'  => gmdate( 'Y-m-d H:i:s' ),
+			),
+			array( 'id' => $bookingId )
+		);
+		if ( false === $ok ) {
+			throw new \RuntimeException( 'lock_unavailable' );
+		}
+	}
+
 	/** @return list<int> */
 	public function expiredHeldIds( int $limit ): array {
 		$p   = $this->db->prefix;

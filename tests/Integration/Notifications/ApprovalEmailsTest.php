@@ -20,7 +20,7 @@ use Reservant\Infrastructure\Scheduler\Jobs;
 use Reservant\Tests\Integration\ReservantTestCase;
 
 /**
- * `Notifications\ApprovalEmails` (Task 9): the mailer seam wired on the four approval-flow hooks.
+ * `Notifications\ApprovalEmails` (Task 9): the mailer seam wired on the approval-flow hooks.
  *
  * `ApprovalEmails::register()` is never called directly here - exactly like `JobsTest` relies on
  * `Plugin::register()` having already wired `Jobs::register()` at bootstrap
@@ -179,6 +179,48 @@ final class ApprovalEmailsTest extends ReservantTestCase {
 		self::assertCount( 1, $sent );
 		self::assertSame( 'maria@example.com', $sent[0]['to'] );
 		self::assertStringContainsString( 'approved', strtolower( $sent[0]['subject'] ) );
+	}
+
+	/**
+	 * An approval that lands on `awaiting_payment` mails the guest the PAYMENT LINK, not the plain
+	 * "you are approved" - the latter has nothing actionable to say to someone who still owes money,
+	 * and two emails announcing one decision reads as a mistake.
+	 */
+	public function testAnOnlineApprovalSendsThePaymentLinkInsteadOfBookingApproved(): void {
+		global $wpdb;
+		$this->usePaymentProvider( new \Reservant\Tests\Integration\Payment\FakePaymentProvider( true, 4242, 9001 ) );
+		$services = new ServiceRepository( $wpdb );
+		$onlineId = $services->insert(
+			array(
+				'name'                => 'Online Consultation',
+				'type'                => 'appointment',
+				'duration_min'        => 30,
+				'price_minor'         => 3000,
+				'payment_mode'        => 'online',
+				'requires_approval'   => 1,
+				'approval_hold_hours' => 48,
+			)
+		);
+		( new ResourceRepository( $wpdb ) )->linkService( $onlineId, $this->staffId );
+
+		$booking = HoldBooking::make( $wpdb )->execute(
+			new HoldRequest(
+				$this->customer(),
+				new AppointmentRequest( $this->utc( 1, '13:00' ), array( new SegmentChoice( $onlineId ) ) )
+			),
+			$this->utc( 0 )
+		);
+
+		$sent = $this->captureMail(
+			function () use ( $wpdb, $booking ): void {
+				ApproveBooking::make( $wpdb )->execute( $booking['uuid'], $this->utc( 0, '01:00' ), 'admin' );
+			}
+		);
+
+		self::assertCount( 1, $sent, 'exactly one email per decision - the payment link replaces booking_approved, it does not join it' );
+		self::assertSame( 'maria@example.com', $sent[0]['to'] );
+		self::assertStringContainsString( 'payment', strtolower( $sent[0]['subject'] ) );
+		self::assertStringContainsString( 'https://example.test/pay/9001', $sent[0]['message'], 'the body must carry the checkout URL' );
 	}
 
 	public function testRejectedEmailToCustomerIncludesTheReason(): void {

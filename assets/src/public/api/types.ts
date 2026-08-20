@@ -196,7 +196,14 @@ export interface Booking {
  * The `POST /holds` 201 body: the booking plus `manage_token`, the guest's only credential,
  * shown exactly once (`HoldsController::create()` sends it with `Cache-Control: no-store`).
  * Hold it in memory for the rest of the journey - it cannot be fetched again.
+ *
+ * `checkout_url` is present ONLY when this hold must be paid online before it can be confirmed
+ * (`HoldsController::checkoutUrl()`) - so its presence, never the widget's own reading of
+ * `payment_mode`, is what says the journey ends at a checkout instead of at Confirm. It carries
+ * the manage token in its query string and is built here for the same reason the token is shown
+ * here: this response is the only moment the plaintext credential exists. Absent means confirm.
  */
 export interface HeldBooking extends Booking {
 	manage_token: string;
+	checkout_url?: string;
 }

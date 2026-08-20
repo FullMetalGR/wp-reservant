@@ -122,9 +122,32 @@ final class Plugin {
 			20
 		);
 
+		// The bridge's ear: WooCommerce order transitions turned back into booking transitions
+		// (paid confirms, cancelled/failed/refunded releases). Gated on the one WooCommerce check
+		// the codebase has - `Providers` owns `class_exists( 'WooCommerce' )`, and this asks it
+		// rather than growing a second copy (AGENTS.md section 6: no WC reference outside
+		// `Integrations/WooCommerce/`, and the namespace only loads when WC is active). Outside the
+		// is_admin() split below on purpose: a gateway's webhook lands on the front end, an owner's
+		// refund lands in wp-admin, and both must reach the observer.
+		if ( Application\Payment\Providers::wooCommerceActive() ) {
+			Integrations\WooCommerce\OrderObserver::register();
+			// The bridge's mouth and its brake, both front-of-house: CartBridge turns a held
+			// booking into cart lines (and a removed line back into a released booking), and
+			// CheckoutGuard re-validates the hold under lock at every door into payment - the
+			// cart checkouts and the pay-for-order link - so a cart or link that outlived its
+			// hold is refused BEFORE money moves (AGENTS.md section 6: the TTL is the
+			// authority). Outside the is_admin() split for the observer's reason: the Store API
+			// doors and the pay page are front-end requests.
+			Integrations\WooCommerce\CartBridge::register();
+			Integrations\WooCommerce\CheckoutGuard::register();
+		}
+
 		if ( is_admin() ) {
 			( new Admin\AdminPage() )->register();
 			( new Admin\ApprovalActionEndpoint() )->register();
+			// Admin-only on purpose: it is a message TO the owner, and the degrade it reports is
+			// already handled silently and correctly on the front end by `ConfirmBooking`.
+			( new Admin\PaymentNotice() )->register();
 		}
 
 		// The mount-point renderer wraps an Assets instance so that rendering a mount point can
