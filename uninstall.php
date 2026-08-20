@@ -17,9 +17,11 @@
  *   `true ===`, not truthy: a missing option, a corrupt option, a `1`, a `"yes"`, or an option
  *   written by some future version with a different shape all mean "keep the data". The default in
  *   `Settings::DEFAULTS` is `false`, so silence is always "keep".
- * - It drops only the thirteen `{$wpdb->prefix}reservant_*` tables and deletes only five
+ * - It drops only the thirteen `{$wpdb->prefix}reservant_*` tables and deletes only six
  *   `reservant_*` options, each named in full. No `LIKE`, no wildcard, no loop over a discovered
- *   set - nothing else in the database can be reached from here.
+ *   set - nothing else in the database can be reached from here. `reservant_license` is among them
+ *   because it holds the owner's license key: a purge the owner asked for that left a credential
+ *   behind in `wp_options` would not be a purge.
  * - Posts, users, comments, other plugins' tables and other plugins' options are never touched.
  *
  * Two things it deliberately does NOT clean up, because neither is Reservant's own storage:
@@ -68,7 +70,7 @@ foreach ( $reservant_tables as $reservant_table ) {
 	$wpdb->query( 'DROP TABLE IF EXISTS `' . $wpdb->prefix . $reservant_table . '`' );
 }
 
-foreach ( array( 'reservant_settings', 'reservant_version', 'reservant_db_version', 'reservant_rewrite_version', 'reservant_fixture_ids' ) as $reservant_option ) {
+foreach ( array( 'reservant_settings', 'reservant_license', 'reservant_version', 'reservant_db_version', 'reservant_rewrite_version', 'reservant_fixture_ids' ) as $reservant_option ) {
 	delete_option( $reservant_option );
 }
 

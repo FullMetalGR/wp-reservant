@@ -316,6 +316,37 @@ export interface SettingsPayload {
 	emails_off: string[];
 }
 
+/**
+ * `Licensing\LicenseState` - why a license is or is not working, never merely whether. The fix is
+ * different in every case (`src/Licensing/LicenseState.php`), which is why one boolean would not do.
+ */
+export type LicenseState = 'inactive' | 'active' | 'grace' | 'invalid' | 'domain_mismatch';
+
+/**
+ * `Rest\Admin\LicensePayload::of()` - the one shape a license takes on the wire, answered
+ * identically by `GET`, `POST` and `DELETE /admin/license` and carried in the admin bootstrap
+ * (`window.reservantAdmin.license`, `boot.ts`). Two hand-written shapes for one object is how the
+ * two drift, so the PHP side routes both surfaces through that single DTO and this is its twin.
+ *
+ * `active` is COMPUTED SERVER-SIDE and must be read, never recomputed here: `grace` counts as
+ * licensed (`LicenseState::isActive()`), so a client testing `'active' === state` would put a
+ * warning in front of an owner whose only problem is that somebody else's DNS was down.
+ *
+ * `masked_key` is eight asterisks plus at most the last four characters, and empty when there is no
+ * key at all - the plaintext never crosses the wire in either direction of a response.
+ * `last_checked_at`/`grace_ends_at` are `Y-m-d H:i:s` UTC strings or null; `grace_ends_at` is
+ * non-null only in `grace`, because a deadline shown outside the grace window reads as a threat
+ * that is not real.
+ */
+export interface LicenseStatus {
+	state: LicenseState;
+	active: boolean;
+	masked_key: string;
+	domain: string;
+	last_checked_at: string | null;
+	grace_ends_at: string | null;
+}
+
 /** `BookingsAdminController::customer()` - the manual booking body's customer block. */
 export interface ManualBookingCustomer {
 	name: string;

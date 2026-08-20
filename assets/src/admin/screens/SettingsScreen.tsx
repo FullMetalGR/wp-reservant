@@ -1,11 +1,17 @@
 import { useEffect, useState } from '@wordpress/element';
-import { __ } from '@wordpress/i18n';
-import { Button, CheckboxControl, Notice, Spinner, TextControl } from '@wordpress/components';
-import { useSaveSettings, useSettings } from '../api/queries';
+import { __, sprintf } from '@wordpress/i18n';
+import { Button, CheckboxControl, Modal, Notice, Spinner, TextControl } from '@wordpress/components';
+import {
+	useActivateLicense,
+	useDeactivateLicense,
+	useLicense,
+	useSaveSettings,
+	useSettings,
+} from '../api/queries';
 import { bootConfig } from '../boot';
-import type { SettingsPayload } from '../api/types';
+import type { LicenseState, LicenseStatus, SettingsPayload } from '../api/types';
 import { useToasts } from '../components/Toasts';
-import { errorMessage } from '../../shared';
+import { errorMessage, utcToSite } from '../../shared';
 
 /**
  * A TTL field is only ever meaningful as a positive whole number - `SettingsAdminController`'s own
@@ -103,10 +109,310 @@ function toPatch( form: SettingsFormState ): Partial< SettingsPayload > {
 }
 
 /**
+ * One whole translated sentence per license state, never a concatenation of fragments (AGENTS.md
+ * section 7, i18n) - and deliberately five sentences rather than one "unlicensed" and a boolean,
+ * because the FIX is different in every case (`Licensing\LicenseState`'s own docblock): `invalid`
+ * means get a good key, `domain_mismatch` means activate on THIS site, `inactive` means enter one,
+ * and `grace` means nothing at all needs doing yet.
+ *
+ * These are the screen's twin of `AdminGuard::licenseRequired()`'s per-state 403 sentences, minus
+ * the "under Reservant -> Settings" pointer those carry: the owner reading this IS on that screen,
+ * and the key field is directly below.
+ */
+function stateMessage( state: LicenseState ): string {
+	switch ( state ) {
+		case 'active':
+			return __( 'Your license is active on this site.', 'reservant' );
+		case 'grace':
+			return __(
+				'Your license could not be re-checked recently, so Reservant is running on a grace period. Nothing is paused, and the next successful check clears this by itself.',
+				'reservant'
+			);
+		case 'invalid':
+			return __( 'Your license key is no longer valid, so changes to your setup are paused. Enter a valid key below.', 'reservant' );
+		case 'domain_mismatch':
+			return __(
+				'Your license is registered to a different domain, so changes to your setup are paused. Activate it for this site below.',
+				'reservant'
+			);
+		default:
+			return __( 'Reservant is not licensed on this site, so changes to your setup are paused. Enter your license key below.', 'reservant' );
+	}
+}
+
+/** The same five states as a short label, for the status row above the sentence. */
+function stateLabel( state: LicenseState ): string {
+	switch ( state ) {
+		case 'active':
+			return __( 'Active', 'reservant' );
+		case 'grace':
+			return __( 'Grace period', 'reservant' );
+		case 'invalid':
+			return __( 'Invalid', 'reservant' );
+		case 'domain_mismatch':
+			return __( 'Registered to another domain', 'reservant' );
+		default:
+			return __( 'Not licensed', 'reservant' );
+	}
+}
+
+/**
+ * What a lapsed license actually costs, said plainly, because the alternative is an owner who
+ * believes their site is down.
+ *
+ * This is the exact list `AdminGuard::configureSite()` gates and nothing else: every public and
+ * guest route, every read, and the WHOLE admin booking lifecycle stay open on an unlicensed site,
+ * on purpose (AGENTS.md section 5) - `awaiting_approval` bookings sit on a TTL, so a frozen
+ * approval queue would quietly turn away paying customers over an unpaid invoice. Overstating the
+ * freeze here would be a lie that costs the owner a panic; understating it would leave them
+ * wondering why Save does nothing.
+ */
+const FROZEN_HELP = __(
+	'Your bookings keep running and your customers are unaffected: they can still book, pay, cancel and reschedule, and you can still approve, reject, cancel and complete bookings. Only changes to your setup - services, staff, availability, events, seat maps and these settings - are paused until a license is active.',
+	'reservant'
+);
+
+/**
+ * Activation REPLACES whatever is stored, a working key included (`LicenseManager::activate()`), so
+ * the field says so rather than letting an owner discover it by pasting the wrong one.
+ */
+const KEY_HELP = __( 'Activating replaces whatever key is stored on this site, including a working one.', 'reservant' );
+
+/**
+ * The toast for a key the validator refused, deliberately NOT `stateMessage( 'invalid' )`.
+ *
+ * Two different things need saying and only one of them is the state: the toast reports what the
+ * click just DID, the notice below reports where the site now stands. And what the click did
+ * includes the part an owner will not guess - `LicenseManager::activate()` is a REPLACEMENT, so a
+ * bad key pasted over a working one loses the working one, and finding that out from a support
+ * ticket is the expensive way.
+ */
+const REFUSED_KEY = __(
+	'That license key was refused. It has replaced whatever key was stored on this site.',
+	'reservant'
+);
+
+const DEACTIVATE_WARNING = __(
+	'This unbinds the site from your license so the seat can be used somewhere else. Changes to your setup are paused until a key is activated here again, and your bookings keep running either way.',
+	'reservant'
+);
+
+/**
+ * The facts under the sentence, each row present only when there is something to say.
+ *
+ * A row per absent value ("Last checked: never", "Domain: -") is noise on a fresh install, where
+ * ALL of them are absent, and every one of these can be legitimately empty: a never-activated site
+ * carries no key and no domain (`LicenseRecord::statusAt()`), a key refused at activation has never
+ * been validated, and `grace_ends_at` is non-null only inside the grace window - a deadline shown
+ * outside it reads as a threat that is not real.
+ *
+ * Timestamps arrive as `Y-m-d H:i:s` UTC (`LicensePayload::instant()`) and are shown in the SITE's
+ * timezone, the same conversion at the same edge every other date on this SPA gets.
+ */
+function LicenseFacts( { license, timezone }: { license: LicenseStatus; timezone: string } ) {
+	// Annotated on EVERY timestamp rather than only the deadline: an owner reading "your grace
+	// period ends at 09:30" in a zone that is not theirs can be a day out, and a rule applied to one
+	// row and not the next reads as though the two are in different zones.
+	function moment( utc: string ): string {
+		return sprintf(
+			/* translators: %s: a date and time, already converted to the site's own timezone. */
+			__( '%s (site time)', 'reservant' ),
+			utcToSite( utc, timezone ).toLocaleString()
+		);
+	}
+
+	return (
+		<dl className="reservant-license__facts">
+			<dt>{ __( 'Status', 'reservant' ) }</dt>
+			<dd>{ stateLabel( license.state ) }</dd>
+			{ '' !== license.masked_key && (
+				<>
+					{ /* Deliberately not "License key" - that is the INPUT's label in the section below, and
+					     two identical labels on one screen is how an owner comes to believe the field there is
+					     showing them what is stored. */ }
+					<dt>{ __( 'Key on this site', 'reservant' ) }</dt>
+					<dd>{ license.masked_key }</dd>
+				</>
+			) }
+			{ '' !== license.domain && (
+				<>
+					<dt>{ __( 'Registered domain', 'reservant' ) }</dt>
+					<dd>{ license.domain }</dd>
+				</>
+			) }
+			{ null !== license.last_checked_at && (
+				<>
+					<dt>{ __( 'Last checked', 'reservant' ) }</dt>
+					<dd>{ moment( license.last_checked_at ) }</dd>
+				</>
+			) }
+			{ null !== license.grace_ends_at && (
+				<>
+					<dt>{ __( 'Grace period ends', 'reservant' ) }</dt>
+					<dd>{ moment( license.grace_ends_at ) }</dd>
+				</>
+			) }
+		</dl>
+	);
+}
+
+/**
+ * The license section of the Settings screen (AGENTS.md section 5, "License enforcement").
+ *
+ * **It renders from the bootstrap, not from a fetch.** `window.reservantAdmin.license`
+ * (`Admin\AdminPage::license()`) already carries the status in the same shape `GET /admin/license`
+ * answers with, so an owner whose configuration is frozen sees why on the first paint instead of
+ * watching the screen render once wrongly and then correct itself. The fetch is the FALLBACK, taken
+ * only when the bootstrap value is `null` - which means "not known right now" (a
+ * `reservant/license_manager` that threw while the page rendered), never "unlicensed".
+ *
+ * Three sources answer the same question and the freshest wins, in this order: the status a
+ * mutation just returned, then the fallback fetch, then the bootstrap. Every `LicenseManager`
+ * method returns the resulting status precisely so that no caller has to write and read back, so
+ * an activation's own answer is authoritative the moment it lands.
+ *
+ * `active` is read off the payload and never recomputed: `grace` counts as licensed
+ * (`LicenseState::isActive()`), and a screen testing `'active' === state` would put a warning in
+ * front of an owner whose only problem is somebody else's DNS.
+ */
+function LicenseSection() {
+	const { timezone, license: booted } = bootConfig();
+	const { addToast } = useToasts();
+
+	// `?? null` rather than a bare read: a current build always emits the key (null included), but
+	// absence and null mean exactly the same thing here - "not known" - and treating an absent key
+	// as "no fallback needed" would leave the section permanently blank.
+	const bootstrapped = booted ?? null;
+	const licenseQuery = useLicense( null === bootstrapped );
+	const activateLicense = useActivateLicense();
+	const deactivateLicense = useDeactivateLicense();
+
+	const [ answered, setAnswered ] = useState< LicenseStatus | null >( null );
+	const [ key, setKey ] = useState( '' );
+	const [ confirmDeactivateOpen, setConfirmDeactivateOpen ] = useState( false );
+
+	const license = answered ?? licenseQuery.data ?? bootstrapped;
+
+	// An empty key is a documented server-side NO-OP (`LicenseManager::activate()`: a blank field
+	// posted by accident must not cost a site the license it paid for) - which means it answers 200
+	// with whatever was already stored, and would read on screen as a successful activation. So it
+	// never leaves here: the button is disabled and the handler refuses it a second time.
+	const canActivate = '' !== key.trim();
+
+	function handleActivate(): void {
+		const trimmed = key.trim();
+		if ( '' === trimmed ) {
+			return;
+		}
+		activateLicense.mutate( trimmed, {
+			onSuccess: ( status ) => {
+				setAnswered( status );
+				if ( status.active ) {
+					// The plaintext leaves the screen the moment it is no longer needed; what stays
+					// on show is the masked form the payload came back with.
+					setKey( '' );
+					addToast( __( 'License activated.', 'reservant' ) );
+					return;
+				}
+				// A REFUSED key is a 200 with `state: 'invalid'`, not an HTTP error - so the toast
+				// has to come from reading the answer, and the field keeps the key so a typo can be
+				// fixed rather than retyped.
+				addToast( REFUSED_KEY, 'error' );
+			},
+			onError: ( error ) => addToast( errorMessage( error ), 'error' ),
+		} );
+	}
+
+	function handleDeactivate(): void {
+		setConfirmDeactivateOpen( false );
+		deactivateLicense.mutate( undefined, {
+			onSuccess: ( status ) => {
+				setAnswered( status );
+				addToast( __( 'License deactivated. This site is no longer bound to it.', 'reservant' ) );
+			},
+			onError: ( error ) => addToast( errorMessage( error ), 'error' ),
+		} );
+	}
+
+	return (
+		<section className="reservant-license">
+			<h2>{ __( 'License', 'reservant' ) }</h2>
+
+			{ licenseQuery.isError && (
+				<Notice status="error" isDismissible={ false }>
+					{ errorMessage( licenseQuery.error ) }
+				</Notice>
+			) }
+			{ null === license && licenseQuery.isLoading && <Spinner /> }
+
+			{ null !== license && (
+				<>
+					<Notice status={ 'active' === license.state ? 'success' : 'warning' } isDismissible={ false }>
+						{ stateMessage( license.state ) }
+					</Notice>
+					{ ! license.active && <p className="reservant-license__frozen">{ FROZEN_HELP }</p> }
+
+					<LicenseFacts license={ license } timezone={ timezone } />
+
+					{ /* `autoComplete`/`spellCheck` off because this is a credential, not prose: an opaque
+					     vendor key is neither a word to check nor a login for a browser to remember. */ }
+					<TextControl
+						__next40pxDefaultSize
+						__nextHasNoMarginBottom
+						autoComplete="off"
+						spellCheck={ false }
+						label={ __( 'License key', 'reservant' ) }
+						help={ KEY_HELP }
+						value={ key }
+						onChange={ ( value ) => setKey( value ) }
+					/>
+					<Button
+						variant="primary"
+						disabled={ ! canActivate }
+						isBusy={ activateLicense.isPending }
+						onClick={ handleActivate }
+					>
+						{ __( 'Activate license', 'reservant' ) }
+					</Button>
+					{ '' !== license.masked_key && (
+						<Button
+							variant="secondary"
+							isDestructive
+							isBusy={ deactivateLicense.isPending }
+							onClick={ () => setConfirmDeactivateOpen( true ) }
+						>
+							{ __( 'Deactivate license', 'reservant' ) }
+						</Button>
+					) }
+				</>
+			) }
+
+			{ confirmDeactivateOpen && (
+				<Modal title={ __( 'Deactivate this license?', 'reservant' ) } onRequestClose={ () => setConfirmDeactivateOpen( false ) }>
+					<p>{ DEACTIVATE_WARNING }</p>
+					<Button variant="primary" isDestructive onClick={ handleDeactivate }>
+						{ __( 'Deactivate', 'reservant' ) }
+					</Button>
+					<Button variant="tertiary" onClick={ () => setConfirmDeactivateOpen( false ) }>
+						{ __( 'Cancel', 'reservant' ) }
+					</Button>
+				</Modal>
+			) }
+		</section>
+	);
+}
+
+/**
  * The business settings screen (Task 16 brief): currency (a 3-letter uppercase input), the three
  * TTL fields, the reminder lead time, one checkbox per message the plugin can send, the
  * uninstall-purge checkbox, and a save that reports through the shared toast queue rather than an
  * inline banner.
+ *
+ * `LicenseSection` sits ABOVE all of it and outside the settings query entirely, on purpose: it is
+ * what an owner comes to this screen for when their configuration is frozen, it renders from the
+ * bootstrap with no round trip, and it has to be reachable even on the load where
+ * `GET /admin/settings` itself failed. Gating it behind the settings form would put the way back
+ * behind the thing that may be broken.
  */
 export function SettingsScreen() {
 	const { emailChoices } = bootConfig();
@@ -151,6 +457,8 @@ export function SettingsScreen() {
 
 	return (
 		<div className="reservant-settings-screen">
+			<LicenseSection />
+
 			{ settingsQuery.isError && (
 				<Notice status="error" isDismissible={ false }>
 					{ __( 'Could not load settings.', 'reservant' ) }

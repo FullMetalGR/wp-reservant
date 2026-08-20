@@ -25,6 +25,10 @@ abstract class ReservantTestCase extends \WP_UnitTestCase {
 		// not state a test could see stale. This used to be an opt-in per test class (`SettingsTest`,
 		// `AdminSettingsTest`); hoisted here so the leak cannot recur in a class that forgets it.
 		delete_option( 'reservant_settings' );
+		// Same leak, same reason, one row over: `reservant_license` is written by
+		// `Licensing\LicenseRecord::persist()` and survives the harness's rollback through the object
+		// cache exactly as `reservant_settings` does. Every licensing test starts from "no license".
+		delete_option( 'reservant_license' );
 		self::clearRateLimiter();
 		self::silenceMailTransport();
 		// The provider is memoized per request; a test that installs a fake must not leak it into
@@ -32,7 +36,34 @@ abstract class ReservantTestCase extends \WP_UnitTestCase {
 		// class that never touches payments still needs the memo cleared or it inherits whichever
 		// provider ran last.
 		\Reservant\Application\Payment\Providers::reset();
+		// The licensing twin of the line above, memoized per request in the same shape. A test that
+		// filters in a fake `LicenseManager` must not leave it resolved for the next one.
+		\Reservant\Licensing\Providers::reset();
 		$this->resetRewriteAndTheme();
+	}
+
+	/**
+	 * Put a live license on this site, through the real state machine.
+	 *
+	 * Every configuration WRITE on the admin namespace is gated on an active license
+	 * (`Rest\Admin\AdminGuard::configureSite()`), and `set_up()` above starts every test from "no
+	 * license" - so a test class that creates a service or edits settings over REST has to say that
+	 * its site is licensed, exactly as a real one would have to be. Said out loud, once per class,
+	 * rather than defaulted in `set_up()`: the licensing tests need the unlicensed starting point
+	 * to stay the starting point, and a default that quietly licensed every site would make the
+	 * enforcement gate untestable from the same base class that all the other tests use.
+	 *
+	 * `new LocalKeyLicense( true )` is the dev-mode stub, which accepts any non-empty key - the
+	 * same seam `tests/Unit/Licensing` and `LicenseManagerTest` drive, and the reason no test needs
+	 * the plaintext of the one built-in key. Everything after `accepts()` is production code: this
+	 * writes the real `reservant_license` row and the guard reads it back the way it reads a paying
+	 * customer's.
+	 */
+	protected function licenseThisSite(): void {
+		( new \Reservant\Licensing\LocalKeyLicense( true ) )->activate(
+			'RSVT-TEST-0000-0001',
+			new \DateTimeImmutable( 'now', new \DateTimeZone( 'UTC' ) )
+		);
 	}
 
 	/**
@@ -130,11 +161,11 @@ abstract class ReservantTestCase extends \WP_UnitTestCase {
 	 * straddled `as_get_scheduled_actions()`'s page window and `JobsTest` failed with two of them.
 	 * Raising `per_page` would only move the cliff; this removes it.
 	 *
-	 * Scoped to the plugin's own group, and the recurring sweeper is deliberately spared: it is
-	 * created once per process by `Plugin::register()`'s `init` hook, exactly as it is on a live
-	 * site, and deleting it would misrepresent the environment for every later test (and quietly
-	 * gut `JobsTest::testSweepIsAlreadyScheduledByPluginRegistration`). Nothing else in the group
-	 * belongs to a test that has finished.
+	 * Scoped to the plugin's own group, and the two RECURRING jobs are deliberately spared: the hold
+	 * sweeper and the daily license re-check are created once per process by `Plugin::register()`'s
+	 * `init` hook, exactly as they are on a live site, and deleting them would misrepresent the
+	 * environment for every later test (and quietly gut the two tests that assert each is already
+	 * scheduled). Nothing else in the group belongs to a test that has finished.
 	 */
 	private static function clearScheduledActions(): void {
 		global $wpdb;
@@ -146,9 +177,10 @@ abstract class ReservantTestCase extends \WP_UnitTestCase {
 				"DELETE a, l FROM {$wpdb->prefix}actionscheduler_actions a
 				 INNER JOIN {$wpdb->prefix}actionscheduler_groups g ON g.group_id = a.group_id
 				 LEFT JOIN {$wpdb->prefix}actionscheduler_logs l ON l.action_id = a.action_id
-				 WHERE g.slug = %s AND a.hook <> %s", // phpcs:ignore WordPress.DB.PreparedSQL
+				 WHERE g.slug = %s AND a.hook NOT IN ( %s, %s )", // phpcs:ignore WordPress.DB.PreparedSQL
 				'reservant',
-				Jobs::SWEEP
+				Jobs::SWEEP,
+				Jobs::LICENSE
 			)
 		);
 	}

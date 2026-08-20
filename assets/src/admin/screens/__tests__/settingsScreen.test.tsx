@@ -73,6 +73,18 @@ function stubBootConfig(): void {
 			{ key: 'booking_confirmed', label: 'Customer: your booking is confirmed' },
 			{ key: 'booking_reminder', label: 'Customer: reminder before the appointment' },
 		],
+		// The screen's license section reads this first and only falls back to `GET /admin/license`
+		// when it is null (`boot.ts`), so a bootstrapped status is what keeps these tests to the one
+		// settings request they count - and off the license routes entirely. The section itself is
+		// exercised in `licenseSection.test.tsx`.
+		license: {
+			state: 'active',
+			active: true,
+			masked_key: '********2222',
+			domain: 'example.test',
+			last_checked_at: '2026-08-20 09:00:00',
+			grace_ends_at: null,
+		},
 	};
 }
 

@@ -130,6 +130,7 @@ final class UninstallTest extends ReservantTestCase {
 	public function test_opting_in_drops_every_table_option_and_capability(): void {
 		Settings::make()->update( array( 'purge_on_uninstall' => true ) );
 		update_option( 'reservant_fixture_ids', array( 'cut' => 1 ), false );
+		update_option( 'reservant_license', array( 'key' => 'SOME-KEY' ), false );
 		update_option( 'reservant_version', '9.9.9', false );
 		update_option( 'reservant_rewrite_version', '9', false );
 		$this->seedRow();
@@ -142,7 +143,9 @@ final class UninstallTest extends ReservantTestCase {
 			self::assertFalse( $this->tableExists( $table ), "Uninstall left {$table} behind after an opt-in." );
 		}
 
-		foreach ( array( 'reservant_settings', 'reservant_version', 'reservant_db_version', 'reservant_rewrite_version', 'reservant_fixture_ids' ) as $option ) {
+		// `reservant_license` is in this list because it holds a credential: an opted-in purge that
+		// left the owner's key in wp_options would be a purge that kept the one row nobody wants kept.
+		foreach ( array( 'reservant_settings', 'reservant_license', 'reservant_version', 'reservant_db_version', 'reservant_rewrite_version', 'reservant_fixture_ids' ) as $option ) {
 			self::assertFalse( get_option( $option ), "Uninstall left the {$option} option behind." );
 		}
 

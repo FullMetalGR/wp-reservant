@@ -9,14 +9,23 @@ use Reservant\Application\ExpireHolds;
 use Reservant\Domain\Enum\BookingStatus;
 use Reservant\Infrastructure\Db\BookingRepository;
 use Reservant\Infrastructure\Db\ServiceRepository;
+use Reservant\Licensing\Providers as LicenseProviders;
 
 /**
- * The three Action Scheduler callbacks behind the approval flow (AGENTS.md "Approval holds").
+ * Every Action Scheduler callback this plugin owns: the approval flow's `NAG` and `TIMEOUT`
+ * (AGENTS.md "Approval holds"), the recurring hold `SWEEP`, the booking `REMINDER`, and the daily
+ * `LICENSE` re-check.
  *
- * Every callback re-reads the booking and no-ops unless it is still `awaiting_approval` - the
- * scheduled timestamp and the moment the queue runner actually fires can be minutes apart, and a
- * human (or another job) may have decided the booking in between. That race is not an error: it is
- * the expected, benign outcome the brief calls out explicitly for `TIMEOUT` and `NAG` alike.
+ * Each booking callback re-reads the booking and no-ops unless it is still in the status the timer
+ * was set for - the scheduled timestamp and the moment the queue runner actually fires can be
+ * minutes apart, and a human (or another job) may have decided the booking in between. That race is
+ * not an error: it is the expected, benign outcome the brief calls out explicitly for `TIMEOUT` and
+ * `NAG` alike.
+ *
+ * Those callbacks are also allowed to THROW, and `ExpireHolds`'s docblock documents why that is the
+ * accepted outcome for them: nothing has committed when they run, and Action Scheduler marking the
+ * action failed is a true report that the work did not happen. `licenseRecheck()` is the one
+ * exception, and says at its own docblock why.
  */
 final class Jobs {
 
@@ -24,12 +33,14 @@ final class Jobs {
 	public const TIMEOUT  = 'reservant/job/approval_timeout';
 	public const SWEEP    = 'reservant/job/expire_holds';
 	public const REMINDER = 'reservant/job/booking_reminder';
+	public const LICENSE  = 'reservant/job/license_recheck';
 
 	public static function register(): void {
 		add_action( self::NAG, array( self::class, 'nag' ), 10, 2 );
 		add_action( self::TIMEOUT, array( self::class, 'timeout' ), 10, 1 );
 		add_action( self::SWEEP, array( self::class, 'sweep' ), 10, 0 );
 		add_action( self::REMINDER, array( self::class, 'reminder' ), 10, 1 );
+		add_action( self::LICENSE, array( self::class, 'licenseRecheck' ), 10, 0 );
 	}
 
 	/**
@@ -97,6 +108,31 @@ final class Jobs {
 	public static function sweep(): void {
 		global $wpdb;
 		ExpireHolds::make( $wpdb )->run();
+	}
+
+	/**
+	 * The daily license re-check (`Licensing\LicenseManager::revalidate()`), scheduled by
+	 * `Plugin::register()`.
+	 *
+	 * **The only callback here that swallows.** The others may fail their action, because a failed
+	 * booking job is a true report of work that did not happen and an operator should see it. This
+	 * one is different in both directions. A failing re-check is already a handled, expected
+	 * condition - it opens the grace window precisely so that an unreachable validator changes
+	 * nothing for a fortnight - so failing the action would fill an operator's list with alarms
+	 * about the design working. And there is nothing behind it to retry on a site's behalf the way
+	 * the five-minute sweep backstops `TIMEOUT`; the next run is simply tomorrow.
+	 *
+	 * `\Throwable`, not `\RuntimeException`: a validator implementation filtered in by a site is
+	 * third-party code on a scheduled path, and whatever it throws must not become this plugin's
+	 * failed action. The exception goes to `reservant/error`, the documented channel for swallowed
+	 * failures (AGENTS.md section 7), so it is visible rather than silent.
+	 */
+	public static function licenseRecheck(): void {
+		try {
+			LicenseProviders::get()->revalidate( new \DateTimeImmutable( 'now', new \DateTimeZone( 'UTC' ) ) );
+		} catch ( \Throwable $exception ) {
+			do_action( 'reservant/error', $exception, 'license_recheck' );
+		}
 	}
 
 	/**

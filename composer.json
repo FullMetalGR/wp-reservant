@@ -24,7 +24,8 @@
     "test:unit": "phpunit -c phpunit-unit.xml.dist",
     "test:integration": "npx wp-env run tests-cli --env-cwd=wp-content/plugins/reservant vendor/bin/phpunit -c phpunit-integration.xml.dist",
     "lint": "phpcs -q",
-    "stan": "phpstan analyse --no-progress --memory-limit=1G"
+    "stan": "phpstan analyse --no-progress --memory-limit=1G",
+    "package": "@php bin/package-plugin.php"
   },
   "config": {
     "allow-plugins": { "dealerdirect/phpcodesniffer-composer-installer": true },

@@ -218,6 +218,69 @@ final class AdminPageTest extends ReservantTestCase {
 		self::assertSame( 5, $config['granularityMin'] );
 	}
 
+	/**
+	 * P8.3's Settings screen reads the license from the bootstrap rather than fetching it, because
+	 * an unlicensed site has every configuration screen to draw as read-only and a round trip first
+	 * is a screen that renders once wrongly and then corrects itself. The shape is
+	 * `Rest\Admin\LicensePayload`'s - the same one `GET /admin/license` answers with - so the SPA
+	 * parses one shape whether the status arrived with the page or came back from an activation.
+	 */
+	public function testInlineConfigCarriesTheLicenseInTheSameShapeTheRestRouteAnswersWith(): void {
+		self::assertFileExists( RESERVANT_PATH . 'build/admin.asset.php' );
+		$this->licenseThisSite();
+
+		$this->asAdmin();
+		$page = new AdminPage();
+		$page->register();
+		do_action( 'admin_menu' );
+		set_current_screen( get_plugin_page_hookname( 'reservant-settings', 'reservant' ) );
+		do_action( 'admin_enqueue_scripts', get_plugin_page_hookname( 'reservant-settings', 'reservant' ) );
+
+		$license = $this->inlineConfig()['license'];
+		self::assertIsArray( $license );
+		self::assertSame(
+			array( 'state', 'active', 'masked_key', 'domain', 'last_checked_at', 'grace_ends_at' ),
+			array_keys( $license )
+		);
+		self::assertSame( 'active', $license['state'] );
+		self::assertTrue( $license['active'] );
+		self::assertSame( '********0001', $license['masked_key'] );
+	}
+
+	/** The plaintext key is a credential. It is stored, and it never leaves the server. */
+	public function testInlineConfigNeverCarriesThePlaintextLicenseKey(): void {
+		self::assertFileExists( RESERVANT_PATH . 'build/admin.asset.php' );
+		$this->licenseThisSite();
+
+		$this->asAdmin();
+		$page = new AdminPage();
+		$page->register();
+		do_action( 'admin_menu' );
+		set_current_screen( get_plugin_page_hookname( 'reservant-settings', 'reservant' ) );
+		do_action( 'admin_enqueue_scripts', get_plugin_page_hookname( 'reservant-settings', 'reservant' ) );
+
+		self::assertStringNotContainsString( 'RSVT-TEST-0000-0001', (string) wp_json_encode( $this->inlineConfig() ) );
+	}
+
+	/**
+	 * The `caps` narrowing, one field over: a staff-only viewer's My Calendar page has no licensing
+	 * section, no configuration screen to grey out and no way to act on the answer, so the bound
+	 * domain and the check history - the operator's business - do not go to them.
+	 */
+	public function testInlineConfigWithholdsTheLicenseFromAViewerWhoCannotConfigureTheSite(): void {
+		self::assertFileExists( RESERVANT_PATH . 'build/admin.asset.php' );
+		$this->licenseThisSite();
+
+		$this->asStaff();
+		$page = new AdminPage();
+		$page->register();
+		do_action( 'admin_menu' );
+		set_current_screen( get_plugin_page_hookname( 'reservant-my-calendar', '' ) );
+		do_action( 'admin_enqueue_scripts', get_plugin_page_hookname( 'reservant-my-calendar', '' ) );
+
+		self::assertNull( $this->inlineConfig()['license'] );
+	}
+
 	public function testInlineConfigOmitsCapsTheUserDoesNotHold(): void {
 		self::assertFileExists( RESERVANT_PATH . 'build/admin.asset.php' );
 
@@ -232,7 +295,9 @@ final class AdminPageTest extends ReservantTestCase {
 		self::assertSame( array( 'reservant_approve_bookings', 'reservant_view_own_calendar' ), $config['caps'] );
 	}
 
-	/** @return array{restRoot:string,nonce:string,caps:list<string>,currency:string,timezone:string,granularityMin:int} */
+	/**
+	 * @return array{restRoot:string,nonce:string,caps:list<string>,currency:string,timezone:string,granularityMin:int,license:array<string, mixed>|null}
+	 */
 	private function inlineConfig(): array {
 		$inline = wp_scripts()->get_data( 'reservant-admin', 'before' );
 		self::assertIsArray( $inline );
@@ -251,7 +316,7 @@ final class AdminPageTest extends ReservantTestCase {
 
 		$config = json_decode( $json, true );
 		self::assertIsArray( $config );
-		/** @var array{restRoot:string,nonce:string,caps:list<string>,currency:string,timezone:string,granularityMin:int} $config */
+		/** @var array{restRoot:string,nonce:string,caps:list<string>,currency:string,timezone:string,granularityMin:int,license:array<string, mixed>|null} $config */
 		return $config;
 	}
 

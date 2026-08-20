@@ -8,6 +8,6 @@
     "WP_DEBUG": true
   },
   "lifecycleScripts": {
-    "afterStart": "npx wp-env run cli wp rewrite structure '/%postname%/' --hard"
+    "afterStart": "npx wp-env run cli wp rewrite structure '/%postname%/' --hard && npx wp-env run cli wp eval '( new Reservant\\Licensing\\LocalKeyLicense( true ) )->activate( \"reservant-local-dev\", new DateTimeImmutable( \"now\", new DateTimeZone( \"UTC\" ) ) );'"
   }
 }

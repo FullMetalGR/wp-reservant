@@ -23,6 +23,12 @@ final class AdminCatalogTest extends ReservantTestCase {
 	public function set_up(): void {
 		parent::set_up();
 		Capabilities::sync();
+		// Every configuration WRITE on this namespace now needs an active license
+		// (`Rest\Admin\AdminGuard::configureSite()`), and `ReservantTestCase::set_up()` starts every
+		// test from "no license". This class is about the CAPABILITY matrix, not the licensing gate
+		// - `LicenseEnforcementTest` owns that - so it says once, here, that its site is licensed,
+		// exactly as a real one would have to be before its owner could edit a service.
+		$this->licenseThisSite();
 	}
 
 	// ---------------------------------------------------------------- helpers

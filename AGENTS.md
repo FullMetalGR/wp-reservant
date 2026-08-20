@@ -218,7 +218,10 @@ reservant/
 |   +-- Notifications/         # mailers, templates, IcsBuilder
 |   +-- Integrations/
 |   |   +-- WooCommerce/       # the ONLY place WC symbols may appear
-|   +-- Licensing/             # LicenseManager interface + AlwaysValidLicense stub
+|   +-- Licensing/             # LicenseManager seam + Providers (resolution, filterable),
+|                              #   LicenseState/LicenseStatus, LicenseRecord (the
+|                              #   reservant_license row + grace arithmetic), SiteDomain
+|                              #   (the binding), LocalKeyLicense (stub validator)
 +-- assets/src/{booking,admin}/  # React
 +-- templates/                 # overridable via theme: yourtheme/reservant/*.php
 +-- languages/  tests/{Unit,Integration,e2e}  bin/
@@ -300,6 +303,36 @@ them because the booking is their own. `id` and `manage_token_hash` reach nobody
 | `GET\|POST /admin/occurrences`, `PUT\|DELETE /admin/occurrences/{id}` | event occurrences; `reservant_manage_settings` |
 | `GET\|POST /admin/seat-maps`, `GET\|PUT\|DELETE /admin/seat-maps/{id}` | seat grid specs; `reservant_manage_settings` |
 | `GET\|PUT /admin/settings` | plugin settings; `reservant_manage_settings` |
+| `GET\|POST\|DELETE /admin/license` | the site's license: read the status, activate a key, deactivate. `reservant_manage_settings`, and deliberately NOT the license gate below - this is the way back. `POST` takes `key`; all three answer the same payload (`Rest\Admin\LicensePayload`): `state`, `active`, `masked_key`, `domain`, `last_checked_at`, `grace_ends_at`. The plaintext key never crosses the wire in either direction of a response |
+
+**License enforcement.** An unlicensed site (`Licensing\LicenseStatus::isActive()` false - so
+`inactive`, `invalid` or `domain_mismatch`; `grace` counts as licensed) loses **configuration
+writes and nothing else**.
+
+FROZEN: creating, editing and deleting services, staff/resources, availability rules and blackout
+exceptions, occurrences, seat maps, and settings. Every one of those verbs is on
+`Rest\Admin\AdminGuard::configureSite()` - the `reservant_manage_settings` capability plus an
+active license - and the refusal is a `403` whose code is `reservant_license_required`, whose
+message is `license_required`, and whose `data.state` and `data.detail` name which of the three
+situations it is and where to fix it.
+
+NEVER FROZEN, under any circumstance:
+
+- **Every public and guest route.** Search availability, hold, confirm, pay, cancel, reschedule. A
+  billing lapse at the salon must never turn away the salon's customers.
+- **The entire admin booking lifecycle** - approve, reject, cancel, reschedule, manual booking,
+  no-show, complete. This one is not a convenience: `awaiting_approval` bookings sit on a TTL and
+  `ExpireHolds` reclaims them, so a frozen approval queue would let held bookings expire on their
+  own and turn away paying customers because of an unpaid invoice, silently, while the owner
+  watched. That is strictly worse than an unlicensed site being unable to edit its service list.
+- **Every READ.** The owner still sees their calendar, their bookings, their catalog and their
+  settings. `GET /admin/settings` in particular shares its permission callback with the settings
+  WRITE, and gating it would lock a lapsed owner out of the very screen where they enter their key.
+- **The license routes themselves.**
+
+The admin SPA gets the current status in its bootstrap (`window.reservantAdmin.license`) in the
+same shape `GET /admin/license` answers with, so a configuration screen can render itself read-only
+without a round trip first. It is `null` for a caller without `reservant_manage_settings`.
 
 Auth: `X-WP-Nonce` for logged-in/admin; for guests a **signed manage token** - random secret in the
 email link, only its hash stored (`manage_token_hash`), compared with `hash_equals()`. The token
@@ -458,6 +491,11 @@ degrade is indistinguishable from bookings that simply stopped being paid for.
   - `reservant/granularity_min` `( int $minutes )`, default 5.
   - `reservant/allow_direct_confirm` `( bool $allowed, array $booking )` - lets an `online`
     booking confirm without payment (the bridge's escape hatch).
+  - `reservant/license_manager` `( Licensing\LicenseManager $manager )` - the one seam a real
+    remote validator is dropped in through, so that no caller changes when the vendor is chosen.
+    Resolved and memoized by `Licensing\Providers`, the exact shape `reservant/payment_provider`
+    has in `Application\Payment\Providers`; a return value that is not a `LicenseManager` is
+    ignored rather than fatal in both.
   - `reservant/booking/reminder` `( BookingSnapshot $booking )` - fired by
     `Infrastructure\Scheduler\Jobs::reminder()` once it has re-read the booking and confirmed it
     still stands. The timer is scheduled optimistically and cancelled best-effort; THIS re-read is
@@ -506,6 +544,11 @@ composer install && npm install
 npm run build                 # production build - REQUIRED before any suite that renders wp-admin
 npx wp-env start              # local WP + DB - REQUIRED before the integration, concurrency and e2e suites
                               #   (it also installs WooCommerce, which the bridge suite exercises for real)
+                              #   `.wp-env.json`'s afterStart also LICENSES the dev site: configuration
+                              #   writes are license-gated (section 5), so without it the admin SPA - and
+                              #   the e2e smoke test that drives it - cannot create a service. The tests
+                              #   environment is untouched; the integration suite says so per class
+                              #   (`ReservantTestCase::licenseThisSite()`).
 npx playwright install chromium   # once, before the first e2e run
 
 npm run start                 # watch build (development)
@@ -522,10 +565,47 @@ npm run test:js               # Jest + Testing Library over assets/src
 npm run fallow                # fallow static analysis, failing on its error-level findings
 ./bin/run-concurrency.sh      # parallel holds, opposing-order chains, contested seats (needs wp-env)
 npm run test:e2e              # Playwright: admin smoke + the public booking flow (needs wp-env + a built bundle)
+
+# The release artifact
+composer package              # reservant-<version>.zip at the repository root, ready for wp-admin
+                              #   "Add Plugin -> Upload": one top-level reservant/ holding
+                              #   reservant.php, uninstall.php, README.md, readme.txt,
+                              #   CHANGELOG.md, composer.json/lock, src/, a freshly built build/
+                              #   and a --no-dev vendor/. Nothing else - the script copies an
+                              #   explicit manifest rather than filtering the tree, so AGENTS.md,
+                              #   tests/, assets/, bin/, docs/, node_modules/ and every tool
+                              #   config are out by construction.
 ```
 
 CI runs all of the above. Concurrency tests are not allowed to be marked skipped: `./bin/run-concurrency.sh`
 is the command, and it must pass, not be commented out or `|| true`-d.
+
+`composer package` (`bin/package-plugin.php`) is not a gate and CI does not run it; it is how the
+zip a customer installs gets made. It runs `npm run build` itself rather than documenting it as a
+prerequisite - a zip carrying last week's bundle installs cleanly and misbehaves with nothing to
+point at - and it installs the production dependencies into a STAGING copy with an explicit
+`--working-dir`, because a `composer install --no-dev` in this directory would delete the phpunit,
+phpstan, phpcs and wpcs that four of the gates above run out of. The version is read out of
+`reservant.php`, never passed in, and the plugin header disagreeing with `RESERVANT_VERSION` is a
+refusal rather than a coin toss. Nothing is taken on trust: both `require` targets in
+`reservant.php`, every asset the three enqueuers name, the staged autoloader resolving a real
+class, and the finished archive re-opened and walked - any one of them failing means no zip is
+written at all, and the previous one stays where it was.
+
+**The three documents, and which one owns what.** `README.md` is developer-facing and stays that
+way. `readme.txt` is the CUSTOMER's, in the WordPress readme format, and it ships - it is where a
+shop owner reads what the plugin does and, in particular, what a lapsed license actually costs
+(section 5's freeze list, in their language and not the spec's). `CHANGELOG.md` is the canonical
+version history and ships beside it, because `readme.txt`'s `== Changelog ==` deliberately carries
+only the CURRENT release and points there for everything earlier: the same history maintained in
+two files drifts apart inside one release, so one of them is the record and the other is a pointer.
+Neither claims a license the project has not chosen - `composer.json` says `proprietary`,
+`reservant.php` carries no `License:` header, and there is no LICENSE file to point one at.
+
+**The version lives in exactly two places, both in `reservant.php`:** the `Version:` plugin header
+and `RESERVANT_VERSION`. `composer package` refuses to run when they disagree, and nothing else in
+the repository - no test, no readme header, no package.json - restates the number, so that refusal
+is the whole gate. Adding a third copy means extending `read_agreed_version()` to cover it.
 
 `npm run fallow` is the enforcing form of `npx fallow --ci`: fallow writes SARIF but exits 0 even when
 it has reported `level: "error"` findings, so the wrapper (`bin/fallow-gate.mjs`) reads the report and
@@ -569,7 +649,12 @@ UI, not data.
    re-validated under lock at every door into payment), and the approval -> `awaiting_payment` ->
    emailed payment link, whose window is `payment_ttl_hours` and whose expiry the existing hold
    sweeper already reclaims.
-9. **P8** Licensing stub, packaging, docs.
+9. **P8** `[DONE]` Licensing, packaging, docs: `Licensing\LicenseManager` and the five-state
+   `LicenseStatus` behind it (key activation bound to the site domain, a daily re-check, a
+   14-day grace window because a validator that cannot answer means "unknown" and not
+   "unlicensed"), `AdminGuard::configureSite()` freezing configuration WRITES and nothing else
+   (see section 5), the Settings screen's License section, `composer package` and the shipped
+   `readme.txt`/`CHANGELOG.md`.
 
 **v1.1 - approval queue.** Statuses and columns already exist. Adds the admin inbox, signed
 approve/reject links with a one-click confirm page, and nag + timeout jobs. The approval ->
