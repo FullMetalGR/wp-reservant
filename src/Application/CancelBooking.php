@@ -62,7 +62,7 @@ final class CancelBooking {
 			throw new \RuntimeException( 'window_closed' );
 		}
 
-		return $this->guarded->transition(
+		$snapshot = $this->guarded->transition(
 			LockKey::forItems( $items ),
 			$uuid,
 			BookingStatus::Cancelled,
@@ -90,6 +90,52 @@ final class CancelBooking {
 			// the read itself fails. See `GuardedWrite`'s docblock on why this is not unified.
 			false
 		);
+
+		$this->flagOrder( $snapshot );
+		return $snapshot;
+	}
+
+	/**
+	 * Leave the owner a note on the order this booking was paying for - POST-COMMIT, all of it.
+	 *
+	 * This is the promise in AGENTS.md section 1 ("refunds are flagged, never automatic") actually
+	 * being kept, and the note is deliberately the whole of it: taxes, invoicing and refunds are
+	 * WooCommerce's job (section 6), and the plugin never issues a refund by itself in v1. What the
+	 * owner gets is the fact and the reference; what the customer is owed is a human's call, which is
+	 * why `WooPaymentProvider::flagOrder()` writes a private note rather than a customer-facing one.
+	 *
+	 * The failure rule is `ApproveBooking::issuePaymentLink()`'s, because this runs in the same
+	 * position for the same reason (section 2.2: hooks fire after commit and no listener may throw).
+	 * The cancellation has committed - the audit row is written, the seat is back on sale, the hook
+	 * has already told the customer - so an order write that fails is reported on `reservant/error`
+	 * with the uuid as context and swallowed. A WooCommerce fault must never turn a cancellation that
+	 * happened into a failure report, and there is nothing to roll back to that would be truer than
+	 * what the row already says.
+	 *
+	 * Only a positive `wc_order_id` is flagged: most bookings never had an order (free and onsite
+	 * services never get one), and there is nothing to annotate. Whether a provider is AVAILABLE is
+	 * deliberately not asked - a site that deactivated WooCommerce still has the stale id on the row,
+	 * and `NullPaymentProvider::flagOrder()` is already the documented no-op for exactly that.
+	 *
+	 * @param array<string, mixed> $snapshot The stored post-transition row.
+	 */
+	private function flagOrder( array $snapshot ): void {
+		$orderId = (int) ( $snapshot['wc_order_id'] ?? 0 );
+		if ( $orderId <= 0 ) {
+			return;
+		}
+		try {
+			Payment\Providers::get()->flagOrder(
+				$orderId,
+				sprintf(
+					/* translators: %s: the booking reference (uuid). */
+					__( 'Reservant: booking %s was cancelled and its slot released. No refund has been issued - whether this order is refunded is yours to decide.', 'reservant' ),
+					(string) $snapshot['uuid']
+				)
+			);
+		} catch ( \Throwable $e ) {
+			do_action( 'reservant/error', $e, (string) $snapshot['uuid'] );
+		}
 	}
 
 	/**

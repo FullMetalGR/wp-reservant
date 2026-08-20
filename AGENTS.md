@@ -405,7 +405,13 @@ degrade is indistinguishable from bookings that simply stopped being paid for.
   `reservant/error` with the booking uuid as context, and swallowed.
 - Taxes, invoicing and refunds are WooCommerce's job, and the plugin never issues a refund by
   itself in v1. `PaymentProvider::flagOrder()` is the seam for leaving the owner a note on the
-  order (a note, deliberately not a refund); no cancellation path calls it yet.
+  order (a note, deliberately not a refund), and `CancelBooking` calls it - post-commit, for every
+  cancelled booking that carries a `wc_order_id`, with a note naming the booking and saying that the
+  slot is released and nothing has been refunded. Unfailable like the approval's order write: a
+  provider that throws is reported on `reservant/error` and never turns a released seat back into a
+  failure. A booking with no order (free, onsite, never checked out) flags nothing, and provider
+  availability is deliberately not consulted - `NullPaymentProvider::flagOrder()` is the right
+  no-op for a site that deactivated WooCommerce with the stale id still on the row.
 
 ---
 
