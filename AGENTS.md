@@ -218,7 +218,10 @@ reservant/
 |   +-- Notifications/         # mailers, templates, IcsBuilder
 |   +-- Integrations/
 |   |   +-- WooCommerce/       # the ONLY place WC symbols may appear
-|   +-- Licensing/             # LicenseManager interface + AlwaysValidLicense stub
+|   +-- Licensing/             # LicenseManager seam + Providers (resolution, filterable),
+|                              #   LicenseState/LicenseStatus, LicenseRecord (the
+|                              #   reservant_license row + grace arithmetic), SiteDomain
+|                              #   (the binding), LocalKeyLicense (stub validator)
 +-- assets/src/{booking,admin}/  # React
 +-- templates/                 # overridable via theme: yourtheme/reservant/*.php
 +-- languages/  tests/{Unit,Integration,e2e}  bin/
@@ -458,6 +461,11 @@ degrade is indistinguishable from bookings that simply stopped being paid for.
   - `reservant/granularity_min` `( int $minutes )`, default 5.
   - `reservant/allow_direct_confirm` `( bool $allowed, array $booking )` - lets an `online`
     booking confirm without payment (the bridge's escape hatch).
+  - `reservant/license_manager` `( Licensing\LicenseManager $manager )` - the one seam a real
+    remote validator is dropped in through, so that no caller changes when the vendor is chosen.
+    Resolved and memoized by `Licensing\Providers`, the exact shape `reservant/payment_provider`
+    has in `Application\Payment\Providers`; a return value that is not a `LicenseManager` is
+    ignored rather than fatal in both.
   - `reservant/booking/reminder` `( BookingSnapshot $booking )` - fired by
     `Infrastructure\Scheduler\Jobs::reminder()` once it has re-read the booking and confirmed it
     still stands. The timer is scheduled optimistically and cancelled best-effort; THIS re-read is

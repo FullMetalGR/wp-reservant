@@ -111,13 +111,16 @@ final class Plugin {
 		// Action Scheduler's own data store initializes on `init` (priority 1, `ActionScheduler::init()`),
 		// which has not run yet at `plugins_loaded` - calling `as_*` functions here would silently
 		// no-op (and trigger `_doing_it_wrong`). Deferred to `init` at a lower-precedence priority
-		// so the store is guaranteed ready first. `everyFiveMinutes()` is itself idempotent
-		// (guards on `as_has_scheduled_action`), so running this on every request never
-		// accumulates a second recurring sweep.
+		// so the store is guaranteed ready first. Both schedulers are idempotent (they guard on
+		// `as_has_scheduled_action`), so running this on every request never accumulates a second
+		// copy of either. The license re-check rides here rather than on activation because a
+		// plugin UPDATE never fires the activation hook, and a timer that only exists on sites
+		// that happened to reactivate is a timer that does not exist.
 		add_action(
 			'init',
 			static function (): void {
 				Infrastructure\Scheduler\Scheduler::everyFiveMinutes( Infrastructure\Scheduler\Jobs::SWEEP );
+				Infrastructure\Scheduler\Scheduler::daily( Infrastructure\Scheduler\Jobs::LICENSE );
 			},
 			20
 		);

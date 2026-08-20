@@ -25,6 +25,22 @@ final class Scheduler {
 		as_schedule_single_action( $ts, $hook, $args, self::GROUP );
 	}
 
+	/** The hold sweeper's cadence. See `recurring()`. */
+	public static function everyFiveMinutes( string $hook ): void {
+		self::recurring( $hook, 5 * MINUTE_IN_SECONDS );
+	}
+
+	/**
+	 * The license re-check's cadence. See `recurring()`.
+	 *
+	 * Daily rather than hourly because the answer changes at most once per billing event, and a
+	 * fortnight of grace already absorbs a missed day; and daily rather than weekly because a
+	 * revoked license should stop working in days, not in a month.
+	 */
+	public static function daily( string $hook ): void {
+		self::recurring( $hook, DAY_IN_SECONDS );
+	}
+
 	/**
 	 * Ensures a recurring job exists, without ever scheduling a second copy of it - callers (only
 	 * `Plugin::register()`, on every request) do not need to know whether this is the first call
@@ -35,8 +51,10 @@ final class Scheduler {
 	 * exactly the condition Action Scheduler's own `shutdown`-hooked async runner watches for
 	 * before firing a loopback HTTP request to process the queue. Nothing in this plugin's own
 	 * code ever wants that: production execution is WP-Cron's job, and integration tests are
-	 * explicitly told never to invoke the real queue runner. Starting one interval later sidesteps
-	 * the condition entirely rather than relying on a filter to suppress its effect.
+	 * explicitly told never to invoke the real queue runner. Starting five minutes out sidesteps
+	 * the condition entirely rather than relying on a filter to suppress its effect. The anchor is
+	 * a flat five minutes for every cadence, not one whole interval: it only has to clear the
+	 * already-due window, and a daily job would otherwise not exist in the store until tomorrow.
 	 *
 	 * The `as_has_scheduled_action()` check below is a fast-path only, not the correctness
 	 * guarantee: it and the `as_schedule_recurring_action()` call are two separate round trips to
@@ -47,11 +65,11 @@ final class Scheduler {
 	 * exists", per Action Scheduler's own documented contract (see the `$unique` param docs on
 	 * both scheduling functions in `tests/stubs/action-scheduler.php`).
 	 */
-	public static function everyFiveMinutes( string $hook ): void {
+	private static function recurring( string $hook, int $intervalSeconds ): void {
 		if ( as_has_scheduled_action( $hook, array(), self::GROUP ) ) {
 			return;
 		}
-		as_schedule_recurring_action( time() + 5 * MINUTE_IN_SECONDS, 5 * MINUTE_IN_SECONDS, $hook, array(), self::GROUP, true );
+		as_schedule_recurring_action( time() + 5 * MINUTE_IN_SECONDS, $intervalSeconds, $hook, array(), self::GROUP, true );
 	}
 
 	/**
