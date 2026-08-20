@@ -565,10 +565,31 @@ npm run test:js               # Jest + Testing Library over assets/src
 npm run fallow                # fallow static analysis, failing on its error-level findings
 ./bin/run-concurrency.sh      # parallel holds, opposing-order chains, contested seats (needs wp-env)
 npm run test:e2e              # Playwright: admin smoke + the public booking flow (needs wp-env + a built bundle)
+
+# The release artifact
+composer package              # reservant-<version>.zip at the repository root, ready for wp-admin
+                              #   "Add Plugin -> Upload": one top-level reservant/ holding
+                              #   reservant.php, uninstall.php, README.md, composer.json/lock,
+                              #   src/, a freshly built build/ and a --no-dev vendor/. Nothing
+                              #   else - the script copies an explicit manifest rather than
+                              #   filtering the tree, so AGENTS.md, tests/, assets/, bin/, docs/,
+                              #   node_modules/ and every tool config are out by construction.
 ```
 
 CI runs all of the above. Concurrency tests are not allowed to be marked skipped: `./bin/run-concurrency.sh`
 is the command, and it must pass, not be commented out or `|| true`-d.
+
+`composer package` (`bin/package-plugin.php`) is not a gate and CI does not run it; it is how the
+zip a customer installs gets made. It runs `npm run build` itself rather than documenting it as a
+prerequisite - a zip carrying last week's bundle installs cleanly and misbehaves with nothing to
+point at - and it installs the production dependencies into a STAGING copy with an explicit
+`--working-dir`, because a `composer install --no-dev` in this directory would delete the phpunit,
+phpstan, phpcs and wpcs that four of the gates above run out of. The version is read out of
+`reservant.php`, never passed in, and the plugin header disagreeing with `RESERVANT_VERSION` is a
+refusal rather than a coin toss. Nothing is taken on trust: both `require` targets in
+`reservant.php`, every asset the three enqueuers name, the staged autoloader resolving a real
+class, and the finished archive re-opened and walked - any one of them failing means no zip is
+written at all, and the previous one stays where it was.
 
 `npm run fallow` is the enforcing form of `npx fallow --ci`: fallow writes SARIF but exits 0 even when
 it has reported `level: "error"` findings, so the wrapper (`bin/fallow-gate.mjs`) reads the report and
