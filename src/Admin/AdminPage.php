@@ -212,7 +212,20 @@ final class AdminPage {
 	 * could not be compared against the PHP one by any test, and an email added in a later phase
 	 * would simply have no switch.
 	 *
-	 * @return array{restRoot:string,nonce:string,caps:list<string>,currency:string,timezone:string,granularityMin:int,emailChoices:list<array{key:string,label:string}>}
+	 * `license` is the current `Licensing\LicenseStatus` in the SAME shape `GET /admin/license`
+	 * returns (`Rest\Admin\LicensePayload`, the one place that decides it), so the SPA parses one
+	 * shape whether the status arrived with the page or came back from an activation. It rides in
+	 * the bootstrap rather than being fetched because an unlicensed site has every configuration
+	 * screen to draw as read-only, and a round trip before it can do that is a screen that renders
+	 * once wrongly and then corrects itself. The key is masked - `LicenseStatus` carries no other
+	 * form of it - so nothing here is a credential.
+	 *
+	 * It is `null` for a caller without `reservant_manage_settings`, the same narrowing `caps`
+	 * exists for: a staff-only viewer's My Calendar page has no licensing section, no configuration
+	 * screen to grey out, and no way to act on the answer. The bound domain and the check history
+	 * are the operator's business, not every logged-in user's.
+	 *
+	 * @return array{restRoot:string,nonce:string,caps:list<string>,currency:string,timezone:string,granularityMin:int,emailChoices:list<array{key:string,label:string}>,license:array{state:string,active:bool,masked_key:string,domain:string,last_checked_at:?string,grace_ends_at:?string}|null}
 	 */
 	private function config(): array {
 		$caps = array_values(
@@ -230,7 +243,32 @@ final class AdminPage {
 			'timezone'       => wp_timezone_string(),
 			'granularityMin' => self::granularityMin(),
 			'emailChoices'   => \Reservant\Notifications\EmailCatalog::choices(),
+			'license'        => self::license(),
 		);
+	}
+
+	/**
+	 * The license as the wire sees it, or null for a caller who may not configure the site.
+	 *
+	 * A `reservant/license_manager` implementation is third-party code and `status()` is called here
+	 * on a wp-admin page render, so a throw is caught for the reason `AdminGuard::licensed()` catches
+	 * one: a broken validator must not be a white screen where the plugin's admin used to be. The
+	 * SPA reads a null as "the status is not known right now" and falls back to
+	 * `GET /admin/license`, which is the same answer it would need on a stale bootstrap anyway.
+	 *
+	 * @return array{state:string,active:bool,masked_key:string,domain:string,last_checked_at:?string,grace_ends_at:?string}|null
+	 */
+	private static function license(): ?array {
+		if ( ! current_user_can( 'reservant_manage_settings' ) ) {
+			return null;
+		}
+		try {
+			$status = \Reservant\Licensing\Providers::get()->status( new \DateTimeImmutable( 'now', new \DateTimeZone( 'UTC' ) ) );
+		} catch ( \Throwable $e ) {
+			do_action( 'reservant/error', $e );
+			return null;
+		}
+		return \Reservant\Rest\Admin\LicensePayload::of( $status );
 	}
 
 	private static function granularityMin(): int {

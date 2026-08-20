@@ -303,6 +303,36 @@ them because the booking is their own. `id` and `manage_token_hash` reach nobody
 | `GET\|POST /admin/occurrences`, `PUT\|DELETE /admin/occurrences/{id}` | event occurrences; `reservant_manage_settings` |
 | `GET\|POST /admin/seat-maps`, `GET\|PUT\|DELETE /admin/seat-maps/{id}` | seat grid specs; `reservant_manage_settings` |
 | `GET\|PUT /admin/settings` | plugin settings; `reservant_manage_settings` |
+| `GET\|POST\|DELETE /admin/license` | the site's license: read the status, activate a key, deactivate. `reservant_manage_settings`, and deliberately NOT the license gate below - this is the way back. `POST` takes `key`; all three answer the same payload (`Rest\Admin\LicensePayload`): `state`, `active`, `masked_key`, `domain`, `last_checked_at`, `grace_ends_at`. The plaintext key never crosses the wire in either direction of a response |
+
+**License enforcement.** An unlicensed site (`Licensing\LicenseStatus::isActive()` false - so
+`inactive`, `invalid` or `domain_mismatch`; `grace` counts as licensed) loses **configuration
+writes and nothing else**.
+
+FROZEN: creating, editing and deleting services, staff/resources, availability rules and blackout
+exceptions, occurrences, seat maps, and settings. Every one of those verbs is on
+`Rest\Admin\AdminGuard::configureSite()` - the `reservant_manage_settings` capability plus an
+active license - and the refusal is a `403` whose code is `reservant_license_required`, whose
+message is `license_required`, and whose `data.state` and `data.detail` name which of the three
+situations it is and where to fix it.
+
+NEVER FROZEN, under any circumstance:
+
+- **Every public and guest route.** Search availability, hold, confirm, pay, cancel, reschedule. A
+  billing lapse at the salon must never turn away the salon's customers.
+- **The entire admin booking lifecycle** - approve, reject, cancel, reschedule, manual booking,
+  no-show, complete. This one is not a convenience: `awaiting_approval` bookings sit on a TTL and
+  `ExpireHolds` reclaims them, so a frozen approval queue would let held bookings expire on their
+  own and turn away paying customers because of an unpaid invoice, silently, while the owner
+  watched. That is strictly worse than an unlicensed site being unable to edit its service list.
+- **Every READ.** The owner still sees their calendar, their bookings, their catalog and their
+  settings. `GET /admin/settings` in particular shares its permission callback with the settings
+  WRITE, and gating it would lock a lapsed owner out of the very screen where they enter their key.
+- **The license routes themselves.**
+
+The admin SPA gets the current status in its bootstrap (`window.reservantAdmin.license`) in the
+same shape `GET /admin/license` answers with, so a configuration screen can render itself read-only
+without a round trip first. It is `null` for a caller without `reservant_manage_settings`.
 
 Auth: `X-WP-Nonce` for logged-in/admin; for guests a **signed manage token** - random secret in the
 email link, only its hash stored (`manage_token_hash`), compared with `hash_equals()`. The token
@@ -514,6 +544,11 @@ composer install && npm install
 npm run build                 # production build - REQUIRED before any suite that renders wp-admin
 npx wp-env start              # local WP + DB - REQUIRED before the integration, concurrency and e2e suites
                               #   (it also installs WooCommerce, which the bridge suite exercises for real)
+                              #   `.wp-env.json`'s afterStart also LICENSES the dev site: configuration
+                              #   writes are license-gated (section 5), so without it the admin SPA - and
+                              #   the e2e smoke test that drives it - cannot create a service. The tests
+                              #   environment is untouched; the integration suite says so per class
+                              #   (`ReservantTestCase::licenseThisSite()`).
 npx playwright install chromium   # once, before the first e2e run
 
 npm run start                 # watch build (development)

@@ -24,6 +24,20 @@ use Reservant\Rest\Routes;
  * and cannot render their staff filter, service filter or manual-booking drawer without those two
  * lists. Both are reads of the collection only - every write, and every other catalog route,
  * including the single-item reads, stays on `reservant_manage_settings`.
+ *
+ * **Licensing is enforced by which of two callbacks a route carries, and by nothing else.** Every
+ * configuration WRITE - `CREATABLE`, `EDITABLE`, `DELETABLE` on services, staff, exceptions,
+ * occurrences, seat maps and settings - is on `AdminGuard::configureSite()`, which is the same
+ * capability plus an active license. Every configuration READ stays on `manageSettings()`,
+ * `readCatalog()` or `calendarAccess()`, and every booking-lifecycle route stays on
+ * `manageBookings()` / `approveBookings()`. So an unlicensed site loses the ability to change its
+ * setup and keeps everything else: the calendar, the bookings list, approve, reject, cancel,
+ * reschedule, manual booking, and the whole public surface. AGENTS.md section 5 states the policy
+ * and `AdminGuard::configureSite()` states why the lifecycle in particular is exempt.
+ *
+ * The rule is "write verb on a configuration route", not "route that looks like configuration":
+ * `POST /admin/bookings` is a write on this namespace and is deliberately NOT gated - a manual
+ * booking is the owner taking a booking, which is the thing that must never stop.
  */
 final class AdminRoutes {
 
@@ -42,6 +56,7 @@ final class AdminRoutes {
 		$occurrences  = new OccurrencesAdminController( $this->db );
 		$seatMaps     = new SeatMapsAdminController( $this->db );
 		$settings     = new SettingsAdminController();
+		$license      = new LicenseAdminController();
 
 		register_rest_route(
 			Routes::NS,
@@ -202,7 +217,7 @@ final class AdminRoutes {
 				array(
 					'methods'             => \WP_REST_Server::CREATABLE,
 					'callback'            => array( $services, 'create' ),
-					'permission_callback' => array( $guard, 'manageSettings' ),
+					'permission_callback' => array( $guard, 'configureSite' ),
 				),
 			)
 		);
@@ -220,13 +235,13 @@ final class AdminRoutes {
 				array(
 					'methods'             => \WP_REST_Server::EDITABLE,
 					'callback'            => array( $services, 'update' ),
-					'permission_callback' => array( $guard, 'manageSettings' ),
+					'permission_callback' => array( $guard, 'configureSite' ),
 					'args'                => self::idArgs(),
 				),
 				array(
 					'methods'             => \WP_REST_Server::DELETABLE,
 					'callback'            => array( $services, 'destroy' ),
-					'permission_callback' => array( $guard, 'manageSettings' ),
+					'permission_callback' => array( $guard, 'configureSite' ),
 					'args'                => self::idArgs(),
 				),
 			)
@@ -245,7 +260,7 @@ final class AdminRoutes {
 				array(
 					'methods'             => \WP_REST_Server::CREATABLE,
 					'callback'            => array( $resources, 'create' ),
-					'permission_callback' => array( $guard, 'manageSettings' ),
+					'permission_callback' => array( $guard, 'configureSite' ),
 				),
 			)
 		);
@@ -263,13 +278,13 @@ final class AdminRoutes {
 				array(
 					'methods'             => \WP_REST_Server::EDITABLE,
 					'callback'            => array( $resources, 'update' ),
-					'permission_callback' => array( $guard, 'manageSettings' ),
+					'permission_callback' => array( $guard, 'configureSite' ),
 					'args'                => self::idArgs(),
 				),
 				array(
 					'methods'             => \WP_REST_Server::DELETABLE,
 					'callback'            => array( $resources, 'destroy' ),
-					'permission_callback' => array( $guard, 'manageSettings' ),
+					'permission_callback' => array( $guard, 'configureSite' ),
 					'args'                => self::idArgs(),
 				),
 			)
@@ -282,13 +297,13 @@ final class AdminRoutes {
 				array(
 					'methods'             => \WP_REST_Server::CREATABLE,
 					'callback'            => array( $resources, 'addException' ),
-					'permission_callback' => array( $guard, 'manageSettings' ),
+					'permission_callback' => array( $guard, 'configureSite' ),
 					'args'                => self::idArgs(),
 				),
 				array(
 					'methods'             => \WP_REST_Server::DELETABLE,
 					'callback'            => array( $resources, 'removeException' ),
-					'permission_callback' => array( $guard, 'manageSettings' ),
+					'permission_callback' => array( $guard, 'configureSite' ),
 					'args'                => self::idArgs(),
 				),
 			)
@@ -312,12 +327,12 @@ final class AdminRoutes {
 				array(
 					'methods'             => \WP_REST_Server::CREATABLE,
 					'callback'            => array( $resources, 'addBusinessException' ),
-					'permission_callback' => array( $guard, 'manageSettings' ),
+					'permission_callback' => array( $guard, 'configureSite' ),
 				),
 				array(
 					'methods'             => \WP_REST_Server::DELETABLE,
 					'callback'            => array( $resources, 'removeBusinessException' ),
-					'permission_callback' => array( $guard, 'manageSettings' ),
+					'permission_callback' => array( $guard, 'configureSite' ),
 				),
 			)
 		);
@@ -340,7 +355,7 @@ final class AdminRoutes {
 				array(
 					'methods'             => \WP_REST_Server::CREATABLE,
 					'callback'            => array( $occurrences, 'create' ),
-					'permission_callback' => array( $guard, 'manageSettings' ),
+					'permission_callback' => array( $guard, 'configureSite' ),
 				),
 			)
 		);
@@ -352,13 +367,13 @@ final class AdminRoutes {
 				array(
 					'methods'             => \WP_REST_Server::EDITABLE,
 					'callback'            => array( $occurrences, 'update' ),
-					'permission_callback' => array( $guard, 'manageSettings' ),
+					'permission_callback' => array( $guard, 'configureSite' ),
 					'args'                => self::idArgs(),
 				),
 				array(
 					'methods'             => \WP_REST_Server::DELETABLE,
 					'callback'            => array( $occurrences, 'destroy' ),
-					'permission_callback' => array( $guard, 'manageSettings' ),
+					'permission_callback' => array( $guard, 'configureSite' ),
 					'args'                => self::idArgs(),
 				),
 			)
@@ -376,7 +391,7 @@ final class AdminRoutes {
 				array(
 					'methods'             => \WP_REST_Server::CREATABLE,
 					'callback'            => array( $seatMaps, 'create' ),
-					'permission_callback' => array( $guard, 'manageSettings' ),
+					'permission_callback' => array( $guard, 'configureSite' ),
 				),
 			)
 		);
@@ -394,13 +409,13 @@ final class AdminRoutes {
 				array(
 					'methods'             => \WP_REST_Server::EDITABLE,
 					'callback'            => array( $seatMaps, 'update' ),
-					'permission_callback' => array( $guard, 'manageSettings' ),
+					'permission_callback' => array( $guard, 'configureSite' ),
 					'args'                => self::idArgs(),
 				),
 				array(
 					'methods'             => \WP_REST_Server::DELETABLE,
 					'callback'            => array( $seatMaps, 'destroy' ),
-					'permission_callback' => array( $guard, 'manageSettings' ),
+					'permission_callback' => array( $guard, 'configureSite' ),
 					'args'                => self::idArgs(),
 				),
 			)
@@ -418,6 +433,45 @@ final class AdminRoutes {
 				array(
 					'methods'             => \WP_REST_Server::EDITABLE,
 					'callback'            => array( $settings, 'update' ),
+					'permission_callback' => array( $guard, 'configureSite' ),
+				),
+			)
+		);
+
+		// The one write on this namespace that is `manageSettings` and NOT `configureSite`, on
+		// purpose: this is the route that makes a lapsed license active again, so gating it on an
+		// active license would leave an unlicensed site with no way back. See
+		// `LicenseAdminController`.
+		register_rest_route(
+			Routes::NS,
+			'/admin/license',
+			array(
+				array(
+					'methods'             => \WP_REST_Server::READABLE,
+					'callback'            => array( $license, 'index' ),
+					'permission_callback' => array( $guard, 'manageSettings' ),
+				),
+				array(
+					'methods'             => \WP_REST_Server::CREATABLE,
+					'callback'            => array( $license, 'create' ),
+					'permission_callback' => array( $guard, 'manageSettings' ),
+					'args'                => array(
+						'key' => array(
+							'default'  => '',
+							// Deliberately NOT `sanitize_text_field`: it strips more than whitespace
+							// (tags, octets, percent-encodings), and a key is an opaque credential
+							// that must reach the validator exactly as the vendor issued it. A key
+							// silently altered on the way in is a key that can only ever be refused,
+							// with nothing on screen to say why. `Input::text()` in the controller
+							// refuses a non-string; trimming is the manager's own documented job.
+							'type'     => 'string',
+							'required' => false,
+						),
+					),
+				),
+				array(
+					'methods'             => \WP_REST_Server::DELETABLE,
+					'callback'            => array( $license, 'destroy' ),
 					'permission_callback' => array( $guard, 'manageSettings' ),
 				),
 			)

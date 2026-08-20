@@ -43,6 +43,30 @@ abstract class ReservantTestCase extends \WP_UnitTestCase {
 	}
 
 	/**
+	 * Put a live license on this site, through the real state machine.
+	 *
+	 * Every configuration WRITE on the admin namespace is gated on an active license
+	 * (`Rest\Admin\AdminGuard::configureSite()`), and `set_up()` above starts every test from "no
+	 * license" - so a test class that creates a service or edits settings over REST has to say that
+	 * its site is licensed, exactly as a real one would have to be. Said out loud, once per class,
+	 * rather than defaulted in `set_up()`: the licensing tests need the unlicensed starting point
+	 * to stay the starting point, and a default that quietly licensed every site would make the
+	 * enforcement gate untestable from the same base class that all the other tests use.
+	 *
+	 * `new LocalKeyLicense( true )` is the dev-mode stub, which accepts any non-empty key - the
+	 * same seam `tests/Unit/Licensing` and `LicenseManagerTest` drive, and the reason no test needs
+	 * the plaintext of the one built-in key. Everything after `accepts()` is production code: this
+	 * writes the real `reservant_license` row and the guard reads it back the way it reads a paying
+	 * customer's.
+	 */
+	protected function licenseThisSite(): void {
+		( new \Reservant\Licensing\LocalKeyLicense( true ) )->activate(
+			'RSVT-TEST-0000-0001',
+			new \DateTimeImmutable( 'now', new \DateTimeZone( 'UTC' ) )
+		);
+	}
+
+	/**
 	 * Install a `PaymentProvider` for this test and return it.
 	 *
 	 * The filter is the documented extension point (`reservant/payment_provider`), so a test that
