@@ -25,8 +25,13 @@ that outlives it is refused under lock, before any money moves.
 
 WooCommerce remains optional. With no payment plugin active the whole thing degrades on
 purpose - "pay online" behaves as pay-on-arrival, bookings still complete, and wp-admin says
-plainly that nothing is currently taking money. Licensing, packaging and shipping docs are the
-last milestone before v1.0.
+plainly that nothing is currently taking money.
+
+Licensing is in too: a key activates against the site's domain and is re-checked daily, and a
+site whose license has lapsed loses configuration writes and nothing else - bookings, payments
+and the whole approval queue keep running. `composer package` builds the distributable zip, and
+`readme.txt` plus `CHANGELOG.md` ship inside it. That was the last milestone before v1.0; what
+remains is QA.
 
 See `AGENTS.md` for the full product spec, invariants, schema, and conventions.
 

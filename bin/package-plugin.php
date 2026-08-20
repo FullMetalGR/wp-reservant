@@ -63,12 +63,23 @@ declare( strict_types=1 );
  * `build/` and `vendor/` are produced first and copied last; the rest are tracked files.
  * `templates/` and `languages/` from the AGENTS.md section 3 layout do not exist yet - when the
  * first one does, it ships by being added here, and the root check below is what will notice.
+ *
+ * `readme.txt` and `CHANGELOG.md` are the customer's documentation and they are on this list for
+ * one reason: a document that is not named here reaches nobody. `readme.txt` is what states, in a
+ * customer's language, what an unlicensed site actually loses - and an owner whose Save button has
+ * stopped working is exactly the person who needs that sentence and cannot ask for it. `CHANGELOG.md`
+ * ships because `readme.txt` points at it for the history it deliberately does not repeat, and a
+ * pointer to a file the customer does not have is worse than no pointer. `README.md` is the
+ * developer-facing one and predates both; it stays because a plugin folder with no README at all
+ * reads as an accident.
  */
 const SHIPPED = array(
+	'CHANGELOG.md',
 	'README.md',
 	'build',
 	'composer.json',
 	'composer.lock',
+	'readme.txt',
 	'reservant.php',
 	'src',
 	'uninstall.php',
@@ -90,11 +101,21 @@ const SHIPPED = array(
  *   which makes WordPress swap the whole sheet on an RTL locale - a missing twin is an unstyled
  *   widget for those visitors and nobody else, which is precisely the kind of bug that ships.
  * - `src/Plugin.php`, the container the bootstrap calls into.
+ *
+ * The rest of the list is a second class, and worth naming as one rather than leaving it to look
+ * like an oversight: the shipped DOCUMENTS (`README.md`, `readme.txt`, `CHANGELOG.md`) and the two
+ * Composer files. None of them breaks a site by being absent - they are here because each is
+ * copied by the loop above and an empty copy is the failure mode a file listing cannot see. A
+ * zero-byte `readme.txt` looks shipped and answers nothing, and `composer.json`/`composer.lock`
+ * are the only record in the archive of which dependency versions the `vendor/` beside them was
+ * built from, which is the first thing anybody asks when a shipped tree misbehaves.
  */
 const MUST_CARRY_BYTES = array(
 	'reservant.php',
 	'uninstall.php',
 	'README.md',
+	'readme.txt',
+	'CHANGELOG.md',
 	'composer.json',
 	'composer.lock',
 	'src/Plugin.php',

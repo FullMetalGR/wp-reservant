@@ -569,11 +569,12 @@ npm run test:e2e              # Playwright: admin smoke + the public booking flo
 # The release artifact
 composer package              # reservant-<version>.zip at the repository root, ready for wp-admin
                               #   "Add Plugin -> Upload": one top-level reservant/ holding
-                              #   reservant.php, uninstall.php, README.md, composer.json/lock,
-                              #   src/, a freshly built build/ and a --no-dev vendor/. Nothing
-                              #   else - the script copies an explicit manifest rather than
-                              #   filtering the tree, so AGENTS.md, tests/, assets/, bin/, docs/,
-                              #   node_modules/ and every tool config are out by construction.
+                              #   reservant.php, uninstall.php, README.md, readme.txt,
+                              #   CHANGELOG.md, composer.json/lock, src/, a freshly built build/
+                              #   and a --no-dev vendor/. Nothing else - the script copies an
+                              #   explicit manifest rather than filtering the tree, so AGENTS.md,
+                              #   tests/, assets/, bin/, docs/, node_modules/ and every tool
+                              #   config are out by construction.
 ```
 
 CI runs all of the above. Concurrency tests are not allowed to be marked skipped: `./bin/run-concurrency.sh`
@@ -590,6 +591,21 @@ refusal rather than a coin toss. Nothing is taken on trust: both `require` targe
 `reservant.php`, every asset the three enqueuers name, the staged autoloader resolving a real
 class, and the finished archive re-opened and walked - any one of them failing means no zip is
 written at all, and the previous one stays where it was.
+
+**The three documents, and which one owns what.** `README.md` is developer-facing and stays that
+way. `readme.txt` is the CUSTOMER's, in the WordPress readme format, and it ships - it is where a
+shop owner reads what the plugin does and, in particular, what a lapsed license actually costs
+(section 5's freeze list, in their language and not the spec's). `CHANGELOG.md` is the canonical
+version history and ships beside it, because `readme.txt`'s `== Changelog ==` deliberately carries
+only the CURRENT release and points there for everything earlier: the same history maintained in
+two files drifts apart inside one release, so one of them is the record and the other is a pointer.
+Neither claims a license the project has not chosen - `composer.json` says `proprietary`,
+`reservant.php` carries no `License:` header, and there is no LICENSE file to point one at.
+
+**The version lives in exactly two places, both in `reservant.php`:** the `Version:` plugin header
+and `RESERVANT_VERSION`. `composer package` refuses to run when they disagree, and nothing else in
+the repository - no test, no readme header, no package.json - restates the number, so that refusal
+is the whole gate. Adding a third copy means extending `read_agreed_version()` to cover it.
 
 `npm run fallow` is the enforcing form of `npx fallow --ci`: fallow writes SARIF but exits 0 even when
 it has reported `level: "error"` findings, so the wrapper (`bin/fallow-gate.mjs`) reads the report and
@@ -633,7 +649,12 @@ UI, not data.
    re-validated under lock at every door into payment), and the approval -> `awaiting_payment` ->
    emailed payment link, whose window is `payment_ttl_hours` and whose expiry the existing hold
    sweeper already reclaims.
-9. **P8** Licensing stub, packaging, docs.
+9. **P8** `[DONE]` Licensing, packaging, docs: `Licensing\LicenseManager` and the five-state
+   `LicenseStatus` behind it (key activation bound to the site domain, a daily re-check, a
+   14-day grace window because a validator that cannot answer means "unknown" and not
+   "unlicensed"), `AdminGuard::configureSite()` freezing configuration WRITES and nothing else
+   (see section 5), the Settings screen's License section, `composer package` and the shipped
+   `readme.txt`/`CHANGELOG.md`.
 
 **v1.1 - approval queue.** Statuses and columns already exist. Adds the admin inbox, signed
 approve/reject links with a one-click confirm page, and nag + timeout jobs. The approval ->
