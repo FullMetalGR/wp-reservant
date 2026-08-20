@@ -59,6 +59,12 @@ use Reservant\Rest\Input;
  * only credential (AGENTS.md section 5) and rides in the URL exactly as it does on the manage page.
  * A missing booking and a wrong token produce one identical answer (a silent redirect home), so the
  * entry adds no booking-existence oracle.
+ *
+ * The link is built by `entryUrl()` and reaches the guest through the `POST /holds` 201, as
+ * `checkout_url` beside the manage token - the only moment the plaintext credential exists
+ * (`Rest\HoldsController::checkoutUrl()` says why nowhere else can). The widget's review step sends
+ * them here rather than to a confirm that would answer 402 with nowhere to go, which is what makes
+ * the non-approval flow reachable by a real visitor at all.
  */
 final class CartBridge {
 
@@ -151,6 +157,61 @@ final class CartBridge {
 	}
 
 	/**
+	 * Whether this booking has any business in a WooCommerce cart at all - the "belongs in a cart"
+	 * rule of AGENTS.md section 6, stated once.
+	 *
+	 * Public and static for the `lineShape()` reason: two readers, one rule. `boardCart()` enforces
+	 * it at the door (a false answer is `not_boardable`), and `WooPaymentProvider::checkoutUrl()`
+	 * asks it before handing anybody a link, so the surface that ROUTES a guest here and the door
+	 * that ADMITS them cannot drift into offering a checkout that is then refused.
+	 *
+	 * - `pending` only. An `awaiting_approval` booking must mint no order before a human says yes,
+	 *   and an `awaiting_payment` one already has the single order `ApproveBooking` created; both
+	 *   are spelled out in the class docblock above.
+	 * - `online` only. A free or onsite booking is settled by `ConfirmBooking`, not by a checkout.
+	 * - The RESOLVED provider, not `wooCommerceActive()`: a site that filtered in a non-WC provider
+	 *   has said who takes NEW money, and boarding the WC cart would take it through WooCommerce
+	 *   anyway. With no provider at all this is false, which is the section 6 degrade - the booking
+	 *   simply confirms and nobody is sent anywhere.
+	 *
+	 * Deliberately says nothing about the hold deadline: whether a booking BELONGS in a cart is a
+	 * fact about the booking, while whether its hold is still alive is a fact about the clock, and
+	 * `boardCart()` asks the second question separately so it can answer `hold_expired` rather than
+	 * telling an expired guest their booking was never payable.
+	 *
+	 * @param array<string, mixed> $booking booking row, as `BookingRepository` hydrates it
+	 */
+	public static function boardable( array $booking ): bool {
+		return BookingStatus::Pending->value === (string) ( $booking['status'] ?? '' )
+			&& PaymentMode::Online->value === (string) ( $booking['payment_mode'] ?? '' )
+			&& Payment\Providers::get() instanceof WooPaymentProvider;
+	}
+
+	/**
+	 * The front-channel entry link `maybeEnter()` answers: `?reservant_checkout={uuid}&token=...`
+	 * on the site root.
+	 *
+	 * It lives beside the handler it inverts, for the reason `Frontend\ManageRoute::url()` lives
+	 * beside its rewrite rule: a URL builder in another file is one more thing to remember when the
+	 * entry changes. The shape is that same magic link's - `home_url()` plus `add_query_arg`, the
+	 * manage token riding in the query string exactly as it does there - because it IS that
+	 * credential (AGENTS.md section 5), and the token's alphabet is URL-safe by construction
+	 * (`ManageToken::issue()`).
+	 *
+	 * No rewrite rule and no permalink branch: `maybeEnter()` runs on `wp_loaded` for any front-end
+	 * request carrying the query arg, so the site root serves it under either permalink mode.
+	 */
+	public static function entryUrl( string $uuid, string $token ): string {
+		return add_query_arg(
+			array(
+				self::QUERY_UUID => $uuid,
+				'token'          => $token,
+			),
+			home_url( '/' )
+		);
+	}
+
+	/**
 	 * Put a held booking into the cart: evict everything else, then one line per booking item.
 	 *
 	 * All lines or none - a cart holding part of a chain must never exist, so a line that cannot
@@ -170,16 +231,7 @@ final class CartBridge {
 	 *                           lapsed, `cart_board_failed` when WooCommerce refused a line.
 	 */
 	public function boardCart( array $booking, \DateTimeImmutable $nowUtc ): void {
-		if ( BookingStatus::Pending->value !== (string) $booking['status'] ) {
-			throw new \RuntimeException( 'not_boardable' );
-		}
-		if ( PaymentMode::Online->value !== (string) $booking['payment_mode'] ) {
-			throw new \RuntimeException( 'not_boardable' );
-		}
-		// The resolved provider, not `wooCommerceActive()`: a site that filtered in a non-WC
-		// provider has said who takes NEW money, and boarding the WC cart would take it through
-		// WooCommerce anyway.
-		if ( ! Payment\Providers::get() instanceof WooPaymentProvider ) {
+		if ( ! self::boardable( $booking ) ) {
 			throw new \RuntimeException( 'not_boardable' );
 		}
 		if ( null === $booking['hold_expires_at'] || (string) $booking['hold_expires_at'] <= $nowUtc->format( 'Y-m-d H:i:s' ) ) {

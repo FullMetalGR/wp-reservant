@@ -214,6 +214,10 @@ final class ApprovePaymentTest extends ReservantTestCase {
 				public function paymentUrl( int $orderId ): ?string {
 					return null;
 				}
+				/** @param array<string, mixed> $booking */
+				public function checkoutUrl( array $booking, string $manageToken ): ?string {
+					return null;
+				}
 				public function flagOrder( int $orderId, string $note ): void {
 				}
 			}

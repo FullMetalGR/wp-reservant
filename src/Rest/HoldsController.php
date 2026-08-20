@@ -4,12 +4,14 @@ declare( strict_types=1 );
 namespace Reservant\Rest;
 
 use Reservant\Application\CancelBooking;
+use Reservant\Application\ConfirmBooking;
 use Reservant\Application\Dto\AppointmentRequest;
 use Reservant\Application\Dto\Customer;
 use Reservant\Application\Dto\EventRequest;
 use Reservant\Application\Dto\HoldRequest;
 use Reservant\Application\Dto\SegmentChoice;
 use Reservant\Application\HoldBooking;
+use Reservant\Application\Payment;
 use Reservant\Application\SlotConflict;
 use Reservant\Domain\Enum\BookingStatus;
 use Reservant\Infrastructure\Db\BookingRepository;
@@ -72,6 +74,12 @@ final class HoldsController {
 
 		$payload                 = $this->presentBooking( $booking );
 		$payload['manage_token'] = (string) $booking['manage_token']; // Shown exactly once.
+		$checkout                = self::checkoutUrl( $booking );
+		if ( null !== $checkout ) {
+			// Omitted rather than sent as null, the convention `BookingPayload`'s optional columns
+			// already follow: a client tests presence, never a null it must know to ignore.
+			$payload['checkout_url'] = $checkout;
+		}
 
 		$response = new \WP_REST_Response( $payload, 201 );
 		// This body carries the manage token - the guest's only credential for the booking. It must
@@ -121,6 +129,36 @@ final class HoldsController {
 			return Errors::failure( $exception );
 		}
 		return new \WP_REST_Response( $this->presentBooking( $cancelled ) );
+	}
+
+	/**
+	 * Where this brand-new hold goes to pay, when it must pay before it can be confirmed at all.
+	 *
+	 * THIS RESPONSE IS THE ONLY PLACE THE LINK CAN BE BUILT. The URL carries the guest's manage
+	 * token, and the plaintext secret exists for exactly as long as `HoldBooking::execute()` is on
+	 * the stack (AGENTS.md section 5 - only the SHA-256 hash is stored, and `BookingPayload` names
+	 * neither). A later read of the booking could not reconstruct it, and no email covers the gap
+	 * either: `Notifications\BookingEmails` deliberately stays silent on a `checkout` hold, because
+	 * that would mail every abandoned checkout and arrive before the confirmation it precedes. So
+	 * the one 201 that already shows the credential once is where the door it opens is named too -
+	 * under the same `Cache-Control: no-store` the token itself needs.
+	 *
+	 * Two questions, each answered by whoever owns it, and neither restated here. `ConfirmBooking`
+	 * says whether this booking MUST be paid online - so the link appears exactly where a confirm
+	 * would answer 402, and nowhere else: not on a free or onsite booking, not on a site whose
+	 * `online` services degraded to onsite with no provider (section 6), not where the owner's
+	 * `reservant/allow_direct_confirm` hatch is open. The provider says WHERE - and answers null for
+	 * a booking with no business in a checkout yet, which is what keeps an `awaiting_approval` hold
+	 * (whose order is created at approval time, one order per booking) from being offered one.
+	 *
+	 * @param array<string, mixed> $booking `HoldBooking::execute()`'s return - the row plus its
+	 *                                      plaintext `manage_token`.
+	 */
+	private static function checkoutUrl( array $booking ): ?string {
+		if ( ! ConfirmBooking::requiresOnlinePayment( $booking ) ) {
+			return null;
+		}
+		return Payment\Providers::get()->checkoutUrl( $booking, (string) $booking['manage_token'] );
 	}
 
 	/** @throws \InvalidArgumentException When the body is not a booking request. */

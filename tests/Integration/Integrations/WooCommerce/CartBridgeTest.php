@@ -243,6 +243,112 @@ final class CartBridgeTest extends ReservantTestCase {
 	}
 
 	/**
+	 * THE WHOLE NON-APPROVAL PATH A REAL GUEST WALKS, with nothing hand-built in the middle: the
+	 * booking widget's own `POST /holds` names a `checkout_url`, and that exact URL - parsed back
+	 * into query args the way a browser would hand them to PHP - boards the cart and lands the
+	 * guest at checkout.
+	 *
+	 * Section 6's "hold -> cart -> order paid -> `ConfirmBooking`" was unreachable before this:
+	 * `CartBridge` listened for a link that no surface anywhere emitted, so a guest on an `online`
+	 * service that needs no approval got a 402 from confirm and had nowhere to go. Everything
+	 * downstream of the cart is pinned by
+	 * `test_checkout_produces_the_bookings_one_order_and_paying_it_confirms`; this is the missing
+	 * first step, and it is deliberately end to end - a test that built the link itself would pass
+	 * on a plugin that still emits none.
+	 */
+	public function test_the_link_the_hold_response_emits_is_the_one_that_boards_the_cart(): void {
+		$request = new \WP_REST_Request( 'POST', '/reservant/v1/holds' );
+		$request->set_body_params(
+			array(
+				'customer'    => array(
+					'name'  => 'Maria',
+					'email' => 'maria@example.com',
+				),
+				'appointment' => array(
+					'start_utc' => $this->sql( 1, '11:00' ),
+					'segments'  => array(
+						array(
+							'service_id'  => $this->serviceId,
+							'resource_id' => $this->staffId,
+						),
+					),
+				),
+			)
+		);
+		$response = rest_do_request( $request );
+		self::assertSame( 201, $response->get_status(), (string) wp_json_encode( $response->get_data() ) );
+		/** @var array<string, mixed> $held */
+		$held = $response->get_data();
+		self::assertArrayHasKey( 'checkout_url', $held, 'the hold response is the only moment the link can be built' );
+
+		$query = array();
+		wp_parse_str( (string) wp_parse_url( (string) $held['checkout_url'], PHP_URL_QUERY ), $query );
+		$bridge                         = $this->enteringBridge( $landed );
+		$_GET[ CartBridge::QUERY_UUID ] = (string) ( $query[ CartBridge::QUERY_UUID ] ?? '' );
+		$_GET['token']                  = (string) ( $query['token'] ?? '' );
+		$bridge->maybeEnter();
+
+		self::assertSame( wc_get_checkout_url(), $landed, 'the guest must arrive at checkout, not back home' );
+		$cart = WC()->cart;
+		self::assertNotNull( $cart );
+		self::assertCount( 1, $cart->get_cart() );
+		foreach ( $cart->get_cart() as $line ) {
+			$facts = CartBridge::lineFacts( $line );
+			self::assertNotNull( $facts );
+			self::assertSame( (string) $held['uuid'], (string) $facts['booking_uuid'] );
+		}
+		self::assertSame( 'pending', $this->status( (string) $held['uuid'] ), 'boarding holds the slot; paying is what confirms it' );
+	}
+
+	/**
+	 * The approval flow's half of the same rule: NO order exists until approval, so an
+	 * `awaiting_approval` hold is offered no checkout link at all. The refusal at the door
+	 * (`test_an_approval_hold_never_boards_the_cart`) is the backstop; this is the guest never
+	 * being pointed at it, which is what keeps "one WC order per booking" true for a customer who
+	 * would otherwise have pressed a payment button.
+	 */
+	public function test_an_approval_hold_is_offered_no_checkout_link(): void {
+		global $wpdb;
+		$services   = new ServiceRepository( $wpdb );
+		$approvalId = $services->insert(
+			array(
+				'name'              => 'Approval Consultation',
+				'type'              => 'appointment',
+				'duration_min'      => 30,
+				'price_minor'       => 4000,
+				'payment_mode'      => 'online',
+				'requires_approval' => 1,
+			)
+		);
+		( new ResourceRepository( $wpdb ) )->linkService( $approvalId, $this->staffId );
+
+		$request = new \WP_REST_Request( 'POST', '/reservant/v1/holds' );
+		$request->set_body_params(
+			array(
+				'customer'    => array(
+					'name'  => 'Maria',
+					'email' => 'maria@example.com',
+				),
+				'appointment' => array(
+					'start_utc' => $this->sql( 2, '11:00' ),
+					'segments'  => array(
+						array(
+							'service_id'  => $approvalId,
+							'resource_id' => $this->staffId,
+						),
+					),
+				),
+			)
+		);
+		$response = rest_do_request( $request );
+		self::assertSame( 201, $response->get_status(), (string) wp_json_encode( $response->get_data() ) );
+		/** @var array<string, mixed> $held */
+		$held = $response->get_data();
+		self::assertSame( 'awaiting_approval', (string) $held['status'] );
+		self::assertArrayNotHasKey( 'checkout_url', $held );
+	}
+
+	/**
 	 * A wrong token and a missing booking answer identically - a silent redirect home, no cart, no
 	 * notice - so the entry is not a booking-existence oracle (the `Frontend\ManageRoute` rule).
 	 */

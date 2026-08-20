@@ -273,7 +273,7 @@ Migrations are versioned and run through `Infrastructure/Db/Migrations` on activ
 | `GET /services`, `GET /services/{id}` | public |
 | `GET /availability` | the query string describes the **whole chain**: `items` (a JSON list of `{service_id, resource_id\|null}`), `from`, `to`, optional `same_staff` and `tz`. Appointments answer the start times for which a complete valid chain exists; an EVENT service answers its occurrences with remaining places instead. Advisory either way. |
 | `GET /occurrences/{id}/seats` | seat grid + which seats are currently blocking |
-| `POST /holds` | takes `items[]` (with optional `seat_ids`), creates the container + items under lock. Returns the booking (`uuid`, `status`, `hold_expires_at`, items) plus `manage_token` - the guest's only credential, shown exactly once, in a `no-store` response. `409` names the failing segment. **Rate-limited.** |
+| `POST /holds` | takes `items[]` (with optional `seat_ids`), creates the container + items under lock. Returns the booking (`uuid`, `status`, `hold_expires_at`, items) plus `manage_token` - the guest's only credential, shown exactly once, in a `no-store` response - and, for a hold that cannot be confirmed until it is paid, `checkout_url`: the section 6 entry link, built from that same once-shown token because this is the only moment it exists. `409` names the failing segment. **Rate-limited.** |
 | `DELETE /holds/{uuid}` | releases immediately; requires `token` |
 | `POST /bookings/{uuid}/confirm` | free / pay-on-site path; `token` or `reservant_manage_bookings` |
 | `GET /bookings/{uuid}` | guest self-service read, requires `token` (or `reservant_manage_bookings`) |
@@ -328,9 +328,9 @@ acceptable on genuinely public reads.
 **No WC class, function, or constant may be referenced outside `src/Integrations/WooCommerce/`.**
 That namespace only loads when `class_exists( 'WooCommerce' )`, and that call itself appears in
 exactly one place: `Application\Payment\Providers`, which decides who takes the money. Everything
-else - use cases, REST controllers, the admin - talks to the five methods of
+else - use cases, REST controllers, the admin - talks to the six methods of
 `Application\Payment\PaymentProvider` (`isAvailable`, `syncService`, `createOrder`, `paymentUrl`,
-`flagOrder`) and never learns whose order it holds. The resolved provider is filterable at
+`checkoutUrl`, `flagOrder`) and never learns whose order it holds. The resolved provider is filterable at
 `reservant/payment_provider`, which is how a site supplies its own gateway - and how the test suite
 reaches the WC-absent path on a machine where WooCommerce is installed.
 
@@ -360,7 +360,15 @@ degrade is indistinguishable from bookings that simply stopped being paid for.
 - **Non-approval flow: hold -> cart -> order paid -> `ConfirmBooking`.** `CartBridge` boards a live
   `pending` hold from the front-channel link `?reservant_checkout={uuid}&token={manage_token}` -
   the guest's manage token is the credential here as everywhere else (section 5), and a missing
-  booking and a wrong token give the same answer, so the entry is no existence oracle. Boarding
+  booking and a wrong token give the same answer, so the entry is no existence oracle. **The guest
+  gets that link from the `POST /holds` 201, as `checkout_url` beside the manage token**: the
+  plaintext credential exists only while `HoldBooking::execute()` runs, so no later read could
+  build it and no email covers the gap (`BookingEmails` deliberately says nothing about a
+  `checkout` hold). It appears for exactly the holds whose confirm would answer 402 -
+  `ConfirmBooking::requiresOnlinePayment()` is the one implementation of that question - and only
+  where the provider has somewhere to send them, which is `CartBridge::boardable()`'s ruling and
+  the same one the door itself enforces. The widget's review step then reads "Continue to payment"
+  and goes there rather than pressing a confirm it knows is refused. Boarding
   empties the cart first (an order that also sold a shampoo would tie that shampoo's fate to the
   booking's), re-asserts the booking's prices on every totals run, and refuses quantity edits.
   Removing a booking line releases the whole booking and sweeps its siblings out of the cart -

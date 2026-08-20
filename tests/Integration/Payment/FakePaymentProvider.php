@@ -31,10 +31,14 @@ final class FakePaymentProvider implements PaymentProvider {
 	/** @var list<array{id: int, note: string}> every flagOrder() call, in order */
 	public array $flagged = array();
 
+	/** @var list<array{uuid: string, token: string}> every checkoutUrl() call, in order */
+	public array $checkoutsAsked = array();
+
 	public function __construct(
 		private readonly bool $available = true,
 		private readonly ?int $productId = 4242,
 		private readonly ?int $orderId = 9001,
+		private readonly ?string $checkout = 'https://example.test/checkout',
 	) {}
 
 	public function isAvailable(): bool {
@@ -55,6 +59,24 @@ final class FakePaymentProvider implements PaymentProvider {
 
 	public function paymentUrl( int $orderId ): ?string {
 		return "https://example.test/pay/{$orderId}";
+	}
+
+	/**
+	 * Deliberately dumb: it answers whatever the constructor was given and never re-decides which
+	 * bookings belong in a checkout. WHICH bookings do is `CartBridge::boardable()`'s ruling, and a
+	 * fake that copied it would only prove the copy right - so the exclusions that belong to the
+	 * provider (an approval hold, whose order is created at approval time) are pinned against real
+	 * WooCommerce, and the exclusions that belong to the CALLER (free/onsite, no provider, the
+	 * direct-confirm hatch) are pinned here, where this fake is the whole point.
+	 *
+	 * @param array<string, mixed> $booking
+	 */
+	public function checkoutUrl( array $booking, string $manageToken ): ?string {
+		$this->checkoutsAsked[] = array(
+			'uuid'  => (string) ( $booking['uuid'] ?? '' ),
+			'token' => $manageToken,
+		);
+		return $this->checkout;
 	}
 
 	public function flagOrder( int $orderId, string $note ): void {

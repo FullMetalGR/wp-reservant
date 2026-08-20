@@ -28,6 +28,14 @@
  *   `ConfirmBooking` refuses every non-pending state), so the flow goes straight to done.
  * - `manage_token` lives in `Flow`'s state and the release hook's ref, nowhere else: no storage,
  *   no cookie, no URL, no attribute, no log line. The hold 201 shows it exactly once.
+ * - A HOLD THAT MUST BE PAID LEAVES FOR A CHECKOUT INSTEAD OF CONFIRMING. When `POST /holds`
+ *   answers a `checkout_url`, the server has already decided this booking cannot be confirmed
+ *   until it is paid, so the review step reads "Continue to payment" and goes there - the flow
+ *   never sends a confirm it knows answers 402, which is exactly where this journey used to dead
+ *   end. The branch is on that FIELD, never on `payment_mode`: whether an `online` booking is
+ *   payable at all depends on the site's provider and its direct-confirm hatch, and the server
+ *   weighed both. The hold is handed off before the navigation - leaving the page is a `pagehide`,
+ *   and the release-on-hide would otherwise cancel the booking the cart is about to be handed.
  * - The when step branches on the availability RESPONSE union (`'starts' in data`), not on a
  *   local guess about the service type - the response already says whether this chain answers
  *   feasible starts or event occurrences.
@@ -578,6 +586,14 @@ function ReviewPanel( {
 				timezone={ timezone }
 				onConfirm={ onConfirm }
 				confirmDisabled={ expired || confirmPending }
+				confirmLabel={
+					// The button says what pressing it does. A hold carrying `checkout_url` is one
+					// the server will not confirm until it is paid, so this one leaves for the
+					// checkout - see `Flow`'s handleConfirm.
+					undefined !== booking.checkout_url
+						? __( 'Continue to payment', 'reservant' )
+						: __( 'Confirm booking', 'reservant' )
+				}
 			/>
 			<NoticeRegion classBase="reservant-flow" notice={ notice } />
 			{ ( expired || null !== notice || recovering ) && (
@@ -601,20 +617,28 @@ function ReviewPanel( {
  * the client is never trusted to release, it only gives slots back early when it can.
  *
  * The target lives in a ref OUTSIDE the once-registered handlers so they always judge the
- * current journey; it is re-derived on every render, which is why the released uuid is
+ * current journey; it is re-derived on every render, which is why the settled uuid is
  * remembered separately - nulling the target inside `fire()` alone would not stick past the
  * release mutation's own re-render, and a second hidden signal would DELETE twice.
+ *
+ * Returns the HAND-OFF, and it is not optional politeness: leaving for the WooCommerce checkout
+ * IS a pagehide, so without it the very navigation that takes a paying guest to their cart would
+ * DELETE the hold on the way out - and the cart would then refuse the booking it was just sent
+ * (`CartBridge::boardable()` admits `pending` only), leaving the guest at a dead end with their
+ * slot given away. Calling it marks this hold as no longer ours to release, through the same
+ * remembered-uuid mechanism a completed release uses, so a re-render between the hand-off and the
+ * pagehide cannot re-arm the target.
  */
-function useReleaseOnHide( held: HeldBooking | null, journeyDone: boolean ): void {
+function useReleaseOnHide( held: HeldBooking | null, journeyDone: boolean ): () => void {
 	const release = useReleaseHold();
 	const releaseTarget = useRef< {
 		uuid: string;
 		token: string;
 		deadlineMs: number | null;
 	} | null >( null );
-	const releasedUuid = useRef< string | null >( null );
+	const settledUuid = useRef< string | null >( null );
 	releaseTarget.current =
-		null !== held && ! journeyDone && releasedUuid.current !== held.uuid
+		null !== held && ! journeyDone && settledUuid.current !== held.uuid
 			? {
 					uuid: held.uuid,
 					token: held.manage_token,
@@ -635,7 +659,7 @@ function useReleaseOnHide( held: HeldBooking | null, journeyDone: boolean ): voi
 			if ( null !== target.deadlineMs && target.deadlineMs <= Date.now() ) {
 				return;
 			}
-			releasedUuid.current = target.uuid;
+			settledUuid.current = target.uuid;
 			releaseTarget.current = null;
 			releaseMutate( { uuid: target.uuid, token: target.token } );
 		};
@@ -651,9 +675,30 @@ function useReleaseOnHide( held: HeldBooking | null, journeyDone: boolean ): voi
 			window.removeEventListener( 'pagehide', fire );
 		};
 	}, [ releaseMutate ] );
+
+	return (): void => {
+		if ( null !== held ) {
+			settledUuid.current = held.uuid;
+		}
+		releaseTarget.current = null;
+	};
 }
 
-function Flow( { config }: { config: WidgetConfig } ): JSX.Element {
+interface FlowProps {
+	config: WidgetConfig;
+	/**
+	 * How the journey leaves this page for a checkout that is not part of it - production uses the
+	 * default, tests inject a recorder, the `Frontend\ManageRoute`/`CartBridge` `$leave` idiom on
+	 * the PHP side. A real navigation cannot be observed or undone in jsdom any more than `exit`
+	 * can be caught in PHPUnit, and "the visitor was sent to the cart" is the whole claim of the
+	 * online path.
+	 */
+	navigate?: ( url: string ) => void;
+}
+
+const defaultNavigate = ( url: string ): void => window.location.assign( url );
+
+function Flow( { config, navigate }: FlowProps ): JSX.Element {
 	const { timezone } = widgetBootstrap();
 	const { data: catalog, isPending: catalogPending, error: catalogError } = useServices();
 
@@ -681,7 +726,7 @@ function Flow( { config }: { config: WidgetConfig } ): JSX.Element {
 	const confirm = useConfirm();
 	/** For handleStartOver's own fire-and-forget release of a live abandoned hold. */
 	const release = useReleaseHold();
-	useReleaseOnHide( held, 'done' === step );
+	const handOffHold = useReleaseOnHide( held, 'done' === step );
 
 	// The synchronous double-submit guards (see the header): set before mutate(), cleared where
 	// each answer settles. The confirm latch stays held through the refusal re-read -
@@ -824,8 +869,31 @@ function Flow( { config }: { config: WidgetConfig } ): JSX.Element {
 		setReviewNotice( notice );
 	};
 
+	/**
+	 * The review step's one action, which is not always a confirm.
+	 *
+	 * A hold the server marked `checkout_url` MUST be paid before anything can confirm it - the
+	 * server said so by emitting the link at all (`HoldsController::checkoutUrl()`, which asks
+	 * `ConfirmBooking` the same question the confirm route would answer 402 to). So the visitor
+	 * leaves for that checkout instead, and the widget never sends a confirm it knows will be
+	 * refused. The branch is on the LINK's presence, never on `payment_mode`: whether a payment is
+	 * actually collectable depends on the site's provider, its direct-confirm hatch and the
+	 * booking's own status, and the server has already weighed all three.
+	 *
+	 * The hold is handed off before navigating. Leaving the page fires `pagehide`, which is the
+	 * release trigger - so without this the guest's own trip to the cart would cancel the booking
+	 * the cart is about to be handed. The busy latch stays set on the way out: the request is a
+	 * navigation, and a second click during it must not start a confirm.
+	 */
 	const handleConfirm = (): void => {
 		if ( null === held || confirmBusy.current ) {
+			return;
+		}
+		const checkout = held.checkout_url;
+		if ( undefined !== checkout ) {
+			confirmBusy.current = true;
+			handOffHold();
+			( navigate ?? defaultNavigate )( checkout );
 			return;
 		}
 		confirmBusy.current = true;
@@ -966,12 +1034,12 @@ function Flow( { config }: { config: WidgetConfig } ): JSX.Element {
 	);
 }
 
-export function BookingFlow( { config }: { config: WidgetConfig } ): JSX.Element {
+export function BookingFlow( { config, navigate }: FlowProps ): JSX.Element {
 	// Created ONCE per mount - `newQueryClient`'s docblock owns the retry and staleTime policy.
 	const [ client ] = useState( newQueryClient );
 	return (
 		<QueryClientProvider client={ client }>
-			<Flow config={ config } />
+			<Flow config={ config } navigate={ navigate } />
 		</QueryClientProvider>
 	);
 }

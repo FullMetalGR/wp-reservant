@@ -120,6 +120,26 @@ final class WooPaymentProvider implements PaymentProvider {
 		return $order instanceof \WC_Order ? $order->get_checkout_payment_url() : null;
 	}
 
+	/**
+	 * The non-approval flow's door: `CartBridge`'s front-channel entry link, but only for a booking
+	 * that link would actually admit.
+	 *
+	 * The condition is `CartBridge::boardable()` itself rather than a second reading of section 6's
+	 * "belongs in a cart" rule - one rule, two readers, so a link can never be offered for a booking
+	 * the cart then refuses as `not_boardable`. No order exists at this point and none should: on
+	 * this flow the order is what checkout produces, and `OrderObserver` is what turns paying it
+	 * back into a confirmed booking. (`paymentUrl()` above is the OTHER flow - an order that already
+	 * exists because a human approved the booking.)
+	 *
+	 * @param array<string, mixed> $booking
+	 */
+	public function checkoutUrl( array $booking, string $manageToken ): ?string {
+		if ( ! CartBridge::boardable( $booking ) ) {
+			return null;
+		}
+		return CartBridge::entryUrl( (string) ( $booking['uuid'] ?? '' ), $manageToken );
+	}
+
 	public function flagOrder( int $orderId, string $note ): void {
 		$order = wc_get_order( $orderId );
 		if ( $order instanceof \WC_Order ) {

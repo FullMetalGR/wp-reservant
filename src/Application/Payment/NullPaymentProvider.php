@@ -40,6 +40,18 @@ final class NullPaymentProvider implements PaymentProvider {
 		return null;
 	}
 
+	/**
+	 * Nowhere - which IS the degrade. With nothing able to take money, `ConfirmBooking` stops
+	 * refusing `online_payment_required`, so the booking confirms where it stands and there is no
+	 * checkout to send anybody to. A URL here would be the one thing worse than no payment: a link
+	 * to a door that opens onto nothing.
+	 *
+	 * @param array<string, mixed> $booking
+	 */
+	public function checkoutUrl( array $booking, string $manageToken ): ?string {
+		return null;
+	}
+
 	public function flagOrder( int $orderId, string $note ): void {
 		// Nothing to flag. Not an error: the cancellation itself has already been audited by the
 		// use case that called this, and that record is the one an operator reads.

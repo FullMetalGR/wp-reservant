@@ -108,10 +108,7 @@ final class ConfirmBooking {
 		// `Admin\PaymentNotice` and takes the money in person; the alternative is a booking form
 		// that answers 402 forever and looks broken. A settled payment skips the refusal outright:
 		// the payment it would be demanding is the one being reported.
-		if ( ! $paymentSettled
-			&& PaymentMode::Online->value === $booking['payment_mode']
-			&& Payment\Providers::get()->isAvailable()
-			&& ! apply_filters( 'reservant/allow_direct_confirm', false, $booking ) ) {
+		if ( ! $paymentSettled && self::requiresOnlinePayment( $booking ) ) {
 			throw new \RuntimeException( 'online_payment_required' );
 		}
 		// The hold TTL is the authority: a checkout that outlives it loses the slot (section 6).
@@ -140,6 +137,29 @@ final class ConfirmBooking {
 			BookingSnapshot::fromArray( $snapshot + self::carriedToken( $manageToken, $booking ) )
 		);
 		return $snapshot;
+	}
+
+	/**
+	 * Whether this booking must be paid online before anyone may confirm it - the
+	 * `online_payment_required` refusal above, asked as a question.
+	 *
+	 * One implementation, two readers, so the refusal and the surface that must ROUTE a guest around
+	 * it cannot drift: `Rest\HoldsController` emits a checkout link on exactly the holds this answers
+	 * true for, which is precisely the set that would otherwise meet a 402 with nowhere to go. Three
+	 * clauses, each already load-bearing above - the `online` mode, the section 6 degrade when no
+	 * provider can take money (an `online` service then behaves as `onsite`), and the site's
+	 * `reservant/allow_direct_confirm` escape hatch, which says this booking confirms without paying
+	 * and must therefore not be sent to a checkout either.
+	 *
+	 * NOT a statement about WHERE the payment happens - `Payment\PaymentProvider::checkoutUrl()`
+	 * answers that, and answers null for a booking that has no business in a checkout yet.
+	 *
+	 * @param array<string, mixed> $booking booking row
+	 */
+	public static function requiresOnlinePayment( array $booking ): bool {
+		return PaymentMode::Online->value === (string) ( $booking['payment_mode'] ?? '' )
+			&& Payment\Providers::get()->isAvailable()
+			&& ! apply_filters( 'reservant/allow_direct_confirm', false, $booking );
 	}
 
 	/**

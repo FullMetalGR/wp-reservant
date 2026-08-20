@@ -8,7 +8,7 @@ namespace Reservant\Application\Payment;
  *
  * **No WooCommerce class, function or constant may be referenced outside
  * `src/Integrations/WooCommerce/`.** That rule is what this interface exists to make keepable:
- * everything else - use cases, REST controllers, the admin - talks to these five methods and never
+ * everything else - use cases, REST controllers, the admin - talks to these six methods and never
  * learns whether an order is a `WC_Order`, a Stripe session, or nothing at all.
  *
  * **Absence is a supported configuration, not an error.** With WooCommerce inactive, `Payment\Providers`
@@ -59,6 +59,28 @@ interface PaymentProvider {
 
 	/** The URL a customer pays that order at, or null when there is nothing to pay. */
 	public function paymentUrl( int $orderId ): ?string;
+
+	/**
+	 * Where a guest takes THIS booking to pay, before any order for it exists - the entry to the
+	 * non-approval flow of AGENTS.md section 6 ("hold -> cart -> order paid -> `ConfirmBooking`").
+	 *
+	 * Null means "not here, not now", and it is the ordinary answer rather than a failure: a free or
+	 * onsite booking, a booking waiting on a human, one that already has its order, or a site whose
+	 * provider takes money some other way. A caller uses the answer to ROUTE a guest, so a provider
+	 * must only return a URL that will still admit this booking when the guest arrives.
+	 *
+	 * Deliberately separate from `paymentUrl()`, which pays an order that ALREADY exists (the
+	 * approval flow). Here there is no order yet and there must not be one: on this flow the order is
+	 * what checkout produces.
+	 *
+	 * The manage token is the guest's own plaintext credential (AGENTS.md section 5), passed because
+	 * it exists only at the moment a hold is created and the door the URL leads to has to verify the
+	 * arriving guest exactly as every other guest surface does. A provider must not store it.
+	 *
+	 * @param array<string, mixed> $booking Booking row plus its `items`.
+	 * @param string               $manageToken The guest's plaintext manage token.
+	 */
+	public function checkoutUrl( array $booking, string $manageToken ): ?string;
 
 	/**
 	 * Leave a note on the order for the owner - the cancellation path.

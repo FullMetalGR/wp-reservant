@@ -29,6 +29,13 @@ interface ReviewStepProps {
 	onConfirm: () => void;
 	/** True once the hold expired or while the confirm is in flight. */
 	confirmDisabled: boolean;
+	/**
+	 * What the button says. The flow supplies it because the flow owns where the button GOES: an
+	 * online booking that must be paid before it can be confirmed leaves for a checkout, and a
+	 * button reading "Confirm booking" that instead sends the visitor to a payment page is a lie
+	 * about what pressing it does.
+	 */
+	confirmLabel: string;
 }
 
 export function ReviewStep( {
@@ -37,6 +44,7 @@ export function ReviewStep( {
 	timezone,
 	onConfirm,
 	confirmDisabled,
+	confirmLabel,
 }: ReviewStepProps ): JSX.Element {
 	const formatter = new Intl.DateTimeFormat( undefined, {
 		weekday: 'short',
@@ -86,7 +94,7 @@ export function ReviewStep( {
 				onClick={ onConfirm }
 				disabled={ confirmDisabled }
 			>
-				{ __( 'Confirm booking', 'reservant' ) }
+				{ confirmLabel }
 			</button>
 		</div>
 	);

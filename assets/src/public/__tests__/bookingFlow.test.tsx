@@ -310,7 +310,10 @@ function bodyOf( call: FetchCall | undefined ): unknown {
 	return JSON.parse( String( call[ 1 ]?.body ) ) as unknown;
 }
 
-function renderFlow( overrides: Partial< WidgetConfig > = {} ): void {
+function renderFlow(
+	overrides: Partial< WidgetConfig > = {},
+	navigate?: ( url: string ) => void
+): void {
 	render(
 		<BookingFlow
 			config={ {
@@ -321,8 +324,20 @@ function renderFlow( overrides: Partial< WidgetConfig > = {} ): void {
 				token: null,
 				...overrides,
 			} }
+			navigate={ navigate }
 		/>
 	);
+}
+
+/**
+ * A hold the server says must be paid before anything can confirm it: the `checkout_url` the
+ * `POST /holds` 201 carries beside the manage token, on an `online` booking. The URL is the one
+ * `CartBridge::entryUrl()` builds - the query arg and the token in it are the whole credential.
+ */
+const CHECKOUT_URL = `https://shop.test/?reservant_checkout=${ UUID }&token=${ TOKEN }`;
+
+function payableHold(): HeldBooking {
+	return heldBooking( { payment_mode: 'online', checkout_url: CHECKOUT_URL } );
 }
 
 /** Preselected service+staff mounts land on the when step: pick today, pick the 23:00 slot. */
@@ -578,6 +593,62 @@ describe( 'BookingFlow', () => {
 		await screen.findByText( 'Your booking is confirmed.' );
 		await act( async () => {} );
 
+		forceVisibilityState( 'hidden' );
+		act( () => {
+			document.dispatchEvent( new Event( 'visibilitychange' ) );
+		} );
+		await act( async () => {} );
+
+		expect( callsTo( fetchMock, '/holds/', 'DELETE' ) ).toHaveLength( 0 );
+	} );
+
+	/**
+	 * The non-approval online path, end to end on the client: a hold that must be paid before it
+	 * can be confirmed sends the visitor to the checkout the server named, and never to a confirm
+	 * that would answer 402 with nowhere to go - the dead end this route exists to remove.
+	 */
+	it( 'leaves for the checkout instead of confirming when the hold must be paid online', async () => {
+		const navigate = jest.fn();
+		const fetchMock = installFetch( {
+			availability: () => APPOINTMENT_AVAILABILITY,
+			hold: () => jsonResponse( payableHold(), 201 ),
+		} );
+		renderFlow( {}, navigate );
+
+		await pickTodaySlot();
+		await submitDetails();
+
+		// The button says what pressing it does, and there is no confirm to press instead.
+		const pay = await screen.findByRole( 'button', { name: 'Continue to payment' } );
+		expect(
+			screen.queryByRole( 'button', { name: 'Confirm booking' } )
+		).not.toBeInTheDocument();
+
+		fireEvent.click( pay );
+		await act( async () => {} );
+
+		expect( navigate ).toHaveBeenCalledWith( CHECKOUT_URL );
+		expect( callsTo( fetchMock, '/confirm', 'POST' ) ).toHaveLength( 0 );
+	} );
+
+	it( 'does not release the hold on the way to the checkout - the cart needs it alive', async () => {
+		const fetchMock = installFetch( {
+			availability: () => APPOINTMENT_AVAILABILITY,
+			hold: () => jsonResponse( payableHold(), 201 ),
+		} );
+		renderFlow( {}, () => {} );
+
+		await pickTodaySlot();
+		await submitDetails();
+		fireEvent.click( await screen.findByRole( 'button', { name: 'Continue to payment' } ) );
+		await act( async () => {} );
+
+		// Leaving the page IS a pagehide, and the release-on-hide would fire on it. Releasing here
+		// cancels the booking the cart is about to be handed, and the cart admits `pending` only -
+		// the guest would arrive to "this booking cannot be taken to checkout", slot already gone.
+		act( () => {
+			window.dispatchEvent( new Event( 'pagehide' ) );
+		} );
 		forceVisibilityState( 'hidden' );
 		act( () => {
 			document.dispatchEvent( new Event( 'visibilitychange' ) );
